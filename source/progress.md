@@ -1,5 +1,17 @@
 # Progress Log — High-Performance Validation API
 
+## 2026-10-26 — Admin dashboard UX redesign started
+- Began a full admin dashboard audit before editing, covering the shared navigation shell, all view sections, cards, forms, tables, dialogs, feedback states, and responsive rules.
+- Design direction: restrained premium operations console; clear page titles and task-oriented descriptions; consistent spacing and surface hierarchy; accessible focus and readable contrast; concise Indonesian operational copy.
+- Preserve all existing IDs, `data-*` hooks, routes, permissions, and event behavior while changing presentation.
+- Current phase: source audit, followed by shared UI system implementation and copy/layout refinement.
+
+## 2026-10-26 — Admin dashboard UX redesign completed
+- Standardized headings, card surfaces, navigation, buttons, forms, tables, status chips, dynamic product/package cards, spacing, and responsive sizing across 13 admin views.
+- Clarified analytics, admin access, order, and other page descriptions. Replaced the static system-health claim and inert notification/help controls with a neutral workspace label.
+- Preserved all 327 HTML IDs and all 17 `data-view-target` hooks. `git diff --check` is clean; no tests were run.
+- Deployed the admin UI to VPS `43.157.205.163` as a web-only update. Backed up the previous HTML/CSS at `/opt/rajacek/backups/admin-ui-20261026-005359`, verified local/staged and public CSS SHA-256 hashes, checked the new HTML at localhost and `www.rajacek.com`, and confirmed API health plus both active services with unchanged restart counts.
+
 ## 2026-10-20 — Planning Session Started
 
 ### Completed

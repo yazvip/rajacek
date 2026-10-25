@@ -19,3 +19,9 @@
 - Bootstrap config includes a `found`/registered mapping; existing persisted mappings may still be displayed as configured even though Tukangcek overrides them at runtime.
 - README still documents an outdated e-wallet request ID (`dana`); docs and broader tests need finishing. Git diff unavailable because this workspace is not a Git repository.
 - Attempt to insert into empty findings using apply_diff failed (empty search is forbidden); created the file content with write_to_file instead.
+## Admin dashboard UX redesign — 2026-10-26
+- Admin pages are the views inside `source/web/index.html`; `source/web/app.js` owns the existing rendering and event wiring; `source/web/styles.css` is the shared visual layer.
+- Keep IDs/data attributes and route behavior stable because the UI is a large static SPA whose renderers target these selectors directly.
+- The public docs stylesheet is separate; this task targets admin views only.
+- Existing project files include duplicate legacy root-level Rust files; the admin UI source of truth is `source/web/`.
+- Admin UX refresh applies a shared CSS system in `source/web/styles.css`, concise operational copy in each of the 13 admin view headings, and a stylesheet cache-version bump in `source/web/index.html`. The notification icon and placeholder help affordance had no meaningful action; they were removed, and the hard-coded all-systems-normal message was replaced by a neutral “Panel administrasi” context label.

@@ -3,6 +3,7 @@
 Dokumen alur lengkap. Snapshot: 25 Oktober 2026 malam.
 Binary live: api `ffa14f52…`, worker `7bc1a330…`, migrasi s/d `0022`.
 Produksi: https://rajacek.com (+ www) — VPS 43.157.205.163, Ubuntu 24.04.
+Admin UI terakhir diperbarui 26 Okt 2026 (CSS `?v=20261026-6`), deploy file web tanpa restart; backup: `/opt/rajacek/backups/admin-ui-20261026-005359`.
 
 ```
 Internet → Cloudflare → nginx (TLS Let's Encrypt) → API 127.0.0.1:8080
