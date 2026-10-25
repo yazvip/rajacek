@@ -7,9 +7,9 @@
       name="description"
       content="Rajacek Console — pusat kendali premium untuk API validasi rekening, e-wallet, dan WhatsApp."
     />
-    <meta name="theme-color" content="#081325" />
+    <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
-    <link rel="stylesheet" href="/styles.css?v=20261026-7" />
+    <link rel="stylesheet" href="/styles.css?v=20261026-8" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -21,10 +21,8 @@
       <aside class="sidebar" id="sidebar" aria-label="Navigasi utama">
         <div class="brand-wrap">
           <a class="brand" href="#overview" aria-label="Rajacek Console">
-            <span class="brand-mark" aria-hidden="true">
-              <svg viewBox="0 0 34 34" fill="none"><path d="M8.5 11.2c0-2.27 1.84-4.1 4.1-4.1h8.8c2.26 0 4.1 1.83 4.1 4.1v11.6c0 2.27-1.84 4.1-4.1 4.1h-8.8a4.1 4.1 0 0 1-4.1-4.1V11.2Z" fill="currentColor" opacity=".92"/><path d="M12.2 17h9.6M17 12.2v9.6" stroke="#071225" stroke-width="2.5" stroke-linecap="round"/></svg>
-            </span>
-            <span>raja<span>cek</span></span>
+            <img class="brand-mark-img" src="/logo-mark.png" alt="Rajacek" />
+            <span class="brand-name">raja<span>cek</span><small>Panel Admin</small></span>
           </a>
           <span class="workspace-pill"><span class="status-dot"></span> Production</span>
         </div>
@@ -106,19 +104,19 @@
           <div class="profile-card">
             <div class="avatar" id="profile-avatar">A</div>
             <div class="profile-name"><strong id="profile-name">Administrator</strong><small id="profile-email">Memuat sesi...</small></div>
-            <button class="icon-button" id="logout-button" type="button" aria-label="Keluar">
-              <svg viewBox="0 0 24 24" fill="none"><path d="M10 5H6.7A2.7 2.7 0 0 0 4 7.7v8.6A2.7 2.7 0 0 0 6.7 19H10M14 8l4 4-4 4M18 12H9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            </button>
           </div>
+          <button class="icon-button" id="logout-button" type="button" aria-label="Keluar">
+            <svg viewBox="0 0 24 24" fill="none"><path d="M10 5H6.7A2.7 2.7 0 0 0 4 7.7v8.6A2.7 2.7 0 0 0 6.7 19H10M14 8l4 4-4 4M18 12H9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
         </div>
       </aside>
 
       <main class="main-content">
         <header class="topbar">
-          <div class="topbar-leading">
-            <button class="menu-button" id="menu-button" type="button" aria-label="Buka navigasi">
-              <span></span><span></span><span></span>
-            </button>
+          <button class="menu-button" id="menu-button" type="button" aria-label="Buka navigasi">
+            <span></span><span></span><span></span>
+          </button>
+          <div class="topbar-text">
             <div class="breadcrumb"><span>Rajacek</span><span class="breadcrumb-separator">/</span><strong id="breadcrumb-title">Ringkasan</strong></div>
           </div>
           <div class="topbar-actions">
