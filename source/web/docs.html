@@ -53,7 +53,7 @@
       .callout.info { background:#e7fdf7; border-color:#b8f1df; border-left-color:var(--mint); color:#087451; }
       .callout p { color:inherit; margin:0; }
       .docs-actions { display:flex; gap:.7rem; flex-wrap:wrap; margin:1.3rem 0; }
-      .button-primary { background:var(--blue); box-shadow:0 12px 24px #2563eb38; }
+      .docs-body .button-primary { background:var(--blue); box-shadow:0 12px 24px #2563eb38; color:#fff; }
       .button-primary:hover { background:#174fc4; }
       .button-quiet { border-color:var(--line); color:#28415f; }
       .docs-body details { border-bottom:1px solid var(--line); padding:1.05rem 0; }
@@ -109,7 +109,7 @@
           <li>Untuk cek rekening, ambil dulu kode bank 3 digit dari <code>GET /v1/banks</code>.</li>
           <li>Kirim request POST ke endpoint validasi dengan header <code>X-API-Key</code>. Selesai — contohnya ada di bawah ini.</li>
         </ol>
-        <div class="callout"><strong>Trial habis?</strong> Setelah kuota trial habis atau 7 hari berakhir, API akan menolak cek baru dengan kode <code>402</code>. Hubungi admin untuk lanjut ke paket berbayar — kuota dan masa aktif Anda diatur dari panel admin.</div>
+        <div class="callout"><strong>Trial habis?</strong> Setelah kuota trial habis atau 7 hari berakhir, API akan menolak cek baru dengan kode <code>402</code>. Lanjutkan ke paket berbayar lewat portal member — beli paket dengan QRIS dan kuota langsung aktif.</div>
         <pre><code>curl -X POST $BASE_URL/v1/validate/bank-account \
   -H "Content-Type: application/json" \
   -H "X-API-Key: rv_live_CONTOH" \
@@ -149,7 +149,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         <ul>
           <li>Setiap kunci punya <strong>izin (scope)</strong> per produk: <code>validate:bank_account</code>, <code>validate:ewallet</code>, <code>validate:whatsapp</code>, atau <code>validate:*</code> untuk semua produk. Kunci tanpa izin produk akan ditolak dengan kode 403.</li>
           <li>Kunci hanya ditampilkan <strong>satu kali</strong>, saat dibuat. Sesudah itu server hanya menyimpan sidik jarinya (hash) — kunci asli tidak bisa ditampilkan lagi.</li>
-          <li>Kalau kunci Anda bocor, segera minta admin mencabutnya. Kunci yang sudah dicabut langsung ditolak dengan kode 401.</li>
+          <li>Kalau kunci Anda bocor, segera hubungi kami (email apivalidasi@gmail.com atau Telegram @xyz_yaz) agar kunci tersebut dicabut. Kunci yang sudah dicabut langsung ditolak dengan kode 401.</li>
         </ul>
 
         <h2 id="idempotensi">Idempotensi</h2>
@@ -161,20 +161,20 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         </ul>
 
         <h2 id="pembelian-paket">Pembelian paket (portal member)</h2>
-        <p>Member yang masuk lewat portal bisa membeli paket sendiri dengan QRIS, tanpa menunggu admin. Alurnya: lihat pratinjau efek pembelian → buat order → pindai QR → tekan "Saya sudah bayar". Ketentuan yang berlaku:</p>
+        <p>Member yang masuk lewat portal bisa membeli paket sendiri dengan QRIS. Alurnya: lihat pratinjau efek pembelian → buat order → pindai QR → tekan "Saya sudah bayar". Ketentuan yang berlaku:</p>
         <ul>
           <li><strong>Kuota tidak pernah hilang karena membeli.</strong> Kuota paket baru <em>ditambahkan</em> ke sisa kuota Anda; masa aktif diperpanjang dari tanggal kedaluwarsa yang masih berjalan (atau dari sekarang bila sudah lewat); rate limit menjadi yang terbesar antara rate aktif dan rate paket baru.</li>
           <li><strong>Satu order menunggu per member.</strong> Membuat order kedua selagi ada order menunggu akan mengembalikan order yang sama (bukan QR baru).</li>
           <li>QR berlaku sesuai masa yang ditampilkan (hitungan mundur di portal). Order yang kedaluwarsa atau dibatalkan tidak memotong apa pun.</li>
-          <li>Pembayaran yang sudah lunas tapi nominalnya tidak cocok, atau membernya dinonaktifkan, <strong>ditahan untuk peninjauan admin</strong> — kuota tidak di-grant otomatis sampai admin menyelesaikan.</li>
-          <li><strong>Harga promo:</strong> bila admin mengaktifkan promo pada suatu paket, harga yang tampil di portal (harga asli dicoret + badge promo + hitung mundur) adalah harga yang benar-benar ditagih — bukan pajangan.</li>
+          <li>Pembayaran yang sudah lunas tapi nominalnya tidak cocok, atau membernya dinonaktifkan, <strong>ditahan untuk peninjauan</strong> — kuota tidak di-grant otomatis sampai peninjauan selesai.</li>
+          <li><strong>Harga promo:</strong> bila ada promo aktif pada suatu paket, harga yang tampil di portal (harga asli dicoret + badge promo + hitung mundur) adalah harga yang benar-benar ditagih — bukan pajangan.</li>
           <li>Endpoint pembelian hanya tersedia lewat sesi portal (<code>/v1/member/packages</code>, <code>/v1/member/orders</code> dan turunannya), bukan lewat API key validasi.</li>
         </ul>
 
         <h2 id="rate-limit-kuota">Rate limit &amp; kuota</h2>
         <ul>
-          <li>Batas bawaan: <strong>60 request per menit</strong> untuk setiap kunci (admin bisa mengubahnya). Sisa jatah Anda ada di header respons <code>X-RateLimit-Remaining</code>. Kalau batas terlampaui, API menjawab <strong>429</strong> — tunggu sebentar (lihat header <code>Retry-After</code>), lalu coba lagi.</li>
-          <li><strong>Valid dan Belum KYC memotong 1 hit; hasil Tidak Valid gratis hingga 100 per hari per kunci, selebihnya 1 hit.</strong> Tepatnya: hasil <code>valid</code> dan <code>not_kyc</code> (akun e-wallet belum KYC) selalu memotong 1 hit. Hasil <code>invalid</code> dan <code>not_found</code> — satu pool bersama — gratis untuk 100 hasil pertama per kunci per hari kalender WIB; mulai hasil tidak-valid ke-101 pada hari itu, masing-masing memotong 1 hit seperti biasa. Cek yang gagal karena error, pending, atau kena rate limit <strong>tidak</strong> memotong kuota dan tidak memakan jatah gratis. Pengiriman ulang dengan <code>Idempotency-Key</code> yang sama tidak pernah memotong dan tidak memakan jatah. Catatan: kunci bersaldo 0 tetap ditolak <code>402</code> sebelum cek berjalan, jadi jatah gratis hanya bisa dipakai selama saldo masih di atas 0. Hitungan gratis hari ini tampil di portal member dan di daftar kunci panel admin.</li>
+          <li>Batas bawaan: <strong>60 request per menit</strong> untuk setiap kunci. Sisa jatah Anda ada di header respons <code>X-RateLimit-Remaining</code>. Kalau batas terlampaui, API menjawab <strong>429</strong> — tunggu sebentar (lihat header <code>Retry-After</code>), lalu coba lagi.</li>
+          <li><strong>Valid dan Belum KYC memotong 1 hit; hasil Tidak Valid gratis hingga 100 per hari per kunci, selebihnya 1 hit.</strong> Tepatnya: hasil <code>valid</code> dan <code>not_kyc</code> (akun e-wallet belum KYC) selalu memotong 1 hit. Hasil <code>invalid</code> dan <code>not_found</code> — satu pool bersama — gratis untuk 100 hasil pertama per kunci per hari kalender WIB; mulai hasil tidak-valid ke-101 pada hari itu, masing-masing memotong 1 hit seperti biasa. Cek yang gagal karena error, pending, atau kena rate limit <strong>tidak</strong> memotong kuota dan tidak memakan jatah gratis. Pengiriman ulang dengan <code>Idempotency-Key</code> yang sama tidak pernah memotong dan tidak memakan jatah. Catatan: kunci bersaldo 0 tetap ditolak <code>402</code> sebelum cek berjalan, jadi jatah gratis hanya bisa dipakai selama saldo masih di atas 0. Hitungan gratis hari ini tampil di portal member.</li>
           <li>Sisa kuota Anda selalu tampil di <code>meta.remaining_quota</code> pada setiap respons.</li>
         </ul>
 
@@ -299,7 +299,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         <p>Isi <code>result</code> selalu memuat <strong>nomor yang Anda cek</strong> (<code>account_number</code> untuk bank &amp; e-wallet, <code>phone_number</code> untuk WhatsApp) dan <strong>kode layanannya</strong> (<code>service_code</code>: kode bank 3 digit, nama e-wallet seperti <code>dana</code>, atau <code>whatsapp</code>). Untuk bank ada juga <code>bank_name</code> — nama banknya, misalnya BCA atau BRI. Bila tersedia, hasil dilengkapi <code>account_name</code> (nama pemilik, selalu huruf besar semua), <code>registered</code> (terdaftar atau tidak), dan <code>reference</code>.</p>
 
         <h2 id="kode-error">Kode error</h2>
-        <p>Kalau request gagal, responsnya selalu berbentuk <code>{ "code", "message", "request_id" }</code>. Simpan <code>request_id</code> itu — admin membutuhkannya untuk menelusuri masalah Anda. Contoh respons saat kena rate limit (429):</p>
+        <p>Kalau request gagal, responsnya selalu berbentuk <code>{ "code", "message", "request_id" }</code>. Simpan <code>request_id</code> itu — sertakan saat menghubungi kami agar masalah Anda cepat ditelusuri. Contoh respons saat kena rate limit (429):</p>
         <pre><code>{
   "code": "rate_limited",
   "message": "Batas laju tercapai; coba lagi nanti.",
@@ -309,7 +309,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
           <tr><th>HTTP</th><th><code>code</code></th><th>Arti &amp; tindakan</th></tr>
           <tr><td>400</td><td><code>bad_request</code></td><td>Ada field yang hilang, formatnya salah, atau kode bank/e-wallet tidak dikenal. Periksa lagi isi request Anda.</td></tr>
           <tr><td>401</td><td><code>unauthorized</code></td><td>Kunci tidak ada, salah, atau sudah dicabut.</td></tr>
-          <tr><td>402</td><td><code>quota_exhausted</code></td><td>Kuota paket Anda habis. Hubungi admin untuk isi ulang atau ganti paket.</td></tr>
+          <tr><td>402</td><td><code>quota_exhausted</code></td><td>Kuota paket Anda habis. Beli paket di portal member untuk menambah kuota.</td></tr>
           <tr><td>403</td><td><code>forbidden</code></td><td>API key Anda tidak punya izin (scope) untuk produk ini.</td></tr>
           <tr><td>409</td><td><code>conflict</code></td><td>Idempotency-Key yang sama sudah dipakai dengan isi berbeda, atau request sebelumnya masih diproses. Untuk operasi baru, pakai kunci baru.</td></tr>
           <tr><td>429</td><td><code>rate_limited</code></td><td>Anda terlalu cepat (rate limit) atau antrean sedang penuh. Tunggu sesuai header <code>Retry-After</code>, lalu coba lagi.</td></tr>
@@ -320,7 +320,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         <div class="callout info"><p><strong>Cara aman mengulang:</strong> untuk error 429, 502, dan 503, kirim ulang request yang sama persis dengan <code>Idempotency-Key</code> yang sama. Anda tidak akan ditagih dua kali.</p></div>
 
         <h2 id="openapi">OpenAPI JSON</h2>
-        <p>Lebih suka memakai Postman atau membuat SDK sendiri? Unduh spesifikasi mesinnya di <a href="/openapi.json"><code>/openapi.json</code></a> (OpenAPI 3.1), lalu impor ke Postman/Insomnia atau generator klien favorit Anda. Isinya hanya endpoint untuk member — endpoint admin tidak disertakan.</p>
+        <p>Lebih suka memakai Postman atau membuat SDK sendiri? Unduh spesifikasi mesinnya di <a href="/openapi.json"><code>/openapi.json</code></a> (OpenAPI 3.1), lalu impor ke Postman/Insomnia atau generator klien favorit Anda. Isinya hanya endpoint untuk member.</p>
 
         <h2 id="faq">FAQ</h2>
         <h3>Apakah nama pemilik rekening selalu tersedia?</h3>

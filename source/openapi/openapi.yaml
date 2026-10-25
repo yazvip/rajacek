@@ -10,10 +10,8 @@ info:
     Nilai rekening, nomor e-wallet, dan nomor telepon harus diperlakukan sebagai data sensitif.
     Jangan menulis nilai tersebut ke log aplikasi klien atau membagikannya tanpa dasar hukum/izin yang sesuai.
 servers:
-  - url: http://localhost:8080
-    description: Pengembangan lokal
-  - url: https://api.example.com
-    description: Contoh produksi; ganti dengan domain Rajacek Anda
+  - url: https://rajacek.com
+    description: Produksi
 security:
   - ApiKeyAuth: []
 tags:
@@ -67,46 +65,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PublicStatus'
-  /v1/admin/site-settings:
-    get:
-      tags: [System]
-      operationId: getSiteSettings
-      summary: Pengaturan pengumuman & maintenance (admin)
-      description: Memerlukan sesi admin. Peran Manager ditegakkan saat integrasi (lihat komentar AUTHZ-ROLE di kode).
-      responses:
-        '200':
-          description: Pengaturan situs saat ini.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SiteSettings'
-        '401': { $ref: '#/components/responses/Unauthorized' }
-    put:
-      tags: [System]
-      operationId: updateSiteSettings
-      summary: Ubah pengumuman & maintenance (admin)
-      description: |
-        Menyimpan teks/aktif pengumuman, teks/aktif banner maintenance,
-        dan sakelar maintenance_block_validations. Perubahan sakelar
-        tercatat di jejak audit admin. Bila sakelar aktif, endpoint
-        validasi menjawab 503 "Layanan sedang dalam pemeliharaan";
-        health, login, portal, dan endpoint lain tidak diblokir.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/SiteSettings'
-      responses:
-        '200':
-          description: Pengaturan situs setelah disimpan.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SiteSettings'
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '503': { $ref: '#/components/responses/ServiceUnavailable' }
   /v1/banks:
     get:
       tags: [System]
@@ -224,119 +182,6 @@ paths:
         '429': { $ref: '#/components/responses/RateLimited' }
         '502': { $ref: '#/components/responses/ProviderError' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
-  # AREA 3 (admin; memerlukan sesi admin — penegakan peran di-wire
-  # koordinator saat integrasi; endpoint lama admin tidak didokumen
-  # di file ini, jadi hanya endpoint baru area ini yang ditambahkan).
-  /v1/admin/orders:
-    get:
-      tags: [System]
-      operationId: listAdminOrders
-      summary: Daftar order QRIS admin dengan filter status + rentang tanggal
-      description: |
-        Filter: `status` (waiting, waiting_payment, paid, granted, needs_review, expired, canceled; nilai lain -> 400),
-        `from` + `to` (YYYY-MM-DD, harus berpasangan, maks 366 hari). Respons tetap array seperti sebelumnya.
-      parameters:
-        - name: status
-          in: query
-          schema: { type: string }
-        - name: from
-          in: query
-          schema: { type: string, format: date }
-        - name: to
-          in: query
-          schema: { type: string, format: date }
-        - name: limit
-          in: query
-          schema: { type: integer, default: 100 }
-        - name: offset
-          in: query
-          schema: { type: integer, default: 0 }
-      responses:
-        '200':
-          description: Daftar order admin.
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-  /v1/admin/orders/reconciliation:
-    get:
-      tags: [System]
-      operationId: getOrdersReconciliation
-      summary: Ringkasan rekonsiliasi (jumlah + nominal per status) untuk satu rentang tanggal
-      description: |
-        `from` dan `to` wajib (maks 366 hari). Ringkasan memecah SEMUA status dalam rentang itu
-        (waiting = waiting_payment), sehingga total per status dapat dicocokkan dengan daftar pada rentang yang sama.
-      parameters:
-        - name: from
-          in: query
-          required: true
-          schema: { type: string, format: date }
-        - name: to
-          in: query
-          required: true
-          schema: { type: string, format: date }
-      responses:
-        '200':
-          description: Ringkasan rekonsiliasi.
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-  /v1/admin/orders/{id}/refund-record:
-    post:
-      tags: [System]
-      operationId: createRefundRecord
-      summary: Catat refund admin untuk satu order (PENCATATAN SAJA — tidak menggerakkan uang maupun kuota)
-      description: |
-        Admin mengembalikan uang lewat dashboard provider secara manual, lalu mencatatnya di sini.
-        Menolak: order tak ditemukan (404), order yang tidak pernah lunas / paid_at NULL (409),
-        nominal 0 atau alasan kosong (400), dan total kumulatif refund melebihi nominal order (409).
-        Refund parsial bertahap diizinkan; setelah total mencapai nominal penuh, refund berikutnya ditolak.
-        Menulis baris audit admin. Tidak memanggil provider, tidak mengubah status order, tidak mengubah kuota.
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [amount_idr, reason]
-              properties:
-                amount_idr: { type: integer, minimum: 1 }
-                reason: { type: string, maxLength: 500 }
-                external_ref: { type: string, maxLength: 191, description: Nomor referensi pengembalian dari dashboard provider. }
-                compensation_note: { type: string, maxLength: 500, description: Catatan bebas saja; kompensasi kuota lewat jalur adjust kuota area lain. }
-      responses:
-        '200':
-          description: Refund tercatat.
-        '400': { $ref: '#/components/responses/BadRequest' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '404':
-          description: Order tidak ditemukan.
-        '409': { $ref: '#/components/responses/Conflict' }
-  /v1/admin/orders/{id}/refunds:
-    get:
-      tags: [System]
-      operationId: listOrderRefunds
-      summary: Daftar refund tercatat untuk satu order
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200':
-          description: Daftar refund tercatat.
-        '401': { $ref: '#/components/responses/Unauthorized' }
-  /v1/admin/alerts/status:
-    get:
-      tags: [System]
-      operationId: getAlertStatus
-      summary: Status alert Telegram (aktif hanya bila env bot + chat ter-set; tanpa nilai secret)
-      responses:
-        '200':
-          description: Status alert.
-        '401': { $ref: '#/components/responses/Unauthorized' }
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -434,15 +279,6 @@ components:
         announcement: { type: string, nullable: true }
         maintenance_banner: { type: string, nullable: true }
         maintenance_blocks_validations: { type: boolean }
-    SiteSettings:
-      type: object
-      required: [announcement_text, announcement_active, maintenance_banner_text, maintenance_banner_active, maintenance_block_validations]
-      properties:
-        announcement_text: { type: string, maxLength: 2000 }
-        announcement_active: { type: boolean }
-        maintenance_banner_text: { type: string, maxLength: 2000 }
-        maintenance_banner_active: { type: boolean }
-        maintenance_block_validations: { type: boolean }
     BankCode:
       type: object
       required: [code_bank, name_bank]

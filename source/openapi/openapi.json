@@ -98,69 +98,6 @@
         }
       }
     },
-    "/v1/admin/site-settings": {
-      "get": {
-        "tags": [
-          "System"
-        ],
-        "operationId": "getSiteSettings",
-        "summary": "Pengaturan pengumuman & maintenance (admin)",
-        "responses": {
-          "200": {
-            "description": "Pengaturan situs saat ini.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SiteSettings"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Sesi admin tidak valid."
-          }
-        }
-      },
-      "put": {
-        "tags": [
-          "System"
-        ],
-        "operationId": "updateSiteSettings",
-        "summary": "Ubah pengumuman & maintenance (admin)",
-        "description": "Bila sakelar maintenance_block_validations aktif, endpoint validasi menjawab 503; health, login, portal, dan endpoint lain tidak diblokir. Perubahan sakelar tercatat di audit.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SiteSettings"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Pengaturan situs setelah disimpan.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SiteSettings"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Input tidak valid."
-          },
-          "401": {
-            "description": "Sesi admin tidak valid."
-          },
-          "503": {
-            "description": "Database tidak terpasang atau penyimpanan gagal."
-          }
-        }
-      }
-    },
     "/v1/banks": {
       "get": {
         "tags": [
@@ -797,35 +734,6 @@
             ]
           },
           "maintenance_blocks_validations": {
-            "type": "boolean"
-          }
-        }
-      },
-      "SiteSettings": {
-        "type": "object",
-        "required": [
-          "announcement_text",
-          "announcement_active",
-          "maintenance_banner_text",
-          "maintenance_banner_active",
-          "maintenance_block_validations"
-        ],
-        "properties": {
-          "announcement_text": {
-            "type": "string",
-            "maxLength": 2000
-          },
-          "announcement_active": {
-            "type": "boolean"
-          },
-          "maintenance_banner_text": {
-            "type": "string",
-            "maxLength": 2000
-          },
-          "maintenance_banner_active": {
-            "type": "boolean"
-          },
-          "maintenance_block_validations": {
             "type": "boolean"
           }
         }
