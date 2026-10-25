@@ -1,0 +1,22 @@
+# Rust
+/target/
+# Cargo.lock is intentionally tracked: this project ships binaries, so a locked
+# dependency graph is required for reproducible production builds.
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Local services and runtime artifacts
+.mysql-data/
+.redis-data/
+logs/
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

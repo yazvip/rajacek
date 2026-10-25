@@ -1,0 +1,1125 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Rajacek API — Dokumentasi Member",
+    "version": "1.0.0",
+    "description": "API validasi rekening bank, e-wallet, dan nomor WhatsApp Indonesia untuk member Rajacek.\n\n**Autentikasi:** semua endpoint validasi memerlukan header `X-API-Key: rv_live_...` (atau `Authorization: Bearer rv_live_...`). Jaga kerahasiaan kunci Anda; kunci hanya ditampilkan sekali saat dibuat.\n\n**Idempotency-Key dianjurkan** pada setiap POST validasi: nilai unik 8–200 karakter per operasi bisnis. Bila tidak dikirim atau kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons `Idempotency-Key`. Mengirim ulang request yang sama dengan kunci yang sama akan memutar respons yang sama tanpa memotong kuota dua kali.\n\n**Kode bank selalu 3 digit** (mis. `002` BRI, `014` BCA) — ambil daftar lengkapnya dari `GET /v1/banks`. Kode internal provider tidak pernah dipakai di sisi member.\n\n**Hasil validasi** ada di field `status` pada respons 200: `valid`, `invalid`, `not_found`, atau `pending`. Error teknis memakai format `ApiError` dengan HTTP 4xx/5xx.\n\n**Rate limit** bawaan 60 request/menit per kunci (header `X-RateLimit-Remaining`/`X-RateLimit-Reset` dikembalikan); kuota paket berkurang hanya untuk hasil yang tertagih (`valid`, `invalid`, `not_found`)."
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "Server Rajacek ini"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Validation",
+      "description": "Endpoint validasi untuk member"
+    },
+    {
+      "name": "Reference",
+      "description": "Data referensi publik"
+    },
+    {
+      "name": "System",
+      "description": "Status layanan"
+    }
+  ],
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "paths": {
+    "/health/live": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "summary": "Cek layanan hidup",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Layanan hidup.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "security": [],
+        "operationId": "getPublicStatusPage",
+        "summary": "Halaman status layanan publik (HTML)",
+        "description": "Halaman status tanpa login. Hanya label produk dan status agregat operational/degraded, plus banner aktif. Tidak menyebut nama, URL, atau kode provider upstream.",
+        "responses": {
+          "200": {
+            "description": "Halaman status layanan.",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/status": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "security": [],
+        "operationId": "getPublicStatus",
+        "summary": "Status layanan publik (JSON)",
+        "description": "Data yang sama dengan GET /status, dalam JSON, tanpa login.",
+        "responses": {
+          "200": {
+            "description": "Status agregat layanan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/admin/site-settings": {
+      "get": {
+        "tags": [
+          "System"
+        ],
+        "operationId": "getSiteSettings",
+        "summary": "Pengaturan pengumuman & maintenance (admin)",
+        "responses": {
+          "200": {
+            "description": "Pengaturan situs saat ini.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteSettings"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sesi admin tidak valid."
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "System"
+        ],
+        "operationId": "updateSiteSettings",
+        "summary": "Ubah pengumuman & maintenance (admin)",
+        "description": "Bila sakelar maintenance_block_validations aktif, endpoint validasi menjawab 503; health, login, portal, dan endpoint lain tidak diblokir. Perubahan sakelar tercatat di audit.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SiteSettings"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pengaturan situs setelah disimpan.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SiteSettings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Input tidak valid."
+          },
+          "401": {
+            "description": "Sesi admin tidak valid."
+          },
+          "503": {
+            "description": "Database tidak terpasang atau penyimpanan gagal."
+          }
+        }
+      }
+    },
+    "/v1/banks": {
+      "get": {
+        "tags": [
+          "Reference"
+        ],
+        "summary": "Daftar kode bank 3 digit",
+        "security": [],
+        "description": "Mengembalikan seluruh bank yang didukung beserta kode 3 digit resminya. Gunakan `code_bank` sebagai `bank_code` pada validasi rekening.",
+        "responses": {
+          "200": {
+            "description": "Daftar bank.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/BankCode"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/validate/bank-account": {
+      "post": {
+        "tags": [
+          "Validation"
+        ],
+        "summary": "Validasi rekening bank",
+        "description": "Memvalidasi nomor rekening dan mengembalikan nama pemilik terdaftar bila ditemukan.\n\nScope kunci yang diperlukan: `validate:bank_account` atau `validate:*`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BankAccountValidationRequest"
+              },
+              "examples": {
+                "bca": {
+                  "value": {
+                    "bank_code": "014",
+                    "account_number": "1234567890"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validasi selesai diproses. Periksa field `status` untuk hasil bisnisnya.",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer",
+                  "description": "Detik sampai jendela limit berikutnya."
+                }
+              },
+              "X-Idempotent-Replay": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                },
+                "description": "Hadir hanya bila respons diputar dari idempotency cache."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Permintaan tidak memenuhi kontrak (field hilang/format salah/kode tidak dikenal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key tidak ada, tidak valid, atau sudah dicabut.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Kuota paket habis.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Kunci tidak memiliki scope produk ini.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency-Key yang sama sedang diproses atau bertabrakan dengan payload berbeda.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit terlampaui atau antrean provider penuh. Tunggu sesuai `Retry-After`.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider validasi mengembalikan respons yang tidak dapat diproses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider sedang tidak tersedia (termasuk circuit breaker terbuka) atau endpoint belum dikonfigurasi.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/validate/ewallet": {
+      "post": {
+        "tags": [
+          "Validation"
+        ],
+        "summary": "Validasi akun e-wallet",
+        "description": "Memvalidasi nomor akun e-wallet berdasarkan kode provider publik.\n\nScope kunci yang diperlukan: `validate:ewallet` atau `validate:*`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EwalletValidationRequest"
+              },
+              "examples": {
+                "gopay": {
+                  "value": {
+                    "provider": "gopay",
+                    "account_number": "081234567890"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validasi selesai diproses. Periksa field `status` untuk hasil bisnisnya.",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer",
+                  "description": "Detik sampai jendela limit berikutnya."
+                }
+              },
+              "X-Idempotent-Replay": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                },
+                "description": "Hadir hanya bila respons diputar dari idempotency cache."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Permintaan tidak memenuhi kontrak (field hilang/format salah/kode tidak dikenal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key tidak ada, tidak valid, atau sudah dicabut.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Kuota paket habis.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Kunci tidak memiliki scope produk ini.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency-Key yang sama sedang diproses atau bertabrakan dengan payload berbeda.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit terlampaui atau antrean provider penuh. Tunggu sesuai `Retry-After`.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider validasi mengembalikan respons yang tidak dapat diproses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider sedang tidak tersedia (termasuk circuit breaker terbuka) atau endpoint belum dikonfigurasi.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/validate/whatsapp": {
+      "post": {
+        "tags": [
+          "Validation"
+        ],
+        "summary": "Validasi nomor WhatsApp",
+        "description": "Memeriksa apakah nomor terdaftar di WhatsApp. Dilarang untuk spam, enumerasi massal, atau pengiriman OTP tanpa persetujuan pemilik nomor.\n\nScope kunci yang diperlukan: `validate:whatsapp` atau `validate:*`.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          },
+          {
+            "$ref": "#/components/parameters/RequestId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhatsappValidationRequest"
+              },
+              "examples": {
+                "indonesia": {
+                  "value": {
+                    "phone_number": "+6281234567890"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validasi selesai diproses. Periksa field `status` untuk hasil bisnisnya.",
+            "headers": {
+              "X-Request-ID": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "X-RateLimit-Remaining": {
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-RateLimit-Reset": {
+                "schema": {
+                  "type": "integer",
+                  "description": "Detik sampai jendela limit berikutnya."
+                }
+              },
+              "X-Idempotent-Replay": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "true"
+                  ]
+                },
+                "description": "Hadir hanya bila respons diputar dari idempotency cache."
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Permintaan tidak memenuhi kontrak (field hilang/format salah/kode tidak dikenal).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "API key tidak ada, tidak valid, atau sudah dicabut.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "402": {
+            "description": "Kuota paket habis.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Kunci tidak memiliki scope produk ini.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Idempotency-Key yang sama sedang diproses atau bertabrakan dengan payload berbeda.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit terlampaui atau antrean provider penuh. Tunggu sesuai `Retry-After`.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "integer"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Provider validasi mengembalikan respons yang tidak dapat diproses.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Provider sedang tidak tersedia (termasuk circuit breaker terbuka) atau endpoint belum dikonfigurasi.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key",
+        "description": "Kunci member berprefix `rv_live_`. Alternatif: `Authorization: Bearer rv_live_...`."
+      }
+    },
+    "parameters": {
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "Nilai unik 8-200 karakter ASCII per operasi bisnis. Gunakan nilai yang sama saat retry request yang sama. Opsional — bila kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons Idempotency-Key.",
+        "schema": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 200,
+          "pattern": "^[!-~]+$"
+        },
+        "example": "pay-ord-20261021-8a3c2f11"
+      },
+      "RequestId": {
+        "name": "X-Request-ID",
+        "in": "header",
+        "required": false,
+        "description": "Korelasi opsional dari klien; server selalu mengembalikan request ID pada respons.",
+        "schema": {
+          "type": "string",
+          "maxLength": 128
+        }
+      }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": [
+          "status",
+          "service",
+          "timestamp",
+          "provider_mode"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "example": "ok"
+          },
+          "service": {
+            "type": "string",
+            "example": "rajacek-api"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "provider_mode": {
+            "type": "string",
+            "enum": [
+              "demo",
+              "http"
+            ]
+          }
+        }
+      },
+      "PublicProductStatus": {
+        "type": "object",
+        "required": [
+          "product",
+          "label",
+          "status"
+        ],
+        "properties": {
+          "product": {
+            "type": "string",
+            "enum": [
+              "bank_account",
+              "ewallet",
+              "whatsapp"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "example": "Validasi Rekening"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "operational",
+              "degraded"
+            ]
+          }
+        }
+      },
+      "PublicStatus": {
+        "type": "object",
+        "required": [
+          "overall",
+          "products",
+          "maintenance_blocks_validations"
+        ],
+        "properties": {
+          "overall": {
+            "type": "string",
+            "enum": [
+              "operational",
+              "degraded"
+            ]
+          },
+          "products": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicProductStatus"
+            }
+          },
+          "announcement": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maintenance_banner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "maintenance_blocks_validations": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SiteSettings": {
+        "type": "object",
+        "required": [
+          "announcement_text",
+          "announcement_active",
+          "maintenance_banner_text",
+          "maintenance_banner_active",
+          "maintenance_block_validations"
+        ],
+        "properties": {
+          "announcement_text": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "announcement_active": {
+            "type": "boolean"
+          },
+          "maintenance_banner_text": {
+            "type": "string",
+            "maxLength": 2000
+          },
+          "maintenance_banner_active": {
+            "type": "boolean"
+          },
+          "maintenance_block_validations": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BankCode": {
+        "type": "object",
+        "required": [
+          "code_bank",
+          "name_bank"
+        ],
+        "properties": {
+          "code_bank": {
+            "type": "string",
+            "pattern": "^[0-9]{3}$",
+            "example": "002"
+          },
+          "name_bank": {
+            "type": "string",
+            "example": "BRI"
+          }
+        }
+      },
+      "BankAccountValidationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "bank_code",
+          "account_number"
+        ],
+        "properties": {
+          "bank_code": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 3,
+            "pattern": "^[0-9]{3}$",
+            "description": "Kode bank resmi 3 digit dari GET /v1/banks.",
+            "example": "014"
+          },
+          "account_number": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 32,
+            "pattern": "^[0-9 -]+$",
+            "example": "1234567890"
+          }
+        }
+      },
+      "EwalletValidationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "provider",
+          "account_number"
+        ],
+        "properties": {
+          "provider": {
+            "type": "string",
+            "enum": [
+              "dana",
+              "gopay",
+              "gopay_driver",
+              "ovo",
+              "shopeepay",
+              "linkaja",
+              "astrapay",
+              "isaku",
+              "kaspro"
+            ],
+            "description": "Kode provider e-wallet publik.",
+            "example": "gopay"
+          },
+          "account_number": {
+            "type": "string",
+            "minLength": 6,
+            "maxLength": 32,
+            "example": "081234567890"
+          }
+        }
+      },
+      "WhatsappValidationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "phone_number"
+        ],
+        "properties": {
+          "phone_number": {
+            "type": "string",
+            "description": "Nomor format internasional atau lokal Indonesia (08...).",
+            "example": "+6281234567890"
+          }
+        }
+      },
+      "ValidationStatus": {
+        "type": "string",
+        "description": "Billing: valid dan not_kyc memotong 1 hit; invalid dan not_found (satu pool bersama) gratis hingga 100 per hari per kunci (WIB), selebihnya 1 hit; pending, provider_error, rate_limited, dan quota_exhausted tidak memotong dan tidak memakan jatah gratis. Kunci bersaldo 0 tetap ditolak 402 sebelum cek berjalan.",
+        "enum": [
+          "valid",
+          "invalid",
+          "not_found",
+          "not_kyc",
+          "pending",
+          "provider_error",
+          "rate_limited",
+          "quota_exhausted"
+        ]
+      },
+      "ValidationResult": {
+        "type": "object",
+        "properties": {
+          "account_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nomor rekening/e-wallet yang divalidasi (bank & e-wallet).",
+            "example": "1234667890"
+          },
+          "phone_number": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nomor WhatsApp yang divalidasi (layanan whatsapp).",
+            "example": "6281234567890"
+          },
+          "service_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Kode layanan yang divalidasi (kode bank 3 digit, slug e-wallet, atau whatsapp).",
+            "example": "014"
+          },
+          "bank_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Nama bank sesuai katalog (khusus layanan bank).",
+            "example": "BCA"
+          },
+          "account_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "NAMA PELANGGAN"
+          },
+          "registered": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "example": true
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "ref-20261021-001"
+          }
+        }
+      },
+      "ValidationMeta": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "type": "string"
+          },
+          "provider_latency_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rajacek_processing_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total_latency_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "remaining_quota": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ValidationResponse": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "status",
+          "valid",
+          "product",
+          "message",
+          "meta"
+        ],
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ValidationStatus"
+          },
+          "valid": {
+            "type": "boolean",
+            "description": "true hanya bila status = valid."
+          },
+          "product": {
+            "type": "string",
+            "enum": [
+              "bank_account",
+              "ewallet",
+              "whatsapp"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ValidationResult"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "meta": {
+            "$ref": "#/components/schemas/ValidationMeta"
+          }
+        },
+        "example": {
+          "request_id": "Kx7fA92pQm",
+          "status": "valid",
+          "valid": true,
+          "product": "bank_account",
+          "message": "Respons diterima dari provider validasi.",
+          "result": {
+            "account_number": "1234667890",
+            "service_code": "014",
+            "bank_name": "BCA",
+            "account_name": "NAMA PELANGGAN",
+            "registered": true,
+            "reference": "ref-001"
+          },
+          "meta": {
+            "provider": "Rajacek",
+            "provider_latency_ms": 812,
+            "rajacek_processing_ms": 6,
+            "total_latency_ms": 818,
+            "cached": false,
+            "remaining_quota": 4999
+          }
+        }
+      },
+      "ApiError": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "example": "bad_request"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string"
+          },
+          "details": {
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "example": {
+          "code": "unauthorized",
+          "message": "API key tidak valid",
+          "request_id": "450abf0e-1b63-43a9-9ee8-6a86834d9330"
+        }
+      }
+    }
+  }
+}

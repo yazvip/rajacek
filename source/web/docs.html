@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Dokumentasi API Member — Rajacek</title>
+    <meta name="description" content="Dokumentasi API Rajacek untuk member: autentikasi API key, validasi rekening bank, e-wallet, dan WhatsApp, idempotensi, rate limit, kuota, dan kode error." />
+    <meta name="robots" content="index,follow" />
+    <meta name="theme-color" content="#059669" />
+    <link rel="canonical" href="https://www.rajacek.com/docs" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/landing.css?v=20261024-1" />
+    <style>
+      /* Template dokumentasi mengikuti sistem visual portal member:
+         Plus Jakarta Sans + JetBrains Mono, latar slate-50, kartu
+         putih rounded-2xl, aksen emerald. landing.css tetap dipakai
+         untuk kerangka (skip-link, tombol, header); variabel & gaya
+         di bawah ini menimpa palet navy/emas lama. */
+      :root { --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --navy:#0f172a; --font:"Plus Jakarta Sans", Aptos, "Segoe UI", sans-serif; --mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      body { background:#F8FAFC; font-family:var(--font); color:var(--ink); }
+      .site-header { position:sticky; top:0; z-index:20; width:100%; min-height:64px; padding:0 max(20px, calc((100% - 1180px) / 2)); box-sizing:border-box; background:rgba(255,255,255,.92); backdrop-filter:blur(8px); border-bottom:1px solid var(--line); }
+      .brand { color:var(--ink); font-size:20px; letter-spacing:-.02em; }
+      .brand>span:last-child>span { color:#C6A15B; }
+      .brand-mark-img { width:30px; height:30px; display:block; }
+      nav a { color:#475569; } nav a:hover { color:#047857; } nav a[aria-current="page"] { color:#047857; }
+      .nav-cta { background:#047857; color:#fff; padding:8px 14px; border-radius:10px; }
+      .nav-cta:hover { background:#065f46; color:#fff; }
+      .docs-layout { display:grid; grid-template-columns:264px minmax(0,1fr); gap:2rem; max-width:1180px; margin:0 auto; padding:2.5rem 1.25rem 5rem; }
+      .docs-toc { position:sticky; top:84px; align-self:start; background:#fff; border:1px solid var(--line); border-radius:16px; padding:1.15rem 1.25rem 1.3rem; box-shadow:0 1px 2px rgba(15,23,42,.05); font-size:.92rem; }
+      .docs-toc p { font-size:.68rem; letter-spacing:.16em; text-transform:uppercase; font-weight:800; color:#047857; margin:1.05rem 0 .45rem; }
+      .docs-toc p:first-child { margin-top:0; }
+      .docs-toc a { display:block; color:#475569; text-decoration:none; padding:.34rem .55rem; margin:0 -.55rem; border-radius:8px; }
+      .docs-toc a:hover { color:#065f46; background:#ecfdf5; }
+      .docs-body { min-width:0; background:#fff; border:1px solid var(--line); border-radius:16px; padding:2.5rem 2.6rem 3rem; box-shadow:0 1px 2px rgba(15,23,42,.05); }
+      .docs-body h1 { font-weight:800; font-size:2.4rem; line-height:1.15; letter-spacing:-.02em; color:var(--ink); margin:.35rem 0 .8rem; }
+      .docs-body h2 { font-weight:800; font-size:1.5rem; line-height:1.25; letter-spacing:-.02em; color:var(--ink); margin:2.8rem 0 .7rem; padding-top:2rem; border-top:1px solid var(--line); }
+      .docs-body h2:first-of-type { border-top:0; padding-top:0; }
+      .docs-body h3 { font-size:1.05rem; font-weight:700; margin:1.4rem 0 .4rem; color:var(--ink); }
+      .docs-body p, .docs-body li { color:#475569; line-height:1.75; }
+      .docs-body a { color:#047857; font-weight:600; }
+      .docs-body a:hover { text-decoration:underline; }
+      .docs-body .eyebrow { color:#059669; }
+      .docs-body code { font-family:var(--mono); font-size:.86em; background:#f1f5f9; padding:.08rem .35rem; border-radius:6px; }
+      .docs-body pre { background:#0F172A; color:#e2e8f0; border:1px solid #1e293b; border-radius:12px; padding:1.2rem 1.3rem; overflow-x:auto; font-family:var(--mono); font-size:.85rem; line-height:1.65; margin:1rem 0 1.3rem; box-shadow:0 1px 2px rgba(15,23,42,.05); }
+      .docs-body pre code { background:transparent; color:inherit; padding:0; font-size:inherit; border-radius:0; white-space:pre; }
+      .docs-body pre::selection, .docs-body pre code::selection { background:#059669; color:#fff; }
+      .docs-body :not(pre) > code { color:#047857; }
+      table { border-collapse:collapse; width:100%; margin:.9rem 0 1.3rem; font-size:.93rem; }
+      th, td { border:0; border-bottom:1px solid var(--line); padding:.65rem .8rem; text-align:left; vertical-align:top; }
+      th { background:transparent; color:var(--muted); font-size:.7rem; letter-spacing:.13em; text-transform:uppercase; border-bottom:2px solid var(--line); }
+      .method { display:inline-block; font-family:var(--mono); font-weight:700; font-size:.78rem; padding:.18rem .55rem; border-radius:999px; color:#fff; vertical-align:middle; }
+      .method.get { background:#059669; } .method.post { background:#2563eb; }
+      .endpoint-path { font-family:var(--mono); font-weight:700; color:var(--ink); font-size:.92em; }
+      .callout { background:#fffbeb; border:1px solid #fde68a; border-left:4px solid #f59e0b; border-radius:12px; padding:.95rem 1.15rem; margin:1.1rem 0; color:#92400e; }
+      .callout.info { background:#ecfdf5; border-color:#a7f3d0; border-left-color:#059669; color:#065f46; }
+      .callout p { color:inherit; margin:0; }
+      .docs-actions { display:flex; gap:.7rem; flex-wrap:wrap; margin:1.3rem 0; }
+      .button-primary { background:#047857; box-shadow:0 8px 18px rgba(4,120,87,.25); }
+      .button-primary:hover { background:#065f46; }
+      .button-quiet { border-color:var(--line); color:var(--ink); }
+      .docs-body details { border-bottom:1px solid var(--line); padding:1.05rem 0; }
+      .docs-body summary { cursor:pointer; font-weight:700; color:var(--ink); }
+      .docs-body details p { margin:.55rem 0 0; }
+      @media (max-width: 900px) { .site-header nav { display:none; } .docs-layout { grid-template-columns:1fr; padding-top:1.6rem; } .docs-toc { position:static; } .docs-body { padding:1.7rem 1.3rem 2.2rem; } .docs-body h1 { font-size:2rem; } }
+    </style>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Lewati ke konten utama</a>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Rajacek, beranda">
+        <img class="brand-mark-img" src="/logo-mark.png" alt="" aria-hidden="true"><span>aja<span>cek</span></span>
+      </a>
+      <nav aria-label="Navigasi utama">
+        <a href="/">Beranda</a><a href="/docs" aria-current="page">Dokumentasi</a><a href="/openapi.json">OpenAPI JSON</a>
+      </nav>
+      <a class="nav-cta" href="/member">Portal member <span aria-hidden="true">→</span></a>
+    </header>
+
+    <div class="docs-layout">
+      <aside class="docs-toc" aria-label="Daftar isi dokumentasi">
+        <p>Memulai</p>
+        <a href="#mulai-cepat">Mulai cepat</a>
+        <a href="#autentikasi">Autentikasi</a>
+        <a href="#idempotensi">Idempotensi</a>
+        <a href="#rate-limit-kuota">Rate limit &amp; kuota</a>
+        <p>Endpoint</p>
+        <a href="#daftar-bank">GET /v1/banks</a>
+        <a href="#validasi-bank">POST Validasi rekening</a>
+        <a href="#validasi-ewallet">POST Validasi e-wallet</a>
+        <a href="#validasi-whatsapp">POST Validasi WhatsApp</a>
+        <p>Referensi</p>
+        <a href="#status-hasil">Status hasil</a>
+        <a href="#kode-error">Kode error</a>
+        <a href="#openapi">OpenAPI JSON</a>
+        <a href="#faq">FAQ</a>
+      </aside>
+
+      <main class="docs-body" id="content">
+        <p class="eyebrow">Dokumentasi API · Member &amp; Publik</p>
+        <h1>Integrasi Rajacek dalam hitungan menit.</h1>
+        <p>Rajacek membantu Anda mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, dan <strong>nomor WhatsApp</strong> Indonesia lewat satu API sederhana. Pada semua contoh di halaman ini, <code>BASE_URL</code> adalah <code>https://rajacek.com</code> dan kunci yang dipakai adalah contoh <code>rv_live_CONTOH</code> — ganti dengan kunci Anda sendiri. Perlakukan kunci Anda seperti kata sandi: jangan dibagikan ke siapa pun.</p>
+        <div class="docs-actions">
+          <a class="button button-primary" href="/openapi.json">Unduh OpenAPI JSON</a>
+          <a class="button button-quiet" href="#mulai-cepat">Mulai cepat ↓</a>
+        </div>
+
+        <h2 id="mulai-cepat">Mulai cepat</h2>
+        <ol>
+          <li><strong>Daftar dengan akun Google</strong> di <a href="/member">portal member</a>. API key (<code>rv_live_...</code>) langsung terbit — simpan baik-baik, kunci hanya ditampilkan satu kali. Pendaftar pertama mendapat <strong>trial gratis 10× cek selama 7 hari</strong>.</li>
+          <li>Mau coba tanpa coding? Buka menu <strong>Coba Cek Live</strong> di portal — ceknya sungguhan dan memakai kuota trial Anda.</li>
+          <li>Untuk cek rekening, ambil dulu kode bank 3 digit dari <code>GET /v1/banks</code>.</li>
+          <li>Kirim request POST ke endpoint validasi dengan header <code>X-API-Key</code>. Selesai — contohnya ada di bawah ini.</li>
+        </ol>
+        <div class="callout"><strong>Trial habis?</strong> Setelah kuota trial habis atau 7 hari berakhir, API akan menolak cek baru dengan kode <code>402</code>. Hubungi admin untuk lanjut ke paket berbayar — kuota dan masa aktif Anda diatur dari panel admin.</div>
+        <pre><code>curl -X POST $BASE_URL/v1/validate/bank-account \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: rv_live_CONTOH" \
+  -H "Idempotency-Key: order-20261021-0001" \
+  -d '{"bank_code": "014", "account_number": "1234567890"}'</code></pre>
+        <p>Respons sukses (HTTP 200):</p>
+        <pre><code>{
+  "request_id": "Kx7fA92pQm",
+  "status": "valid",
+  "valid": true,
+  "product": "bank_account",
+  "message": "Respons diterima dari provider validasi.",
+  "result": {
+    "account_number": "1234667890",
+    "service_code": "014",
+    "bank_name": "BCA",
+    "account_name": "NAMA PELANGGAN",
+    "registered": true,
+    "reference": "ref-001"
+  },
+  "meta": {
+    "provider": "Rajacek",
+    "provider_latency_ms": 812,
+    "attempts": 1,
+    "rajacek_processing_ms": 6,
+    "total_latency_ms": 818,
+    "cached": false,
+    "remaining_quota": 4999
+  }
+}</code></pre>
+
+        <h2 id="autentikasi">Autentikasi</h2>
+        <p>Setiap request harus membawa API key Anda. Ada dua cara mengirimnya:</p>
+        <pre><code>X-API-Key: rv_live_KUNCI_ANDA
+# atau
+Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
+        <ul>
+          <li>Setiap kunci punya <strong>izin (scope)</strong> per produk: <code>validate:bank_account</code>, <code>validate:ewallet</code>, <code>validate:whatsapp</code>, atau <code>validate:*</code> untuk semua produk. Kunci tanpa izin produk akan ditolak dengan kode 403.</li>
+          <li>Kunci hanya ditampilkan <strong>satu kali</strong>, saat dibuat. Sesudah itu server hanya menyimpan sidik jarinya (hash) — kunci asli tidak bisa ditampilkan lagi.</li>
+          <li>Kalau kunci Anda bocor, segera minta admin mencabutnya. Kunci yang sudah dicabut langsung ditolak dengan kode 401.</li>
+        </ul>
+
+        <h2 id="idempotensi">Idempotensi</h2>
+        <p><code>Idempotency-Key</code> adalah kode unik yang <strong>Anda</strong> tentukan untuk satu operasi, misalnya nomor order. Fungsinya: kalau request yang sama terkirim dua kali (misalnya jaringan putus lalu Anda mengulang), hasilnya tidak diproses dua kali. Isi dengan 8–200 karakter ASCII tanpa spasi. <strong>Header ini dianjurkan.</strong> Kalau tidak dikirim atau kosong, server membuatkan kode otomatis dan mengembalikannya di header respons <code>Idempotency-Key</code> — request tetap jalan, tetapi pengiriman ulang akan dihitung sebagai cek baru.</p>
+        <ul>
+          <li>Retry dengan kunci dan isi request yang persis sama → Anda menerima respons yang sama persis (ada header <code>X-Idempotent-Replay: true</code>) dan <strong>kuota tidak terpotong dua kali</strong>.</li>
+          <li>Kunci yang sama tetapi isi request berbeda → ditolak dengan kode <strong>409</strong>.</li>
+          <li>Kunci yang sama saat request pertama masih diproses → sistem menunggu sebentar lalu memberikan hasilnya; kalau terlalu lama, kode 409.</li>
+        </ul>
+
+        <h2 id="pembelian-paket">Pembelian paket (portal member)</h2>
+        <p>Member yang masuk lewat portal bisa membeli paket sendiri dengan QRIS, tanpa menunggu admin. Alurnya: lihat pratinjau efek pembelian → buat order → pindai QR → tekan "Saya sudah bayar". Ketentuan yang berlaku:</p>
+        <ul>
+          <li><strong>Kuota tidak pernah hilang karena membeli.</strong> Kuota paket baru <em>ditambahkan</em> ke sisa kuota Anda; masa aktif diperpanjang dari tanggal kedaluwarsa yang masih berjalan (atau dari sekarang bila sudah lewat); rate limit menjadi yang terbesar antara rate aktif dan rate paket baru.</li>
+          <li><strong>Satu order menunggu per member.</strong> Membuat order kedua selagi ada order menunggu akan mengembalikan order yang sama (bukan QR baru).</li>
+          <li>QR berlaku sesuai masa yang ditampilkan (hitungan mundur di portal). Order yang kedaluwarsa atau dibatalkan tidak memotong apa pun.</li>
+          <li>Pembayaran yang sudah lunas tapi nominalnya tidak cocok, atau membernya dinonaktifkan, <strong>ditahan untuk peninjauan admin</strong> — kuota tidak di-grant otomatis sampai admin menyelesaikan.</li>
+          <li><strong>Harga promo:</strong> bila admin mengaktifkan promo pada suatu paket, harga yang tampil di portal (harga asli dicoret + badge promo + hitung mundur) adalah harga yang benar-benar ditagih — bukan pajangan.</li>
+          <li>Endpoint pembelian hanya tersedia lewat sesi portal (<code>/v1/member/packages</code>, <code>/v1/member/orders</code> dan turunannya), bukan lewat API key validasi.</li>
+        </ul>
+
+        <h2 id="rate-limit-kuota">Rate limit &amp; kuota</h2>
+        <ul>
+          <li>Batas bawaan: <strong>60 request per menit</strong> untuk setiap kunci (admin bisa mengubahnya). Sisa jatah Anda ada di header respons <code>X-RateLimit-Remaining</code>. Kalau batas terlampaui, API menjawab <strong>429</strong> — tunggu sebentar (lihat header <code>Retry-After</code>), lalu coba lagi.</li>
+          <li><strong>Valid dan Belum KYC memotong 1 hit; hasil Tidak Valid gratis hingga 100 per hari per kunci, selebihnya 1 hit.</strong> Tepatnya: hasil <code>valid</code> dan <code>not_kyc</code> (akun e-wallet belum KYC) selalu memotong 1 hit. Hasil <code>invalid</code> dan <code>not_found</code> — satu pool bersama — gratis untuk 100 hasil pertama per kunci per hari kalender WIB; mulai hasil tidak-valid ke-101 pada hari itu, masing-masing memotong 1 hit seperti biasa. Cek yang gagal karena error, pending, atau kena rate limit <strong>tidak</strong> memotong kuota dan tidak memakan jatah gratis. Pengiriman ulang dengan <code>Idempotency-Key</code> yang sama tidak pernah memotong dan tidak memakan jatah. Catatan: kunci bersaldo 0 tetap ditolak <code>402</code> sebelum cek berjalan, jadi jatah gratis hanya bisa dipakai selama saldo masih di atas 0. Hitungan gratis hari ini tampil di portal member dan di daftar kunci panel admin.</li>
+          <li>Sisa kuota Anda selalu tampil di <code>meta.remaining_quota</code> pada setiap respons.</li>
+        </ul>
+
+        <h2 id="daftar-bank">Daftar bank <span class="method get">GET</span> <span class="endpoint-path">/v1/banks</span></h2>
+        <p>Endpoint ini <strong>bebas, tanpa API key</strong>. Hasilnya adalah daftar semua bank yang didukung beserta kode resminya (3 digit). Pakai nilai <code>code_bank</code> sebagai <code>bank_code</code> saat mengecek rekening.</p>
+        <pre><code>[
+  { "code_bank": "002", "name_bank": "BRI" },
+  { "code_bank": "008", "name_bank": "MANDIRI" },
+  { "code_bank": "009", "name_bank": "BNI" },
+  { "code_bank": "014", "name_bank": "BCA" }
+]</code></pre>
+
+        <h2 id="validasi-bank">Validasi rekening <span class="method post">POST</span> <span class="endpoint-path">/v1/validate/bank-account</span></h2>
+        <table>
+          <tr><th>Field</th><th>Wajib</th><th>Keterangan</th></tr>
+          <tr><td><code>bank_code</code></td><td>Ya</td><td>Kode bank <strong>3 digit</strong> dari <code>GET /v1/banks</code> (mis. <code>014</code> = BCA).</td></tr>
+          <tr><td><code>account_number</code></td><td>Ya</td><td>Nomor rekening 6–32 karakter (angka, spasi, dan tanda hubung diperbolehkan).</td></tr>
+        </table>
+        <p>Contoh request dan respons sukses ada di <a href="#mulai-cepat">Mulai cepat</a>. Kalau nomornya tidak ditemukan di bank tujuan, respons tetap HTTP 200 dengan <code>status: "not_found"</code> — hasil seperti ini tetap tertagih, karena pemeriksaannya benar-benar dilakukan:</p>
+        <pre><code>{
+  "request_id": "Qm3Za8Kd1s",
+  "status": "not_found",
+  "valid": false,
+  "product": "bank_account",
+  "message": "Respons diterima dari provider validasi.",
+  "result": {
+    "account_number": "1234667890",
+    "service_code": "014",
+    "bank_name": "BCA",
+    "account_name": "DATA TIDAK DITEMUKAN"
+  },
+  "meta": {
+    "provider": "Rajacek",
+    "provider_latency_ms": 640,
+    "rajacek_processing_ms": 5,
+    "total_latency_ms": 645,
+    "cached": false,
+    "remaining_quota": 4998
+  }
+}</code></pre>
+        <p>Scope: <code>validate:bank_account</code>.</p>
+
+        <h2 id="validasi-ewallet">Validasi e-wallet <span class="method post">POST</span> <span class="endpoint-path">/v1/validate/ewallet</span></h2>
+        <table>
+          <tr><th>Field</th><th>Wajib</th><th>Keterangan</th></tr>
+          <tr><td><code>provider</code></td><td>Ya</td><td>Isi dengan salah satu kode e-wallet di bawah.</td></tr>
+          <tr><td><code>account_number</code></td><td>Ya</td><td>Nomor akun/nomor HP e-wallet 6–32 karakter.</td></tr>
+        </table>
+        <p>Kode e-wallet yang didukung: <code>dana</code>, <code>gopay</code>, <code>gopay_driver</code>, <code>ovo</code>, <code>shopeepay</code>, <code>linkaja</code>, <code>astrapay</code>, <code>isaku</code>, <code>kaspro</code>.</p>
+        <pre><code>curl -X POST $BASE_URL/v1/validate/ewallet \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: rv_live_CONTOH" \
+  -H "Idempotency-Key: topup-20261021-0007" \
+  -d '{"provider": "gopay", "account_number": "081234567890"}'</code></pre>
+        <p>Respons sukses (HTTP 200):</p>
+        <pre><code>{
+  "request_id": "Vz81hNqP4e",
+  "status": "valid",
+  "valid": true,
+  "product": "ewallet",
+  "message": "Respons diterima dari provider validasi.",
+  "result": {
+    "account_number": "081234567890",
+    "service_code": "gopay",
+    "account_name": "SARI DEWI",
+    "registered": true
+  },
+  "meta": {
+    "provider": "Rajacek",
+    "provider_latency_ms": 433,
+    "rajacek_processing_ms": 4,
+    "total_latency_ms": 437,
+    "cached": false,
+    "remaining_quota": 4997
+  }
+}</code></pre>
+        <p>Scope: <code>validate:ewallet</code>.</p>
+
+        <h2 id="validasi-whatsapp">Validasi WhatsApp <span class="method post">POST</span> <span class="endpoint-path">/v1/validate/whatsapp</span></h2>
+        <table>
+          <tr><th>Field</th><th>Wajib</th><th>Keterangan</th></tr>
+          <tr><td><code>phone_number</code></td><td>Ya</td><td>Nomor format internasional (<code>+628...</code>) atau lokal (<code>08...</code>).</td></tr>
+        </table>
+        <pre><code>curl -X POST $BASE_URL/v1/validate/whatsapp \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: rv_live_CONTOH" \
+  -H "Idempotency-Key: wa-20261021-0003" \
+  -d '{"phone_number": "+6281234567890"}'</code></pre>
+        <p>Respons nomor terdaftar WhatsApp (HTTP 200):</p>
+        <pre><code>{
+  "request_id": "Rt5wXc92Nb",
+  "status": "valid",
+  "valid": true,
+  "product": "whatsapp",
+  "message": "Respons diterima dari provider validasi.",
+  "result": {
+    "phone_number": "+6281234567890",
+    "service_code": "whatsapp",
+    "registered": true
+  },
+  "meta": {
+    "provider": "Rajacek",
+    "provider_latency_ms": 388,
+    "rajacek_processing_ms": 4,
+    "total_latency_ms": 392,
+    "cached": false,
+    "remaining_quota": 4996
+  }
+}</code></pre>
+        <p>Nomor yang tidak terdaftar WhatsApp menghasilkan <code>status: "invalid"</code> dengan <code>result: { "phone_number": "...", "service_code": "whatsapp", "registered": false }</code> — bentuk field lainnya sama.</p>
+        <p>Scope: <code>validate:whatsapp</code>. Gunakan layanan ini dengan bertanggung jawab — bukan untuk spam atau mengumpulkan nomor secara massal.</p>
+
+        <h2 id="status-hasil">Status hasil (respons 200)</h2>
+        <table>
+          <tr><th><code>status</code></th><th>Arti</th><th>Tertagih</th></tr>
+          <tr><td><code>valid</code></td><td>Nomor ditemukan dan terdaftar.</td><td>Ya</td></tr>
+          <tr><td><code>invalid</code></td><td>Nomor diperiksa, tetapi tidak valid atau tidak aktif.</td><td>Ya</td></tr>
+          <tr><td><code>not_found</code></td><td>Nomor tidak ditemukan di bank atau layanan tujuan.</td><td>Ya</td></tr>
+          <tr><td><code>not_kyc</code></td><td>Khusus e-wallet: nomor terdaftar, tetapi akun belum KYC — jawaban upstream hanya berupa penanda "belum premium" atau gema nomor itu sendiri, bukan nama pemilik, jadi <code>account_name</code> tidak ditampilkan dan <code>registered</code> bernilai <code>false</code>.</td><td>Ya</td></tr>
+          <tr><td><code>pending</code></td><td>Hasil akhir belum tersedia; coba lagi nanti.</td><td>Tidak</td></tr>
+        </table>
+        <p>Isi <code>result</code> selalu memuat <strong>nomor yang Anda cek</strong> (<code>account_number</code> untuk bank &amp; e-wallet, <code>phone_number</code> untuk WhatsApp) dan <strong>kode layanannya</strong> (<code>service_code</code>: kode bank 3 digit, nama e-wallet seperti <code>dana</code>, atau <code>whatsapp</code>). Untuk bank ada juga <code>bank_name</code> — nama banknya, misalnya BCA atau BRI. Bila tersedia, hasil dilengkapi <code>account_name</code> (nama pemilik, selalu huruf besar semua), <code>registered</code> (terdaftar atau tidak), dan <code>reference</code>.</p>
+
+        <h2 id="kode-error">Kode error</h2>
+        <p>Kalau request gagal, responsnya selalu berbentuk <code>{ "code", "message", "request_id" }</code>. Simpan <code>request_id</code> itu — admin membutuhkannya untuk menelusuri masalah Anda. Contoh respons saat kena rate limit (429):</p>
+        <pre><code>{
+  "code": "rate_limited",
+  "message": "Batas laju tercapai; coba lagi nanti.",
+  "request_id": "Hs92kLm4Qx"
+}</code></pre>
+        <table>
+          <tr><th>HTTP</th><th><code>code</code></th><th>Arti &amp; tindakan</th></tr>
+          <tr><td>400</td><td><code>bad_request</code></td><td>Ada field yang hilang, formatnya salah, atau kode bank/e-wallet tidak dikenal. Periksa lagi isi request Anda.</td></tr>
+          <tr><td>401</td><td><code>unauthorized</code></td><td>Kunci tidak ada, salah, atau sudah dicabut.</td></tr>
+          <tr><td>402</td><td><code>quota_exhausted</code></td><td>Kuota paket Anda habis. Hubungi admin untuk isi ulang atau ganti paket.</td></tr>
+          <tr><td>403</td><td><code>forbidden</code></td><td>API key Anda tidak punya izin (scope) untuk produk ini.</td></tr>
+          <tr><td>409</td><td><code>conflict</code></td><td>Idempotency-Key yang sama sudah dipakai dengan isi berbeda, atau request sebelumnya masih diproses. Untuk operasi baru, pakai kunci baru.</td></tr>
+          <tr><td>429</td><td><code>rate_limited</code></td><td>Anda terlalu cepat (rate limit) atau antrean sedang penuh. Tunggu sesuai header <code>Retry-After</code>, lalu coba lagi.</td></tr>
+          <tr><td>502</td><td><code>provider_error</code></td><td>Layanan pemeriksa memberi respons yang tidak bisa diproses. Aman diulang dengan Idempotency-Key yang sama.</td></tr>
+          <tr><td>503</td><td><code>service_unavailable</code></td><td>Layanan pemeriksa sedang tidak tersedia, atau produk ini belum aktif. Coba lagi beberapa saat.</td></tr>
+        </table>
+        <div class="callout info"><p><strong>Kami sudah mencoba lagi untuk Anda:</strong> kalau layanan pemeriksa gagal sesaat (timeout, sedang sibuk, atau respons rusak), Rajacek otomatis mengulang sampai 2 kali sebelum menyerah. Jawaban yang sudah pasti — misalnya "tidak ditemukan" — tidak pernah diulang.</p></div>
+        <div class="callout info"><p><strong>Cara aman mengulang:</strong> untuk error 429, 502, dan 503, kirim ulang request yang sama persis dengan <code>Idempotency-Key</code> yang sama. Anda tidak akan ditagih dua kali.</p></div>
+
+        <h2 id="openapi">OpenAPI JSON</h2>
+        <p>Lebih suka memakai Postman atau membuat SDK sendiri? Unduh spesifikasi mesinnya di <a href="/openapi.json"><code>/openapi.json</code></a> (OpenAPI 3.1), lalu impor ke Postman/Insomnia atau generator klien favorit Anda. Isinya hanya endpoint untuk member — endpoint admin tidak disertakan.</p>
+
+        <h2 id="faq">FAQ</h2>
+        <h3>Apakah nama pemilik rekening selalu tersedia?</h3>
+        <p>Umumnya tersedia untuk bank dan e-wallet. Untuk WhatsApp memang tidak ada nama — yang menjadi acuan adalah <code>registered</code> (terdaftar atau tidak).</p>
+        <h3>Request saya 200 tetapi <code>valid: false</code> — apakah ditagih?</h3>
+        <p>Lihat <code>status</code>-nya: <code>invalid</code>, <code>not_found</code>, dan <code>not_kyc</code> tetap tertagih karena nomornya benar-benar diperiksa. <code>pending</code> tidak tertagih.</p>
+        <h3>Berapa lama respons idempotensi disimpan?</h3>
+        <p>Respons idempotensi disimpan <strong>24 jam</strong>. Lewat dari itu, kunci yang sama dianggap operasi baru.</p>
+        <h3>Bolehkan saya memakai satu kunci untuk banyak server?</h3>
+        <p>Boleh. Tapi lebih aman dan rapi bila setiap aplikasi atau lingkungan punya kunci sendiri — kalau ada masalah, Anda cukup mencabut satu kunci itu saja.</p>
+
+        <p style="margin-top:2.5rem;color:var(--muted);font-size:.9rem;">Rajacek API · Dokumentasi member v1.0 · Terakhir diselaraskan dengan kontrak API pada 23 Oktober 2026.</p>
+      </main>
+    </div>
+  </body>
+</html>

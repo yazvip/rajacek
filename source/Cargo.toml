@@ -1,0 +1,48 @@
+[package]
+name = "rajacek-api"
+version = "0.1.0"
+edition = "2021"
+description = "API validasi rekening, e-wallet, dan WhatsApp dengan dashboard administrasi berbahasa Indonesia."
+license = "UNLICENSED"
+publish = false
+
+[lib]
+name = "rajacek_api"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rajacek-api"
+path = "src/main.rs"
+
+[[bin]]
+name = "rajacek-worker"
+path = "src/bin/worker.rs"
+
+[dependencies]
+aes-gcm = "0.10"
+anyhow = "1.0"
+async-trait = "0.1"
+axum = { version = "0.7", features = ["http1", "json", "macros"] }
+axum-extra = { version = "0.9", features = ["cookie"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+dotenvy = "0.15"
+hex = "0.4"
+http = "1.1"
+jsonwebtoken = "9.3"
+rand = "0.8"
+redis = { version = "0.27", features = ["connection-manager", "script", "tokio-comp"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+sqlx = { version = "0.8", default-features = false, features = ["chrono", "macros", "migrate", "mysql", "runtime-tokio-rustls", "uuid"] }
+thiserror = "1.0"
+futures = "0.3"
+tokio = { version = "1.40", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tower = { version = "0.5", features = ["limit", "util"] }
+tower-http = { version = "0.6", features = ["compression-gzip", "cors", "fs", "request-id", "sensitive-headers", "set-header", "timeout", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2.5"
+uuid = { version = "1.10", features = ["serde", "v4", "v7"] }

@@ -1,0 +1,63 @@
+# ============================================================================
+# MySQL 8 — profil ringan untuk Rajacek (target RSS mysqld ±180–250 MB)
+# ----------------------------------------------------------------------------
+# Beban kerja Rajacek: dataset kecil, tulis append-only dari worker (satu
+# transaksi per event), baca berupa lookup berindeks (riwayat per prefix kunci,
+# urut waktu terbaru) dan COUNT. Seluruh indeks panas muat di buffer pool kecil,
+# jadi performa tidak bergantung RAM besar — yang dipangkas di sini adalah
+# komponen MySQL yang tidak dipakai: Performance Schema, X Plugin, binary log,
+# dan buffer per-koneksi yang berlebihan.
+#
+# Cara pasang (pilih salah satu, lalu restart MySQL):
+#   - Server MySQL mandiri: salin ke /etc/mysql/conf.d/rajacek.cnf
+#   - aaPanel: tempel isi [mysqld] ke /etc/my.cnf (menu Database -> MySQL ->
+#     Konfigurasi), sesuaikan bila ada kunci yang bentrok, lalu restart.
+# Verifikasi setelah restart:
+#   SELECT @@performance_schema, @@innodb_buffer_pool_size, @@max_connections;
+#   ps -o rss= -p "$(pgrep -x mysqld)"   -> RSS dalam KB
+# ============================================================================
+
+[mysqld]
+# --- Penghemat terbesar: matikan instrumentasi & plugin yang tak dipakai ---
+performance_schema = OFF          # bawaan ON bisa memakai 100-400 MB sendiri
+mysqlx = OFF                      # X Protocol (port 33060) tidak dipakai aplikasi
+disable_log_bin                   # tanpa replikasi/PITR: hemat I/O tulis & CPU.
+                                  # Backup mengandalkan mysqldump terjadwal.
+skip_name_resolve = ON            # koneksi dari 127.0.0.1/socket; hindari DNS lookup
+
+# --- Cache utama: cukup untuk seluruh data + indeks panas Rajacek ---
+innodb_buffer_pool_size = 128M    # naikkan ke 256M bila RAM VPS longgar
+innodb_buffer_pool_instances = 1
+innodb_log_buffer_size = 16M
+innodb_redo_log_capacity = 64M    # tulis worker = transaksi kecil append-only
+
+# --- Koneksi: pool aplikasi maks 20/pool (API+worker ±40) + ruang admin ---
+max_connections = 75
+thread_cache_size = 16
+wait_timeout = 600                # putus koneksi idle; pool sqlx juga mengelola
+interactive_timeout = 600
+
+# --- Buffer per-koneksi (dialokasikan saat dipakai; kecilkan dari bawaan) ---
+sort_buffer_size = 256K
+join_buffer_size = 256K
+read_buffer_size = 128K
+read_rnd_buffer_size = 256K
+tmp_table_size = 16M
+max_heap_table_size = 16M
+
+# --- Cache tabel/skema: jumlah tabel Rajacek sedikit ---
+table_open_cache = 512
+table_definition_cache = 512
+
+# --- Durabilitas ledger TIDAK dikorbankan demi ringan ---
+innodb_flush_log_at_trx_commit = 1   # setiap commit terjamin di disk
+innodb_flush_method = O_DIRECT       # hindari double-buffer dengan page cache OS
+innodb_io_capacity = 1000            # SSD VPS
+innodb_io_capacity_max = 2000
+
+max_allowed_packet = 64M
+
+# Opsional (hapus tanda # bila ingin log query lambat >1 dtk untuk tuning):
+# slow_query_log = ON
+# long_query_time = 1
+# slow_query_log_file = /var/log/mysql/slow.log

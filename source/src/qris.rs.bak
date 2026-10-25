@@ -1,0 +1,1629 @@
+//! Pembelian paket mandiri member via QRIS Cutiezy.
+//!
+//! Aturan keamanan yang dijaga modul ini:
+//! - Token, qris_string, dan URL Cutiezy TIDAK PERNAH dikirim ke klien
+//!   member (gambar QR disajikan lewat proxy endpoint kita sendiri).
+//! - Webhook tidak pernah langsung grant: selalu re-verifikasi lewat
+//!   check-status (gratis) + cocokkan nominal dulu.
+//! - Grant kuota atomik (store::grant_package_order): satu transaksi
+//!   MySQL mengubah kunci + order + plan_kind dengan CAS status paid,
+//!   jadi webhook + polling + sweep yang bersamaan hanya satu yang menang.
+//! - Satu order waiting per member + rate limit create (tiap create QR
+//!   yang sukses memotong 6 hit kuota akun Cutiezy kita).
+
+use std::{sync::Arc, time::Duration};
+
+use axum::http::StatusCode;
+use chrono::{DateTime, NaiveDateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use sqlx::MySqlPool;
+use uuid::Uuid;
+
+use crate::{
+    config::AppConfig,
+    error::AppError,
+    models::{AdminPackage, GrantOutcome},
+    provider_config::CredentialCipher,
+    store::AdminStore,
+};
+
+/// Durasi QRIS yang diizinkan Cutiezy (menit). Di luar ini create ditolak.
+pub const ALLOWED_EXPIRY_MINUTES: [i64; 5] = [3, 5, 10, 12, 15];
+/// Batas create order per member per jam (anti boros 6 hit Cutiezy).
+const CREATE_ORDERS_PER_HOUR: i64 = 5;
+/// Satu create order per proses dalam satu waktu: cek order waiting +
+/// create Cutiezy + insert harus atomik terhadap create lain member yang
+/// sama (deployment single-instance; multi-instance butuh guard DB).
+static CREATE_ORDER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+// ---------------------------------------------------------------------------
+// Pengaturan
+// ---------------------------------------------------------------------------
+
+/// Pengaturan QRIS internal (ciphertext TIDAK PERNAH diserialisasi keluar).
+pub struct QrisSettings {
+    pub enabled: bool,
+    pub expiry_minutes: i64,
+    pub valid_days: i64,
+    pub source_id: Option<i64>,
+    pub api_key_ciphertext: Option<Vec<u8>>,
+    pub webhook_secret_ciphertext: Option<Vec<u8>>,
+    pub last_error: Option<String>,
+    pub last_cutiezy_remaining: Option<i64>,
+}
+
+/// Tampilan pengaturan untuk panel admin (tanpa rahasia).
+#[derive(Serialize)]
+pub struct QrisSettingsView {
+    pub enabled: bool,
+    pub expiry_minutes: i64,
+    pub valid_days: i64,
+    pub source_id: Option<i64>,
+    pub has_api_key: bool,
+    pub has_webhook_secret: bool,
+    pub last_error: Option<String>,
+    pub last_cutiezy_remaining: Option<i64>,
+}
+
+/// Input admin. Field yang absen/kosong = pertahankan nilai lama;
+/// source_id memakai Option<Option<..>>: null eksplisit = hapus.
+#[derive(Deserialize)]
+pub struct QrisSettingsInput {
+    pub enabled: Option<bool>,
+    pub expiry_minutes: Option<i64>,
+    pub valid_days: Option<i64>,
+    pub source_id: Option<Option<i64>>,
+    pub api_key: Option<String>,
+    pub webhook_secret: Option<String>,
+}
+
+impl QrisSettings {
+    fn defaults() -> Self {
+        Self {
+            enabled: false,
+            expiry_minutes: 15,
+            valid_days: 30,
+            source_id: None,
+            api_key_ciphertext: None,
+            webhook_secret_ciphertext: None,
+            last_error: None,
+            last_cutiezy_remaining: None,
+        }
+    }
+
+    pub fn view(&self) -> QrisSettingsView {
+        QrisSettingsView {
+            enabled: self.enabled,
+            expiry_minutes: self.expiry_minutes,
+            valid_days: self.valid_days,
+            source_id: self.source_id,
+            has_api_key: self.api_key_ciphertext.is_some(),
+            has_webhook_secret: self.webhook_secret_ciphertext.is_some(),
+            last_error: self.last_error.clone(),
+            last_cutiezy_remaining: self.last_cutiezy_remaining,
+        }
+    }
+}
+
+pub async fn load_qris_settings(pool: &MySqlPool) -> Result<QrisSettings, AppError> {
+    let row = sqlx::query_as::<_, QrisSettingsRow>(
+        "SELECT enabled, expiry_minutes, valid_days, source_id, \
+         api_key_ciphertext, webhook_secret_ciphertext, last_error, \
+         last_cutiezy_remaining FROM qris_settings WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::internal("Pengaturan QRIS tidak dapat dibaca"))?;
+    Ok(match row {
+        Some(row) => QrisSettings {
+            enabled: row.enabled != 0,
+            expiry_minutes: row.expiry_minutes,
+            valid_days: row.valid_days,
+            source_id: row.source_id,
+            api_key_ciphertext: row.api_key_ciphertext,
+            webhook_secret_ciphertext: row.webhook_secret_ciphertext,
+            last_error: row.last_error,
+            last_cutiezy_remaining: row.last_cutiezy_remaining,
+        },
+        None => QrisSettings::defaults(),
+    })
+}
+
+#[derive(sqlx::FromRow)]
+struct QrisSettingsRow {
+    enabled: i8,
+    expiry_minutes: i64,
+    valid_days: i64,
+    source_id: Option<i64>,
+    api_key_ciphertext: Option<Vec<u8>>,
+    webhook_secret_ciphertext: Option<Vec<u8>>,
+    last_error: Option<String>,
+    last_cutiezy_remaining: Option<i64>,
+}
+
+pub(crate) async fn save_qris_settings(
+    pool: &MySqlPool,
+    input: QrisSettingsInput,
+    cipher: &CredentialCipher,
+) -> Result<QrisSettingsView, AppError> {
+    if let Some(minutes) = input.expiry_minutes {
+        if !ALLOWED_EXPIRY_MINUTES.contains(&minutes) {
+            return Err(AppError::bad_request(
+                "expiry_minutes harus salah satu dari 3, 5, 10, 12, atau 15",
+            ));
+        }
+    }
+    if let Some(days) = input.valid_days {
+        if !(1..=3650).contains(&days) {
+            return Err(AppError::bad_request(
+                "valid_days pembelian harus 1–3650 hari",
+            ));
+        }
+    }
+    if let Some(Some(source)) = input.source_id {
+        if source <= 0 {
+            return Err(AppError::bad_request("source_id harus positif"));
+        }
+    }
+    let mut current = load_qris_settings(pool).await?;
+    if let Some(enabled) = input.enabled {
+        current.enabled = enabled;
+    }
+    if let Some(minutes) = input.expiry_minutes {
+        current.expiry_minutes = minutes;
+    }
+    if let Some(days) = input.valid_days {
+        current.valid_days = days;
+    }
+    if let Some(source) = input.source_id {
+        current.source_id = source;
+    }
+    if let Some(key) = input.api_key {
+        if !key.trim().is_empty() {
+            current.api_key_ciphertext = Some(
+                cipher
+                    .encrypt(key.trim())
+                    .map_err(|_| AppError::internal("API key QRIS tidak dapat dienkripsi"))?,
+            );
+        }
+    }
+    if let Some(secret) = input.webhook_secret {
+        if !secret.trim().is_empty() {
+            current.webhook_secret_ciphertext = Some(
+                cipher
+                    .encrypt(secret.trim())
+                    .map_err(|_| AppError::internal("Webhook secret tidak dapat dienkripsi"))?,
+            );
+        }
+    }
+    sqlx::query(
+        "INSERT INTO qris_settings (id, enabled, expiry_minutes, valid_days, \
+         source_id, api_key_ciphertext, webhook_secret_ciphertext) \
+         VALUES (1, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE \
+         enabled = VALUES(enabled), expiry_minutes = VALUES(expiry_minutes), \
+         valid_days = VALUES(valid_days), source_id = VALUES(source_id), \
+         api_key_ciphertext = VALUES(api_key_ciphertext), \
+         webhook_secret_ciphertext = VALUES(webhook_secret_ciphertext)",
+    )
+    .bind(if current.enabled { 1 } else { 0 })
+    .bind(current.expiry_minutes)
+    .bind(current.valid_days)
+    .bind(current.source_id)
+    .bind(&current.api_key_ciphertext)
+    .bind(&current.webhook_secret_ciphertext)
+    .execute(pool)
+    .await
+    .map_err(|_| AppError::internal("Pengaturan QRIS tidak dapat disimpan"))?;
+    Ok(current.view())
+}
+
+pub async fn record_qris_error(pool: &MySqlPool, message: &str) {
+    sqlx::query(
+        "INSERT INTO qris_settings (id, last_error) VALUES (1, ?) \
+         ON DUPLICATE KEY UPDATE last_error = VALUES(last_error)",
+    )
+    .bind(message)
+    .execute(pool)
+    .await
+    .ok();
+}
+
+pub async fn record_cutiezy_remaining(pool: &MySqlPool, remaining: i64) {
+    sqlx::query(
+        "INSERT INTO qris_settings (id, last_cutiezy_remaining) VALUES (1, ?) \
+         ON DUPLICATE KEY UPDATE last_cutiezy_remaining = VALUES(last_cutiezy_remaining)",
+    )
+    .bind(remaining)
+    .execute(pool)
+    .await
+    .ok();
+}
+
+fn decrypt_setting(cipher: &CredentialCipher, ciphertext: &[u8]) -> Option<String> {
+    cipher.decrypt(ciphertext).ok()
+}
+
+// ---------------------------------------------------------------------------
+// HMAC-SHA256 (manual dengan sha2; tanpa crate hmac tambahan)
+// ---------------------------------------------------------------------------
+
+fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut key_block = [0u8; 64];
+    if key.len() > 64 {
+        key_block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; 64];
+    let mut opad = [0x5cu8; 64];
+    for index in 0..64 {
+        ipad[index] ^= key_block[index];
+        opad[index] ^= key_block[index];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(msg);
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner_hash);
+    outer.finalize().into()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for index in 0..left.len() {
+        diff |= left[index] ^ right[index];
+    }
+    diff == 0
+}
+
+/// Verifikasi header X-Cutiezy-Signature. Format signature tidak
+/// didokumentasikan di halaman QRIS (hex paling umum); terima hex DAN
+/// base64 agar tidak gagal tertutup bila formatnya base64.
+pub fn verify_webhook_signature(secret: &str, body: &[u8], signature: &str) -> bool {
+    use base64::Engine;
+    let expected = hmac_sha256(secret.as_bytes(), body);
+    let signature = signature.trim();
+    if let Ok(bytes) = hex::decode(signature) {
+        if constant_time_eq(&bytes, &expected) {
+            return true;
+        }
+    }
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(signature) {
+        if constant_time_eq(&bytes, &expected) {
+            return true;
+        }
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Klien Cutiezy
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+pub enum QrisError {
+    NotConfigured(&'static str),
+    Transport(String),
+    Provider {
+        http_status: u16,
+        code: Option<String>,
+        message: String,
+    },
+    AlreadyPaid,
+    Unexpected(String),
+}
+
+impl QrisError {
+    /// Pesan aman untuk member (tanpa detail provider).
+    pub fn member_message(&self) -> &'static str {
+        match self {
+            Self::NotConfigured(_) => "Pembayaran belum dikonfigurasi admin.",
+            Self::Transport(_) => "Layanan pembayaran tidak dapat dihubungi. Coba lagi.",
+            Self::Provider { .. } => "Pembayaran belum bisa dibuat. Coba lagi.",
+            Self::AlreadyPaid => "Tagihan ini sudah dibayar.",
+            Self::Unexpected(_) => "Terjadi kesalahan. Coba lagi.",
+        }
+    }
+
+    fn to_app_error(&self) -> AppError {
+        match self {
+            Self::NotConfigured(message) => AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "qris_not_configured",
+                *message,
+            ),
+            Self::Transport(_) => AppError::new(
+                StatusCode::BAD_GATEWAY,
+                "qris_upstream_unavailable",
+                self.member_message(),
+            ),
+            Self::Provider { http_status, .. } => {
+                if *http_status == 429 {
+                    AppError::new(
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "qris_rate_limited",
+                        "Terlalu banyak permintaan pembayaran. Coba lagi sebentar.",
+                    )
+                } else {
+                    AppError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "qris_provider_error",
+                        self.member_message(),
+                    )
+                }
+            }
+            Self::AlreadyPaid => AppError::new(
+                StatusCode::CONFLICT,
+                "qris_already_paid",
+                self.member_message(),
+            ),
+            Self::Unexpected(_) => AppError::internal(self.member_message()),
+        }
+    }
+}
+
+pub struct QrisClient {
+    base_url: String,
+    http: reqwest::Client,
+}
+
+impl QrisClient {
+    pub fn new(base_url: &str) -> Result<Self, AppError> {
+        let http = reqwest::Client::builder()
+            .build()
+            .map_err(|_| AppError::internal("Klien HTTP QRIS tidak dapat dibuat"))?;
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_owned(),
+            http,
+        })
+    }
+
+    fn url(&self, path: &str) -> String {
+        format!("{}{}", self.base_url, path)
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateResponse {
+    ok: Option<bool>,
+    success: Option<bool>,
+    message: Option<String>,
+    data: Option<CreateData>,
+    remaining_quota: Option<RemainingQuota>,
+}
+
+#[derive(Deserialize)]
+struct CreateData {
+    token: String,
+    amount: u64,
+    qris_string: Option<String>,
+    image_url: Option<String>,
+    // expires_at Cutiezy sengaja tidak dibaca: formatnya naive tanpa TZ,
+    // expiry order dihitung sendiri dari now + expiry_minutes.
+}
+
+#[derive(Deserialize)]
+struct RemainingQuota {
+    remaining: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct ErrorResponse {
+    error: Option<String>,
+    message: Option<String>,
+}
+
+pub struct CreatedInvoice {
+    pub token: String,
+    pub amount: u64,
+    pub qris_string: Option<String>,
+    pub image_url: Option<String>,
+    /// Sisa kuota Cutiezy dari respons create (untuk panel admin).
+    pub remaining_quota: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QrisPaymentStatus {
+    Paid {
+        paid_at: Option<NaiveDateTime>,
+        amount: u64,
+        mutation_ref: Option<String>,
+    },
+    Pending {
+        remaining_seconds: i64,
+    },
+    Expired,
+    Canceled,
+    NotFound,
+}
+
+#[derive(Deserialize)]
+struct CheckResponse {
+    status: Option<String>,
+    paid_at: Option<String>,
+    amount: Option<u64>,
+    mutation_ref: Option<String>,
+    remaining_seconds: Option<i64>,
+}
+
+fn parse_cutiezy_datetime(value: &str) -> Option<NaiveDateTime> {
+    NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S").ok()
+}
+
+impl QrisClient {
+    /// Buat QRIS dinamis. GAGAL total (timeout/transport) tidak boleh
+    /// di-retry otomatis oleh pemanggil: create yang sukses memotong 6 hit
+    /// kuota Cutiezy, jadi retry bisa menggandakan biaya.
+    pub async fn create(
+        &self,
+        api_key: &str,
+        amount: u64,
+        expiry_minutes: i64,
+        source_id: Option<i64>,
+    ) -> Result<CreatedInvoice, QrisError> {
+        #[derive(Serialize)]
+        struct Body {
+            amount: u64,
+            expiry_minutes: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            source_id: Option<i64>,
+        }
+        let res = self
+            .http
+            .post(self.url("/api/qris/create"))
+            .header("X-API-Key", api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(20))
+            .json(&Body {
+                amount,
+                expiry_minutes,
+                source_id,
+            })
+            .send()
+            .await
+            .map_err(|error| QrisError::Transport(error.to_string()))?;
+        let status = res.status().as_u16();
+        let body = res
+            .text()
+            .await
+            .map_err(|error| QrisError::Transport(error.to_string()))?;
+        if !(200..300).contains(&status) {
+            let parsed: ErrorResponse = serde_json::from_str(&body).unwrap_or(ErrorResponse {
+                error: None,
+                message: None,
+            });
+            return Err(QrisError::Provider {
+                http_status: status,
+                code: parsed.error,
+                message: parsed
+                    .message
+                    .unwrap_or_else(|| "Create QRIS gagal".to_owned()),
+            });
+        }
+        let parsed: CreateResponse = serde_json::from_str(&body)
+            .map_err(|error| QrisError::Unexpected(error.to_string()))?;
+        let ok = parsed.ok.unwrap_or(false) || parsed.success.unwrap_or(false);
+        let data = parsed.data.filter(|_| ok).ok_or_else(|| {
+            QrisError::Unexpected(
+                parsed
+                    .message
+                    .unwrap_or_else(|| "Respons create QRIS tidak lengkap".to_owned()),
+            )
+        })?;
+        if data.amount != amount {
+            return Err(QrisError::Unexpected(
+                "Nominal dari Cutiezy tidak sama dengan order".to_owned(),
+            ));
+        }
+        Ok(CreatedInvoice {
+            token: data.token,
+            amount: data.amount,
+            qris_string: data.qris_string,
+            image_url: data.image_url,
+            remaining_quota: parsed.remaining_quota.and_then(|quota| quota.remaining),
+        })
+    }
+
+    /// Cek status. GRATIS (0 hit) menurut dokumentasi; tanpa API key.
+    pub async fn check(&self, token: &str) -> Result<QrisPaymentStatus, QrisError> {
+        let res = self
+            .http
+            .get(self.url(&format!("/qris/check-status/{token}")))
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await
+            .map_err(|error| QrisError::Transport(error.to_string()))?;
+        let status_code = res.status().as_u16();
+        let body = res
+            .text()
+            .await
+            .map_err(|error| QrisError::Transport(error.to_string()))?;
+        if status_code == 404 {
+            return Ok(QrisPaymentStatus::NotFound);
+        }
+        if !(200..300).contains(&status_code) {
+            let parsed: ErrorResponse = serde_json::from_str(&body).unwrap_or(ErrorResponse {
+                error: None,
+                message: None,
+            });
+            return Err(QrisError::Provider {
+                http_status: status_code,
+                code: parsed.error,
+                message: parsed
+                    .message
+                    .unwrap_or_else(|| "Cek status QRIS gagal".to_owned()),
+            });
+        }
+        let parsed: CheckResponse = serde_json::from_str(&body)
+            .map_err(|error| QrisError::Unexpected(error.to_string()))?;
+        Ok(match parsed.status.as_deref() {
+            Some("paid") => QrisPaymentStatus::Paid {
+                paid_at: parsed.paid_at.as_deref().and_then(parse_cutiezy_datetime),
+                amount: parsed.amount.unwrap_or(0),
+                mutation_ref: parsed.mutation_ref,
+            },
+            Some("pending") => QrisPaymentStatus::Pending {
+                remaining_seconds: parsed.remaining_seconds.unwrap_or(0),
+            },
+            Some("expired") => QrisPaymentStatus::Expired,
+            Some("canceled") => QrisPaymentStatus::Canceled,
+            _ => QrisPaymentStatus::NotFound,
+        })
+    }
+
+    /// Batalkan tagihan pending. Sudah lunas -> AlreadyPaid (pemanggil
+    /// harus beralih ke verify_and_grant, bukan menandai canceled).
+    pub async fn cancel(&self, api_key: &str, token: &str) -> Result<(), QrisError> {
+        #[derive(Serialize)]
+        struct Body<'a> {
+            token: &'a str,
+        }
+        let res = self
+            .http
+            .post(self.url("/api/qris/cancel"))
+            .header("X-API-Key", api_key)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .timeout(Duration::from_secs(15))
+            .json(&Body { token })
+            .send()
+            .await
+            .map_err(|error| QrisError::Transport(error.to_string()))?;
+        let status = res.status().as_u16();
+        let body = res
+            .text()
+            .await
+            .map_err(|error| QrisError::Transport(error.to_string()))?;
+        if status == 400 {
+            let parsed: ErrorResponse = serde_json::from_str(&body).unwrap_or(ErrorResponse {
+                error: None,
+                message: None,
+            });
+            if parsed.status_is_paid() {
+                return Err(QrisError::AlreadyPaid);
+            }
+        }
+        if !(200..300).contains(&status) {
+            let parsed: ErrorResponse = serde_json::from_str(&body).unwrap_or(ErrorResponse {
+                error: None,
+                message: None,
+            });
+            return Err(QrisError::Provider {
+                http_status: status,
+                code: parsed.error,
+                message: parsed
+                    .message
+                    .unwrap_or_else(|| "Cancel QRIS gagal".to_owned()),
+            });
+        }
+        Ok(())
+    }
+
+    /// Unduh bytes gambar QR dari image_url Cutiezy (untuk proxy server).
+    pub async fn fetch_qr_png(&self, image_url: &str) -> Result<(Vec<u8>, String), QrisError> {
+        let res = self
+            .http
+            .get(image_url)
+            .timeout(Duration::from_secs(10))
+            .send()
+            .await
+            .map_err(|error| QrisError::Transport(error.to_string()))?;
+        if !res.status().is_success() {
+            return Err(QrisError::Unexpected(
+                "Gambar QR tidak dapat diunduh".to_owned(),
+            ));
+        }
+        let content_type = res
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("image/png")
+            .to_owned();
+        if !content_type.starts_with("image/") {
+            return Err(QrisError::Unexpected("Gambar QR bukan image".to_owned()));
+        }
+        let bytes = res
+            .bytes()
+            .await
+            .map_err(|error| QrisError::Transport(error.to_string()))?;
+        Ok((bytes.to_vec(), content_type))
+    }
+}
+
+impl ErrorResponse {
+    fn status_is_paid(&self) -> bool {
+        // Cancel yang sudah lunas dibalas 400 + status paid (body atau
+        // pesan); terima kedua bentuknya agar tidak salah membatalkan.
+        self.error.as_deref() == Some("paid")
+            || self.message.as_deref().is_some_and(|message| {
+                message.to_ascii_lowercase().contains("sudah dibayar")
+                    || message.to_ascii_lowercase().contains("sudah lunas")
+            })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Order
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PackageOrderRow {
+    pub id: String,
+    pub member_id: String,
+    pub key_id: Option<String>,
+    pub package_id: String,
+    pub package_name: String,
+    pub price_idr: u64,
+    pub quota_hits: u64,
+    pub rate_limit_per_minute: u32,
+    pub valid_days: i64,
+    pub amount_idr: u64,
+    pub status: String,
+    pub qris_token: Option<String>,
+    pub qris_string: Option<String>,
+    pub qris_image_url: Option<String>,
+    pub qris_expires_at: Option<NaiveDateTime>,
+    pub paid_at: Option<NaiveDateTime>,
+    pub granted_at: Option<NaiveDateTime>,
+    pub granted_quota: Option<u64>,
+    pub granted_expires_at: Option<NaiveDateTime>,
+    pub mutation_ref: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}
+
+/// Tampilan order untuk member: TANPA token/QRIS string/URL Cutiezy.
+#[derive(Serialize)]
+pub struct MemberOrderView {
+    pub id: String,
+    pub package_id: String,
+    pub package_name: String,
+    pub price_idr: u64,
+    pub quota_hits: u64,
+    pub rate_limit_per_minute: u32,
+    pub valid_days: i64,
+    pub amount_idr: u64,
+    pub status: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub remaining_seconds: i64,
+    pub paid_at: Option<DateTime<Utc>>,
+    pub granted_at: Option<DateTime<Utc>>,
+    pub granted_quota: Option<u64>,
+    pub granted_expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+fn naive_to_utc(value: NaiveDateTime) -> DateTime<Utc> {
+    value.and_utc()
+}
+
+impl PackageOrderRow {
+    pub fn member_view(&self) -> MemberOrderView {
+        let expires_at = self.qris_expires_at.map(naive_to_utc);
+        let remaining_seconds = match (self.status.as_str(), expires_at) {
+            ("waiting_payment", Some(expires)) => (expires - Utc::now()).num_seconds().max(0),
+            _ => 0,
+        };
+        MemberOrderView {
+            id: self.id.clone(),
+            package_id: self.package_id.clone(),
+            package_name: self.package_name.clone(),
+            price_idr: self.price_idr,
+            quota_hits: self.quota_hits,
+            rate_limit_per_minute: self.rate_limit_per_minute,
+            valid_days: self.valid_days,
+            amount_idr: self.amount_idr,
+            status: self.status.clone(),
+            expires_at,
+            remaining_seconds,
+            paid_at: self.paid_at.map(naive_to_utc),
+            granted_at: self.granted_at.map(naive_to_utc),
+            granted_quota: self.granted_quota,
+            granted_expires_at: self.granted_expires_at.map(naive_to_utc),
+            created_at: naive_to_utc(self.created_at),
+        }
+    }
+}
+
+const ORDER_COLUMNS: &str = "id, member_id, key_id, package_id, package_name, \
+    price_idr, quota_hits, rate_limit_per_minute, valid_days, amount_idr, status, \
+    qris_token, qris_string, qris_image_url, qris_expires_at, paid_at, granted_at, \
+    granted_quota, granted_expires_at, mutation_ref, last_error, created_at, updated_at";
+
+pub async fn get_order(
+    pool: &MySqlPool,
+    order_id: &Uuid,
+) -> Result<Option<PackageOrderRow>, AppError> {
+    sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders WHERE id = ?"
+    ))
+    .bind(order_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::internal("Order tidak dapat dibaca"))
+}
+
+pub async fn get_order_for_member(
+    pool: &MySqlPool,
+    order_id: &Uuid,
+    member_id: &Uuid,
+) -> Result<Option<PackageOrderRow>, AppError> {
+    sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders WHERE id = ? AND member_id = ?"
+    ))
+    .bind(order_id.to_string())
+    .bind(member_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::internal("Order tidak dapat dibaca"))
+}
+
+pub async fn list_orders_for_member(
+    pool: &MySqlPool,
+    member_id: &Uuid,
+    limit: i64,
+) -> Result<Vec<PackageOrderRow>, AppError> {
+    sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders WHERE member_id = ? \
+         ORDER BY created_at DESC LIMIT ?"
+    ))
+    .bind(member_id.to_string())
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::internal("Daftar order tidak dapat dibaca"))
+}
+
+pub async fn get_order_by_token(
+    pool: &MySqlPool,
+    token: &str,
+) -> Result<Option<PackageOrderRow>, AppError> {
+    sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders WHERE qris_token = ? LIMIT 1"
+    ))
+    .bind(token)
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::internal("Order tidak dapat dibaca"))
+}
+
+/// Tampilan order untuk panel admin: seluruh kolom + email member.
+/// Token Cutiezy BOLEH tampil di sini (admin saja, bukan member).
+#[derive(Serialize, sqlx::FromRow)]
+pub struct AdminOrderView {
+    pub id: String,
+    pub member_id: String,
+    pub member_email: Option<String>,
+    pub key_id: Option<String>,
+    pub package_id: String,
+    pub package_name: String,
+    pub price_idr: u64,
+    pub quota_hits: u64,
+    pub rate_limit_per_minute: u32,
+    pub valid_days: i64,
+    pub amount_idr: u64,
+    pub status: String,
+    pub qris_token: Option<String>,
+    pub qris_expires_at: Option<NaiveDateTime>,
+    pub paid_at: Option<NaiveDateTime>,
+    pub granted_at: Option<NaiveDateTime>,
+    pub granted_quota: Option<u64>,
+    pub granted_expires_at: Option<NaiveDateTime>,
+    pub mutation_ref: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}
+
+pub async fn list_orders_admin(
+    pool: &MySqlPool,
+    status: Option<&str>,
+    limit: i64,
+) -> Result<Vec<AdminOrderView>, AppError> {
+    let rows = match status {
+        Some(status) => {
+            sqlx::query_as::<_, AdminOrderView>(
+                "SELECT o.id, o.member_id, m.email AS member_email, o.key_id, \
+                 o.package_id, o.package_name, o.price_idr, o.quota_hits, \
+                 o.rate_limit_per_minute, o.valid_days, o.amount_idr, o.status, \
+                 o.qris_token, o.qris_expires_at, o.paid_at, o.granted_at, \
+                 o.granted_quota, o.granted_expires_at, o.mutation_ref, \
+                 o.last_error, o.created_at, o.updated_at \
+                 FROM package_orders o LEFT JOIN members m ON m.id = o.member_id \
+                 WHERE o.status = ? ORDER BY o.created_at DESC LIMIT ?",
+            )
+            .bind(status)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        None => {
+            sqlx::query_as::<_, AdminOrderView>(
+                "SELECT o.id, o.member_id, m.email AS member_email, o.key_id, \
+                 o.package_id, o.package_name, o.price_idr, o.quota_hits, \
+                 o.rate_limit_per_minute, o.valid_days, o.amount_idr, o.status, \
+                 o.qris_token, o.qris_expires_at, o.paid_at, o.granted_at, \
+                 o.granted_quota, o.granted_expires_at, o.mutation_ref, \
+                 o.last_error, o.created_at, o.updated_at \
+                 FROM package_orders o LEFT JOIN members m ON m.id = o.member_id \
+                 ORDER BY o.created_at DESC LIMIT ?",
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+    };
+    rows.map_err(|_| AppError::internal("Daftar order tidak dapat dibaca"))
+}
+
+pub async fn get_order_admin(
+    pool: &MySqlPool,
+    order_id: &Uuid,
+) -> Result<Option<AdminOrderView>, AppError> {
+    sqlx::query_as::<_, AdminOrderView>(
+        "SELECT o.id, o.member_id, m.email AS member_email, o.key_id, \
+         o.package_id, o.package_name, o.price_idr, o.quota_hits, \
+         o.rate_limit_per_minute, o.valid_days, o.amount_idr, o.status, \
+         o.qris_token, o.qris_expires_at, o.paid_at, o.granted_at, \
+         o.granted_quota, o.granted_expires_at, o.mutation_ref, \
+         o.last_error, o.created_at, o.updated_at \
+         FROM package_orders o LEFT JOIN members m ON m.id = o.member_id \
+         WHERE o.id = ?",
+    )
+    .bind(order_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::internal("Order tidak dapat dibaca"))
+}
+
+pub async fn waiting_order_for_member(
+    pool: &MySqlPool,
+    member_id: &Uuid,
+) -> Result<Option<PackageOrderRow>, AppError> {
+    sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders \
+         WHERE member_id = ? AND status = 'waiting_payment' \
+         ORDER BY created_at DESC LIMIT 1"
+    ))
+    .bind(member_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(|_| AppError::internal("Order menunggu tidak dapat dibaca"))
+}
+
+async fn set_order_status(
+    pool: &MySqlPool,
+    order_id: &str,
+    from_status: &str,
+    to_status: &str,
+    mutation_ref: Option<&str>,
+    last_error: Option<&str>,
+) -> Result<bool, AppError> {
+    let updated = sqlx::query(
+        "UPDATE package_orders SET status = ?, mutation_ref = COALESCE(?, mutation_ref), \
+         last_error = ?, updated_at = UTC_TIMESTAMP(6) \
+         WHERE id = ? AND status = ?",
+    )
+    .bind(to_status)
+    .bind(mutation_ref)
+    .bind(last_error)
+    .bind(order_id)
+    .bind(from_status)
+    .execute(pool)
+    .await
+    .map_err(|_| AppError::internal("Status order tidak dapat diubah"))?;
+    Ok(updated.rows_affected() == 1)
+}
+
+// ---------------------------------------------------------------------------
+// Orkestrasi: create / verify_and_grant / sweep
+// ---------------------------------------------------------------------------
+
+fn pool_or_unavailable(store: &AdminStore) -> Result<MySqlPool, AppError> {
+    store.pool().ok_or_else(|| {
+        AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "qris_database_unavailable",
+            "Pembayaran belum tersedia (database tidak terpasang).",
+        )
+    })
+}
+
+fn cipher_or_unavailable(config: &AppConfig) -> CredentialCipher {
+    CredentialCipher::new(config.api_key_encryption_key.as_deref())
+}
+
+/// Buat order + QRIS. Mengembalikan (view, created_baru). Bila member sudah
+/// punya order waiting, order itu dikembalikan (tanpa QR baru).
+/// Buying requires a usable key: revoked/disabled keys are refused with a
+/// clear message BEFORE any payment (audit 2026-10-25, B3). Expired keys
+/// stay buyable — buying is exactly how they get renewed.
+pub async fn ensure_key_buyable(store: &AdminStore, member_id: Uuid) -> Result<(), AppError> {
+    if let Some((summary, _)) = store.member_key(member_id).await {
+        if summary.status == "revoked" || summary.status == "disabled" {
+            return Err(AppError::forbidden(
+                "Kunci member sudah tidak aktif sehingga tidak dapat membeli paket. Hubungi admin untuk kunci baru.",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub async fn create_member_order(
+    store: &AdminStore,
+    config: &AppConfig,
+    member_id: Uuid,
+    package: &AdminPackage,
+) -> Result<(MemberOrderView, bool), AppError> {
+    let pool = pool_or_unavailable(store)?;
+    if !package.active {
+        return Err(AppError::bad_request("Paket ini sudah tidak aktif"));
+    }
+    // Harga yang ditagih = harga katalog dipotong promo aktif; harga
+    // inilah yang dikunci ke order (snapshot) dan dibuatkan QR-nya.
+    let effective = crate::models::effective_price(package, Utc::now());
+    if effective == 0 {
+        return Err(AppError::bad_request(
+            "Paket gratis tidak dibeli lewat QRIS",
+        ));
+    }
+    let settings = load_qris_settings(&pool).await?;
+    if !settings.enabled {
+        return Err(AppError::forbidden("Pembelian paket sedang tidak tersedia"));
+    }
+    ensure_key_buyable(store, member_id).await?;
+    // Serialisasi create per proses: cek waiting + create + insert tidak
+    // boleh disalip create lain (tiap QR sukses = 6 hit Cutiezy).
+    let _guard = CREATE_ORDER_LOCK.lock().await;
+    if let Some(existing) = waiting_order_for_member(&pool, &member_id).await? {
+        return Ok((existing.member_view(), false));
+    }
+    // Only waiting orders count (audit 2026-10-25, K6): counting canceled
+    // and expired ones let 5 create+cancel cycles block the member for an
+    // hour even though no order is outstanding.
+    let created_last_hour: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM package_orders WHERE member_id = ? \
+         AND status = 'waiting_payment' \
+         AND created_at > UTC_TIMESTAMP(6) - INTERVAL 1 HOUR",
+    )
+    .bind(member_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .map_err(|_| AppError::internal("Rate limit order tidak dapat dibaca"))?;
+    if created_last_hour >= CREATE_ORDERS_PER_HOUR {
+        return Err(AppError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "qris_rate_limited",
+            "Terlalu banyak pembuatan QR. Coba lagi nanti.",
+        ));
+    }
+    let api_key = settings
+        .api_key_ciphertext
+        .as_deref()
+        .and_then(|ciphertext| decrypt_setting(&cipher_or_unavailable(config), ciphertext))
+        .ok_or_else(|| {
+            AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "qris_not_configured",
+                "Pembayaran belum dikonfigurasi admin.",
+            )
+        })?;
+    let client = QrisClient::new(&config.qris_base_url)?;
+    let invoice = client
+        .create(
+            &api_key,
+            effective,
+            settings.expiry_minutes,
+            settings.source_id,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(?error, "Create QRIS gagal");
+            error.to_app_error()
+        })?;
+    if let Some(remaining) = invoice.remaining_quota {
+        record_cutiezy_remaining(&pool, remaining).await;
+    }
+    let order_id = Uuid::now_v7();
+    let now = Utc::now();
+    let expires_at = now + chrono::Duration::minutes(settings.expiry_minutes);
+    // Retry the insert (audit 2026-10-25, K7): a transient database blip
+    // used to orphan an already-issued (payable) QR with no order row.
+    let mut insert_error = None;
+    for attempt in 0..3 {
+        match sqlx::query(
+            "INSERT INTO package_orders (id, member_id, package_id, package_name, \
+             price_idr, quota_hits, rate_limit_per_minute, valid_days, amount_idr, \
+             status, qris_token, qris_string, qris_image_url, qris_expires_at, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting_payment', ?, ?, ?, ?, ?)",
+        )
+        .bind(order_id.to_string())
+        .bind(member_id.to_string())
+        .bind(package.id.to_string())
+        .bind(&package.name)
+        .bind(effective)
+        .bind(package.included_hits)
+        .bind(package.rate_limit_per_minute)
+        .bind(settings.valid_days)
+        .bind(effective)
+        .bind(&invoice.token)
+        .bind(&invoice.qris_string)
+        .bind(&invoice.image_url)
+        .bind(expires_at.naive_utc())
+        .bind(now.naive_utc())
+        .execute(&pool)
+        .await
+        {
+            Ok(_) => {
+                insert_error = None;
+                break;
+            }
+            Err(error) => {
+                insert_error = Some(error);
+                if attempt < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        100 * (attempt as u64 + 1),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+    if let Some(error) = insert_error {
+        // QR sudah terbit di Cutiezy tapi order gagal tersimpan: batalkan
+        // QR-nya (best-effort) agar tidak jadi QR yatim berbayar.
+        tracing::warn!(?error, "Insert order gagal setelah create QRIS (3 percobaan)");
+        if let Err(cancel_error) = client.cancel(&api_key, &invoice.token).await {
+            // Loud: a paid orphan QR cannot be granted without an order row.
+            tracing::error!(?cancel_error, member_id = %member_id, token = %invoice.token, amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
+        }
+        return Err(AppError::internal("Order tidak dapat dibuat. Coba lagi."));
+    }
+    let row = get_order(&pool, &order_id)
+        .await?
+        .ok_or_else(|| AppError::internal("Order baru tidak ditemukan"))?;
+    Ok((row.member_view(), true))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyOutcome {
+    Granted,
+    AlreadyGranted,
+    Waiting,
+    Expired,
+    Canceled,
+    NeedsReview,
+}
+
+/// Verifikasi satu order sampai tuntas (dipakai webhook, tombol cek, sweep).
+/// Tidak pernah menurunkan status paid, tidak pernah grant tanpa nominal
+/// cocok, dan grant hanya lewat store::grant_package_order (atomik).
+pub async fn verify_and_grant(
+    store: &AdminStore,
+    config: &AppConfig,
+    order_id: Uuid,
+) -> Result<(MemberOrderView, VerifyOutcome), AppError> {
+    let pool = pool_or_unavailable(store)?;
+    let order = get_order(&pool, &order_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Order tidak ditemukan"))?;
+    let view = |row: &PackageOrderRow| row.member_view();
+    match order.status.as_str() {
+        "granted" => return Ok((view(&order), VerifyOutcome::AlreadyGranted)),
+        "expired" => return Ok((view(&order), VerifyOutcome::Expired)),
+        "canceled" => return Ok((view(&order), VerifyOutcome::Canceled)),
+        "needs_review" => return Ok((view(&order), VerifyOutcome::NeedsReview)),
+        _ => {}
+    }
+    let member_uuid = Uuid::parse_str(&order.member_id)
+        .map_err(|_| AppError::internal("Member order tidak valid"))?;
+    // Member dinonaktifkan di tengah jalan: tahan grant untuk admin.
+    match store.member_by_id(member_uuid).await? {
+        Some(member) if member.status == "active" => {}
+        Some(_) => {
+            set_order_status(
+                &pool,
+                &order.id,
+                &order.status,
+                "needs_review",
+                None,
+                Some("Member dinonaktifkan; grant ditahan untuk admin"),
+            )
+            .await?;
+            let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+            return Ok((view(&row), VerifyOutcome::NeedsReview));
+        }
+        None => {
+            set_order_status(
+                &pool,
+                &order.id,
+                &order.status,
+                "needs_review",
+                None,
+                Some("Member tidak ditemukan; grant ditahan untuk admin"),
+            )
+            .await?;
+            let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+            return Ok((view(&row), VerifyOutcome::NeedsReview));
+        }
+    }
+    // Sudah terverifikasi lunas sebelumnya: langsung grant (pulih dari
+    // crash antara verify dan grant).
+    if order.status == "paid" {
+        return grant_row(store, &pool, &order).await;
+    }
+    let Some(token) = order.qris_token.clone() else {
+        return Err(AppError::internal("Order tanpa token QRIS"));
+    };
+    let client = QrisClient::new(&config.qris_base_url)?;
+    let status = client.check(&token).await.map_err(|error| {
+        tracing::warn!(?error, "Cek status QRIS gagal");
+        error.to_app_error()
+    })?;
+    match status {
+        QrisPaymentStatus::Paid {
+            amount,
+            mutation_ref,
+            paid_at,
+        } => {
+            if amount != order.amount_idr {
+                set_order_status(
+                    &pool,
+                    &order.id,
+                    "waiting_payment",
+                    "needs_review",
+                    mutation_ref.as_deref(),
+                    Some("Nominal bayar tidak sama dengan order"),
+                )
+                .await?;
+                let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+                return Ok((view(&row), VerifyOutcome::NeedsReview));
+            }
+            // Tandai paid dulu (WHERE status = waiting), lalu grant.
+            let marked = sqlx::query(
+                "UPDATE package_orders SET status = 'paid', paid_at = ?, \
+                 mutation_ref = ?, updated_at = UTC_TIMESTAMP(6) \
+                 WHERE id = ? AND status = 'waiting_payment'",
+            )
+            .bind(paid_at)
+            .bind(mutation_ref.as_deref())
+            .bind(order.id.clone())
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::internal("Order tidak dapat ditandai lunas"))?;
+            if marked.rows_affected() != 1 {
+                // Disalip grant lain: baca ulang dan laporkan hasil akhir.
+                let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+                return Ok(match row.status.as_str() {
+                    "granted" => (view(&row), VerifyOutcome::AlreadyGranted),
+                    // Another verifier already marked this order paid: drive
+                    // the grant instead of misreporting Waiting (audit
+                    // 2026-10-25, K5). grant_row's CAS makes a double grant
+                    // impossible; a loser reports AlreadyGranted.
+                    "paid" => grant_row(store, &pool, &row).await?,
+                    _ => (view(&row), VerifyOutcome::Waiting),
+                });
+            }
+            let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+            grant_row(store, &pool, &row).await
+        }
+        QrisPaymentStatus::Pending { .. } => {
+            // Cutiezy still says pending, but our local expiry passed:
+            // close the order locally instead of blocking new creates
+            // forever behind the one-waiting rule (audit 2026-10-25, K4).
+            if Utc::now()
+                > order
+                    .qris_expires_at
+                    .map(naive_to_utc)
+                    .unwrap_or(Utc::now())
+            {
+                set_order_status(&pool, &order.id, "waiting_payment", "expired", None, None)
+                    .await?;
+                let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+                return Ok((view(&row), VerifyOutcome::Expired));
+            }
+            Ok((view(&order), VerifyOutcome::Waiting))
+        }
+        QrisPaymentStatus::Expired => {
+            set_order_status(&pool, &order.id, "waiting_payment", "expired", None, None).await?;
+            let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+            Ok((view(&row), VerifyOutcome::Expired))
+        }
+        QrisPaymentStatus::Canceled => {
+            set_order_status(&pool, &order.id, "waiting_payment", "canceled", None, None).await?;
+            let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+            Ok((view(&row), VerifyOutcome::Canceled))
+        }
+        QrisPaymentStatus::NotFound => {
+            // Token tak dikenal Cutiezy: jangan buru-buru expired; tunggu
+            // sampai lewat expiry lokal, sweep berikutnya yang menutupnya.
+            if Utc::now()
+                > order
+                    .qris_expires_at
+                    .map(naive_to_utc)
+                    .unwrap_or(Utc::now())
+            {
+                set_order_status(&pool, &order.id, "waiting_payment", "expired", None, None)
+                    .await?;
+                let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+                return Ok((view(&row), VerifyOutcome::Expired));
+            }
+            Ok((view(&order), VerifyOutcome::Waiting))
+        }
+    }
+}
+
+/// Admin re-drive for a `needs_review` order (audit 2026-10-25, B3).
+/// Without this, a paid order stuck in `needs_review` had no product-level
+/// way out at all (not even after its cause — a revoked key, a disabled
+/// member — was fixed). Amount-mismatch rows are REFUSED: granting them
+/// would hand out quota for a payment that did not match the order; those
+/// stay manual (refund / mutation check).
+pub async fn resolve_needs_review_order(
+    store: &AdminStore,
+    order_id: Uuid,
+) -> Result<(MemberOrderView, VerifyOutcome), AppError> {
+    let pool = pool_or_unavailable(store)?;
+    let order = get_order(&pool, &order_id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Order tidak ditemukan"))?;
+    if order.status != "needs_review" {
+        return Err(AppError::conflict(format!(
+            "Order berstatus {} — hanya order needs_review yang dapat di-grant ulang",
+            order.status
+        )));
+    }
+    if order
+        .last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Nominal bayar tidak sama")
+    {
+        return Err(AppError::conflict(
+            "Order needs_review karena nominal tidak sama — grant ulang tidak diizinkan; selesaikan manual (refund/cek mutasi).",
+        ));
+    }
+    // The member must be active again first (mirrors verify_and_grant);
+    // grant_package_order itself does not check member status.
+    let member_uuid = Uuid::parse_str(&order.member_id)
+        .map_err(|_| AppError::internal("Member order tidak valid"))?;
+    match store.member_by_id(member_uuid).await? {
+        Some(member) if member.status == "active" => {}
+        Some(_) => {
+            return Err(AppError::conflict(
+                "Member masih dinonaktifkan; aktifkan member dulu, baru grant ulang.",
+            ));
+        }
+        None => {
+            return Err(AppError::conflict(
+                "Member tidak ditemukan; grant ulang tidak dapat dilanjutkan.",
+            ));
+        }
+    }
+    // Reset to paid (CAS on needs_review) and run the single grant path.
+    // If the key is still revoked/disabled, grant_row puts the order back
+    // to needs_review with a fresh note instead of granting.
+    let reset = set_order_status(
+        &pool,
+        &order.id,
+        "needs_review",
+        "paid",
+        None,
+        Some("Grant ulang oleh admin"),
+    )
+    .await?;
+    if !reset {
+        return Err(AppError::conflict(
+            "Status order berubah selama proses; muat ulang dan coba lagi",
+        ));
+    }
+    let row = get_order(&pool, &order_id)
+        .await?
+        .ok_or_else(|| AppError::internal("Order tidak ditemukan setelah reset"))?;
+    grant_row(store, &pool, &row).await
+}
+
+async fn grant_row(
+    store: &AdminStore,
+    pool: &MySqlPool,
+    order: &PackageOrderRow,
+) -> Result<(MemberOrderView, VerifyOutcome), AppError> {
+    let member_uuid = Uuid::parse_str(&order.member_id)
+        .map_err(|_| AppError::internal("Member order tidak valid"))?;
+    let package_uuid = Uuid::parse_str(&order.package_id)
+        .map_err(|_| AppError::internal("Paket order tidak valid"))?;
+    let order_uuid =
+        Uuid::parse_str(&order.id).map_err(|_| AppError::internal("ID order tidak valid"))?;
+    let outcome = match store
+        .grant_package_order(
+            order_uuid,
+            member_uuid,
+            order.quota_hits,
+            order.valid_days,
+            order.rate_limit_per_minute,
+            package_uuid,
+        )
+        .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) if error.status == StatusCode::CONFLICT => {
+            // Kunci dicabut di tengah jalan (atau status berubah): uang
+            // sudah lunas, jadi TAHAN untuk admin, jangan error ke
+            // pemanggil (webhook akan retry tanpa henti bila 500).
+            set_order_status(
+                pool,
+                &order.id,
+                "paid",
+                "needs_review",
+                None,
+                Some("Kunci member dicabut; grant ditahan untuk admin"),
+            )
+            .await?;
+            let row = get_order(pool, &order_uuid)
+                .await?
+                .unwrap_or_else(|| order.clone());
+            return Ok((row.member_view(), VerifyOutcome::NeedsReview));
+        }
+        Err(error) => return Err(error),
+    };
+    let row = get_order(pool, &order_uuid)
+        .await?
+        .unwrap_or_else(|| order.clone());
+    Ok(match outcome {
+        GrantOutcome::Granted { .. } => (row.member_view(), VerifyOutcome::Granted),
+        GrantOutcome::AlreadyGranted => (row.member_view(), VerifyOutcome::AlreadyGranted),
+    })
+}
+
+/// Apakah event webhook ini notifikasi pembayaran? Docs Cutiezy tidak
+/// konsisten: halaman webhook memakai `qris.payment`, halaman QRIS sempat
+/// menyebut `qris.payment.success` — terima keduanya. `test.ping` dan
+/// event lain diakui (200) tapi tidak memicu apa pun.
+pub(crate) fn is_payment_event(event: Option<&str>) -> bool {
+    matches!(event, Some("qris.payment") | Some("qris.payment.success"))
+}
+
+/// Sweep sekali jalan untuk semua order terbuka (waiting + paid), dipakai
+/// sebagai pemicu dari webhook: webhook mutasi Cutiezy TIDAK membawa
+/// token order kita (hanya reference RRN bank + nominal), jadi webhook
+/// tidak boleh mencocokkan order apa pun — ia hanya membangunkan
+/// rekonsiliasi, dan grant tetap diputuskan verify_and_grant lewat
+/// check-status + cocok nominal. Satu pass, tanpa loop; error per order
+/// dicatat, sweep rutin tiap menit tetap menjadi backstop.
+pub async fn sweep_open_orders_now(store: Arc<AdminStore>, config: Arc<AppConfig>) {
+    let Ok(pool) = pool_or_unavailable(&store) else {
+        return;
+    };
+    let candidates = sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders \
+         WHERE status IN ('waiting_payment', 'paid') \
+         ORDER BY created_at ASC LIMIT 50"
+    ))
+    .fetch_all(&pool)
+    .await;
+    let candidates = match candidates {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(?error, "Sweep pemicu webhook gagal membaca order");
+            return;
+        }
+    };
+    for candidate in candidates {
+        let Ok(order_id) = Uuid::parse_str(&candidate.id) else {
+            continue;
+        };
+        if let Err(error) = verify_and_grant(&store, &config, order_id).await {
+            tracing::warn!(?error, order_id = %candidate.id, "Sweep pemicu webhook gagal");
+        }
+    }
+}
+
+/// Sweep rekonsiliasi tiap menit: order waiting yang lewat expiry dicek
+/// statusnya dulu (paid -> grant, sisanya -> expired), dan order paid yang
+/// tertinggal di-grant. Tidak pernah panic; error dicatat dan dilewati.
+pub async fn sweep_loop(store: Arc<AdminStore>, config: Arc<AppConfig>) {
+    loop {
+        sweep_once(&store, &config).await;
+        tokio::time::sleep(Duration::from_secs(60)).await;
+    }
+}
+
+async fn sweep_once(store: &AdminStore, config: &AppConfig) {
+    let Ok(pool) = pool_or_unavailable(store) else {
+        return;
+    };
+    let candidates = sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders \
+         WHERE (status = 'waiting_payment' AND qris_expires_at < UTC_TIMESTAMP(6)) \
+            OR status = 'paid' ORDER BY created_at ASC LIMIT 20"
+    ))
+    .fetch_all(&pool)
+    .await;
+    let candidates = match candidates {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(?error, "Sweep order gagal membaca kandidat");
+            return;
+        }
+    };
+    for candidate in candidates {
+        let Ok(order_id) = Uuid::parse_str(&candidate.id) else {
+            continue;
+        };
+        if let Err(error) = verify_and_grant(store, config, order_id).await {
+            tracing::warn!(?error, order_id = %candidate.id, "Sweep order gagal");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_sha256_matches_rfc_4231_case_2() {
+        let tag = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+        assert_eq!(
+            hex::encode(tag),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
+    fn webhook_signature_accepts_hex_and_base64() {
+        use base64::Engine;
+        let secret = "rahasia-webhook";
+        let body = br#"{"event":"qris.payment.success","token":"abc"}"#;
+        let tag = hmac_sha256(secret.as_bytes(), body);
+        assert!(verify_webhook_signature(secret, body, &hex::encode(tag)));
+        assert!(verify_webhook_signature(
+            secret,
+            body,
+            &base64::engine::general_purpose::STANDARD.encode(tag),
+        ));
+        assert!(!verify_webhook_signature(
+            secret,
+            body,
+            &hex::encode([0u8; 32])
+        ));
+        assert!(!verify_webhook_signature("salah", body, &hex::encode(tag)));
+    }
+
+    #[test]
+    fn allowed_expiry_minutes_match_cutiezy_docs() {
+        assert_eq!(ALLOWED_EXPIRY_MINUTES, [3, 5, 10, 12, 15]);
+    }
+
+    #[test]
+    fn payment_event_accepts_both_documented_names() {
+        assert!(is_payment_event(Some("qris.payment")));
+        assert!(is_payment_event(Some("qris.payment.success")));
+        assert!(!is_payment_event(Some("test.ping")));
+        assert!(!is_payment_event(Some("qris.refund")));
+        assert!(!is_payment_event(None));
+    }
+
+    /// Klien melawan mock HTTP lokal (tanpa dependensi baru): create,
+    /// check-status, cancel, dan proxy gambar QR.
+    #[tokio::test]
+    async fn client_talks_to_mock_cutiezy() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut head = Vec::new();
+                let mut byte = [0u8; 1];
+                while !head.ends_with(b"\r\n\r\n") {
+                    match stream.read(&mut byte) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => head.push(byte[0]),
+                    }
+                }
+                let text = String::from_utf8_lossy(&head);
+                let content_length = text.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    if name.trim().eq_ignore_ascii_case("content-length") {
+                        value.trim().parse::<usize>().ok()
+                    } else {
+                        None
+                    }
+                });
+                if let Some(len) = content_length {
+                    let mut body = vec![0u8; len];
+                    let _ = stream.read_exact(&mut body);
+                }
+                let request_line = text.lines().next().unwrap_or("");
+                let (status, content_type, payload): (u16, &str, Vec<u8>) = if request_line
+                    .starts_with("POST /api/qris/create")
+                {
+                    (
+                            200,
+                            "application/json",
+                            format!(
+                                r#"{{"ok":true,"data":{{"token":"tok123","amount":99000,"qris_string":"000201xxx","image_url":"http://127.0.0.1:{port}/qr.png"}},"remaining_quota":{{"remaining":42}}}}"#
+                            )
+                            .into_bytes(),
+                        )
+                } else if request_line.starts_with("GET /qris/check-status/") {
+                    (
+                            200,
+                            "application/json",
+                            br#"{"status":"paid","amount":99000,"paid_at":"2026-10-25 10:00:00","mutation_ref":"MUT1"}"#.to_vec(),
+                        )
+                } else if request_line.starts_with("POST /api/qris/cancel") {
+                    (200, "application/json", br#"{"ok":true}"#.to_vec())
+                } else if request_line.starts_with("GET /qr.png") {
+                    (200, "image/png", b"\x89PNG\r\n\x1a\nfake".to_vec())
+                } else {
+                    (
+                        404,
+                        "application/json",
+                        br#"{"error":"not_found"}"#.to_vec(),
+                    )
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                let _ = stream.write_all(&payload);
+            }
+        });
+        let client = QrisClient::new(&format!("http://127.0.0.1:{port}")).unwrap();
+        let created = client.create("kunci-palsu", 99000, 15, None).await.unwrap();
+        assert_eq!(created.token, "tok123");
+        assert_eq!(created.amount, 99000);
+        assert_eq!(created.remaining_quota, Some(42));
+        assert!(created.image_url.as_deref().unwrap().ends_with("/qr.png"));
+        match client.check("tok123").await.unwrap() {
+            QrisPaymentStatus::Paid {
+                amount,
+                mutation_ref,
+                paid_at,
+            } => {
+                assert_eq!(amount, 99000);
+                assert_eq!(mutation_ref.as_deref(), Some("MUT1"));
+                assert!(paid_at.is_some());
+            }
+            other => panic!("status tak terduga: {other:?}"),
+        }
+        client.cancel("kunci-palsu", "tok123").await.unwrap();
+        let (bytes, content_type) = client
+            .fetch_qr_png(&format!("http://127.0.0.1:{port}/qr.png"))
+            .await
+            .unwrap();
+        assert_eq!(content_type, "image/png");
+        assert!(bytes.starts_with(b"\x89PNG"));
+    }
+}

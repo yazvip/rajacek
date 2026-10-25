@@ -1,0 +1,539 @@
+openapi: 3.1.0
+info:
+  title: Rajacek Validation API
+  version: 0.1.0
+  summary: API validasi rekening, e-wallet, dan WhatsApp dengan kontrol quota, rate limit, dan idempotensi.
+  description: |
+    Rajacek menerima permintaan validasi melalui API key yang memiliki scope produk sesuai.
+    Endpoint validasi menerima `Idempotency-Key` unik dari klien; bila tidak dikirim atau kosong, server membuatkannya otomatis dan mengembalikannya lewat header respons `Idempotency-Key` (retry tanpa kunci sendiri dianggap operasi baru).
+
+    Nilai rekening, nomor e-wallet, dan nomor telepon harus diperlakukan sebagai data sensitif.
+    Jangan menulis nilai tersebut ke log aplikasi klien atau membagikannya tanpa dasar hukum/izin yang sesuai.
+servers:
+  - url: http://localhost:8080
+    description: Pengembangan lokal
+  - url: https://api.example.com
+    description: Contoh produksi; ganti dengan domain Rajacek Anda
+security:
+  - ApiKeyAuth: []
+tags:
+  - name: Validation
+    description: Endpoint validasi untuk integrasi member.
+  - name: System
+    description: Endpoint pemeriksaan layanan.
+paths:
+  /health/live:
+    get:
+      tags: [System]
+      security: []
+      operationId: getLiveness
+      summary: Pemeriksaan proses hidup
+      responses:
+        '200':
+          description: Proses API hidup.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /status:
+    get:
+      tags: [System]
+      security: []
+      operationId: getPublicStatusPage
+      summary: Halaman status layanan publik (HTML)
+      description: |
+        Halaman status tanpa login. Hanya menampilkan label produk
+        (Validasi Rekening, Validasi E-Wallet, Validasi WhatsApp) dan
+        status agregat operational/degraded, plus banner pengumuman
+        atau maintenance yang sedang aktif. Tidak pernah menyebut
+        nama, URL, atau kode provider upstream.
+      responses:
+        '200':
+          description: Halaman status layanan.
+          content:
+            text/html:
+              schema: { type: string }
+  /v1/status:
+    get:
+      tags: [System]
+      security: []
+      operationId: getPublicStatus
+      summary: Status layanan publik (JSON)
+      description: Data yang sama dengan GET /status, dalam JSON, tanpa login.
+      responses:
+        '200':
+          description: Status agregat layanan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicStatus'
+  /v1/admin/site-settings:
+    get:
+      tags: [System]
+      operationId: getSiteSettings
+      summary: Pengaturan pengumuman & maintenance (admin)
+      description: Memerlukan sesi admin. Peran Manager ditegakkan saat integrasi (lihat komentar AUTHZ-ROLE di kode).
+      responses:
+        '200':
+          description: Pengaturan situs saat ini.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SiteSettings'
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [System]
+      operationId: updateSiteSettings
+      summary: Ubah pengumuman & maintenance (admin)
+      description: |
+        Menyimpan teks/aktif pengumuman, teks/aktif banner maintenance,
+        dan sakelar maintenance_block_validations. Perubahan sakelar
+        tercatat di jejak audit admin. Bila sakelar aktif, endpoint
+        validasi menjawab 503 "Layanan sedang dalam pemeliharaan";
+        health, login, portal, dan endpoint lain tidak diblokir.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SiteSettings'
+      responses:
+        '200':
+          description: Pengaturan situs setelah disimpan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SiteSettings'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /v1/banks:
+    get:
+      tags: [System]
+      operationId: listBankCodes
+      summary: Daftar code_bank tiga digit yang diterima Rajacek
+      responses:
+        '200':
+          description: Katalog bank yang didukung Rajacek.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BankCode' }
+  /v1/validate/bank-account:
+    post:
+      tags: [Validation]
+      operationId: validateBankAccount
+      summary: Memvalidasi rekening bank
+      description: |
+        Mengirim permintaan validasi rekening ke provider yang telah disetujui.
+        API key memerlukan scope `validate:bank_account` atau `validate:*`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BankAccountValidationRequest'
+            examples:
+              bca:
+                value:
+                  bank_code: '014'
+                  account_number: '1234567890'
+      responses:
+        '200':
+          $ref: '#/components/responses/ValidationSuccess'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '402':
+          $ref: '#/components/responses/QuotaExhausted'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502':
+          $ref: '#/components/responses/ProviderError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/validate/ewallet:
+    post:
+      tags: [Validation]
+      operationId: validateEwallet
+      summary: Memvalidasi akun e-wallet
+      description: API key memerlukan scope `validate:ewallet` atau `validate:*`.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EwalletValidationRequest'
+            examples:
+              gopay:
+                value:
+                  provider: gopay
+                  account_number: '081234567890'
+      responses:
+        '200':
+          $ref: '#/components/responses/ValidationSuccess'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402': { $ref: '#/components/responses/QuotaExhausted' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/ProviderError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  /v1/validate/whatsapp:
+    post:
+      tags: [Validation]
+      operationId: validateWhatsapp
+      summary: Memvalidasi nomor WhatsApp
+      description: |
+        API key memerlukan scope `validate:whatsapp` atau `validate:*`.
+        Produk ini tidak boleh digunakan untuk spam, enumerasi massal, atau pengiriman OTP tanpa persetujuan.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+        - $ref: '#/components/parameters/RequestId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WhatsappValidationRequest'
+            examples:
+              indonesia:
+                value:
+                  phone_number: '+6281234567890'
+      responses:
+        '200':
+          $ref: '#/components/responses/ValidationSuccess'
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402': { $ref: '#/components/responses/QuotaExhausted' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '502': { $ref: '#/components/responses/ProviderError' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+  # AREA 3 (admin; memerlukan sesi admin — penegakan peran di-wire
+  # koordinator saat integrasi; endpoint lama admin tidak didokumen
+  # di file ini, jadi hanya endpoint baru area ini yang ditambahkan).
+  /v1/admin/orders:
+    get:
+      tags: [System]
+      operationId: listAdminOrders
+      summary: Daftar order QRIS admin dengan filter status + rentang tanggal
+      description: |
+        Filter: `status` (waiting, waiting_payment, paid, granted, needs_review, expired, canceled; nilai lain -> 400),
+        `from` + `to` (YYYY-MM-DD, harus berpasangan, maks 366 hari). Respons tetap array seperti sebelumnya.
+      parameters:
+        - name: status
+          in: query
+          schema: { type: string }
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0 }
+      responses:
+        '200':
+          description: Daftar order admin.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/admin/orders/reconciliation:
+    get:
+      tags: [System]
+      operationId: getOrdersReconciliation
+      summary: Ringkasan rekonsiliasi (jumlah + nominal per status) untuk satu rentang tanggal
+      description: |
+        `from` dan `to` wajib (maks 366 hari). Ringkasan memecah SEMUA status dalam rentang itu
+        (waiting = waiting_payment), sehingga total per status dapat dicocokkan dengan daftar pada rentang yang sama.
+      parameters:
+        - name: from
+          in: query
+          required: true
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          required: true
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: Ringkasan rekonsiliasi.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/admin/orders/{id}/refund-record:
+    post:
+      tags: [System]
+      operationId: createRefundRecord
+      summary: Catat refund admin untuk satu order (PENCATATAN SAJA — tidak menggerakkan uang maupun kuota)
+      description: |
+        Admin mengembalikan uang lewat dashboard provider secara manual, lalu mencatatnya di sini.
+        Menolak: order tak ditemukan (404), order yang tidak pernah lunas / paid_at NULL (409),
+        nominal 0 atau alasan kosong (400), dan total kumulatif refund melebihi nominal order (409).
+        Refund parsial bertahap diizinkan; setelah total mencapai nominal penuh, refund berikutnya ditolak.
+        Menulis baris audit admin. Tidak memanggil provider, tidak mengubah status order, tidak mengubah kuota.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [amount_idr, reason]
+              properties:
+                amount_idr: { type: integer, minimum: 1 }
+                reason: { type: string, maxLength: 500 }
+                external_ref: { type: string, maxLength: 191, description: Nomor referensi pengembalian dari dashboard provider. }
+                compensation_note: { type: string, maxLength: 500, description: Catatan bebas saja; kompensasi kuota lewat jalur adjust kuota area lain. }
+      responses:
+        '200':
+          description: Refund tercatat.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: Order tidak ditemukan.
+        '409': { $ref: '#/components/responses/Conflict' }
+  /v1/admin/orders/{id}/refunds:
+    get:
+      tags: [System]
+      operationId: listOrderRefunds
+      summary: Daftar refund tercatat untuk satu order
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Daftar refund tercatat.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /v1/admin/alerts/status:
+    get:
+      tags: [System]
+      operationId: getAlertStatus
+      summary: Status alert Telegram (aktif hanya bila env bot + chat ter-set; tanpa nilai secret)
+      responses:
+        '200':
+          description: Status alert.
+        '401': { $ref: '#/components/responses/Unauthorized' }
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Kunci member dengan prefix `rv_live_`; Authorization Bearer juga didukung.
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: Nilai unik 8-200 karakter ASCII per operasi bisnis. Gunakan nilai yang sama saat retry request yang sama. Opsional — bila kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons Idempotency-Key.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 200
+        pattern: '^[!-~]+$'
+      example: pay-ord-20261020-8a3c2f11
+    RequestId:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: Korelasi opsional dari klien; server selalu mengembalikan nilai request ID.
+      schema:
+        type: string
+        maxLength: 128
+  responses:
+    ValidationSuccess:
+      description: Validasi selesai diproses. Periksa field `status`, karena hasil `not_found` atau `pending` tetap dapat berupa respons teknis 200.
+      headers:
+        X-Request-ID:
+          schema: { type: string }
+        X-RateLimit-Remaining:
+          schema: { type: integer }
+        X-RateLimit-Reset:
+          schema: { type: integer, description: Detik sampai jendela limit berikutnya. }
+        X-Idempotent-Replay:
+          schema: { type: string, enum: ['true'] }
+          description: Ada hanya jika respons berasal dari cache idempotensi.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ValidationResponse' }
+    BadRequest:
+      description: Permintaan tidak memenuhi kontrak.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    Unauthorized:
+      description: API key tidak valid, tidak dikirim, atau sudah tidak aktif.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    Forbidden:
+      description: Akses tidak memiliki scope atau peran yang diperlukan.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    Conflict:
+      description: Idempotency-Key atau data unik bertabrakan.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    QuotaExhausted:
+      description: Kuota paket atau saldo hit sudah habis.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    RateLimited:
+      description: Permintaan ditolak oleh limiter.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    ProviderError:
+      description: Provider validasi gagal merespons dengan aman.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+    ServiceUnavailable:
+      description: Dependensi penting tidak tersedia.
+      content: { application/json: { schema: { $ref: '#/components/schemas/ApiError' } } }
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, timestamp, provider_mode]
+      properties:
+        status: { type: string, example: ready }
+        service: { type: string, example: rajacek-api }
+        timestamp: { type: string, format: date-time }
+        provider_mode: { type: string, enum: [demo, http] }
+    PublicProductStatus:
+      type: object
+      required: [product, label, status]
+      properties:
+        product: { type: string, enum: [bank_account, ewallet, whatsapp] }
+        label: { type: string, example: Validasi Rekening }
+        status: { type: string, enum: [operational, degraded] }
+    PublicStatus:
+      type: object
+      required: [overall, products, maintenance_blocks_validations]
+      properties:
+        overall: { type: string, enum: [operational, degraded] }
+        products:
+          type: array
+          items: { $ref: '#/components/schemas/PublicProductStatus' }
+        announcement: { type: string, nullable: true }
+        maintenance_banner: { type: string, nullable: true }
+        maintenance_blocks_validations: { type: boolean }
+    SiteSettings:
+      type: object
+      required: [announcement_text, announcement_active, maintenance_banner_text, maintenance_banner_active, maintenance_block_validations]
+      properties:
+        announcement_text: { type: string, maxLength: 2000 }
+        announcement_active: { type: boolean }
+        maintenance_banner_text: { type: string, maxLength: 2000 }
+        maintenance_banner_active: { type: boolean }
+        maintenance_block_validations: { type: boolean }
+    BankCode:
+      type: object
+      required: [code_bank, name_bank]
+      properties:
+        code_bank: { type: string, pattern: '^[0-9]{3}$', example: '002' }
+        name_bank: { type: string, example: BRI }
+    BankAccountValidationRequest:
+      type: object
+      additionalProperties: false
+      required: [bank_code, account_number]
+      properties:
+        bank_code:
+          type: string
+          minLength: 3
+          maxLength: 3
+          pattern: '^[0-9]{3}$'
+          description: Public Rajacek `code_bank`, not a provider-specific ID.
+          example: '002'
+        account_number:
+          type: string
+          minLength: 6
+          maxLength: 32
+          pattern: '^[0-9 -]+$'
+    EwalletValidationRequest:
+      type: object
+      additionalProperties: false
+      required: [provider, account_number]
+      properties:
+        provider:
+          type: string
+          description: Provider e-wallet yang sudah dikonfigurasi, misalnya `gopay`.
+          minLength: 2
+          maxLength: 48
+        account_number:
+          type: string
+          minLength: 6
+          maxLength: 32
+          pattern: '^[0-9 -]+$'
+    WhatsappValidationRequest:
+      type: object
+      additionalProperties: false
+      required: [phone_number]
+      properties:
+        phone_number:
+          type: string
+          description: Nomor Indonesia seperti `+6281234567890` atau `081234567890`.
+          maxLength: 32
+    ValidationResponse:
+      type: object
+      required: [request_id, status, valid, product, message, meta]
+      properties:
+        request_id: { type: string, format: uuid }
+        status:
+          type: string
+          description: 'Billing: valid dan not_kyc memotong 1 hit; invalid dan not_found (satu pool bersama) gratis hingga 100 per hari per kunci (WIB), selebihnya 1 hit; pending, provider_error, rate_limited, dan quota_exhausted tidak memotong dan tidak memakan jatah gratis. Kunci bersaldo 0 tetap ditolak 402 sebelum cek berjalan.'
+          enum: [valid, invalid, not_found, not_kyc, pending, provider_error, rate_limited, quota_exhausted]
+        valid: { type: boolean }
+        product: { $ref: '#/components/schemas/ValidationProduct' }
+        message: { type: string }
+        result: { $ref: '#/components/schemas/ValidationResultData' }
+        meta: { $ref: '#/components/schemas/ValidationMeta' }
+    ValidationResultData:
+      type: object
+      properties:
+        account_number: { type: [string, 'null'], description: Nomor rekening/e-wallet yang divalidasi (bank & e-wallet). }
+        phone_number: { type: [string, 'null'], description: Nomor WhatsApp yang divalidasi (layanan whatsapp). }
+        service_code: { type: [string, 'null'], description: Kode layanan yang divalidasi (kode bank 3 digit, slug e-wallet, atau whatsapp). }
+        bank_name: { type: [string, 'null'], description: Nama bank sesuai katalog (khusus layanan bank). }
+        account_name: { type: [string, 'null'], description: Nilai dapat dimasking oleh provider. Selalu huruf besar semua. }
+        registered: { type: [boolean, 'null'] }
+        reference: { type: [string, 'null'] }
+    ValidationMeta:
+      type: object
+      required: [provider, provider_latency_ms, rajacek_processing_ms, total_latency_ms, cached, remaining_quota]
+      properties:
+        provider: { type: string }
+        provider_latency_ms: { type: integer, minimum: 0, description: Waktu panggilan provider dalam milidetik. }
+        rajacek_processing_ms: { type: integer, minimum: 0, description: Waktu proses Rajacek di luar panggilan provider. }
+        total_latency_ms: { type: integer, minimum: 0, description: Total waktu request yang terukur oleh Rajacek. }
+        cached: { type: boolean }
+        remaining_quota: { type: integer, minimum: 0 }
+    ValidationProduct:
+      type: string
+      enum: [bank_account, ewallet, whatsapp]
+    ApiError:
+      type: object
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          examples: [bad_request, unauthorized, rate_limited, quota_exhausted, provider_error]
+        message: { type: string }
+        request_id: { type: string }
+        details: {}

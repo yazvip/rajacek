@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Rajacek Console — pusat kendali premium untuk API validasi rekening, e-wallet, dan WhatsApp."
+    />
+    <meta name="theme-color" content="#081325" />
+    <title>Rajacek Console — Pusat Kendali API</title>
+    <link rel="stylesheet" href="/styles.css?v=20261026-5" />
+    <style>
+      /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
+         admin terverifikasi (kelas auth-ok ditambahkan app.js). */
+      body:not(.auth-ok) .app-shell { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="Navigasi utama">
+        <div class="brand-wrap">
+          <a class="brand" href="#overview" aria-label="Rajacek Console">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 34 34" fill="none"><path d="M8.5 11.2c0-2.27 1.84-4.1 4.1-4.1h8.8c2.26 0 4.1 1.83 4.1 4.1v11.6c0 2.27-1.84 4.1-4.1 4.1h-8.8a4.1 4.1 0 0 1-4.1-4.1V11.2Z" fill="currentColor" opacity=".92"/><path d="M12.2 17h9.6M17 12.2v9.6" stroke="#071225" stroke-width="2.5" stroke-linecap="round"/></svg>
+            </span>
+            <span>raja<span>cek</span></span>
+          </a>
+          <span class="workspace-pill"><span class="status-dot"></span> Production</span>
+        </div>
+
+        <nav class="nav-groups">
+          <div class="nav-group">
+            <p class="nav-label">Pusat Kendali</p>
+            <button class="nav-link is-active" data-view-target="overview" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 13.5 10.5 7 14 10.5 20 4.5M15.5 4.5H20v4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 19.5h16" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+              Ringkasan
+            </button>
+            <button class="nav-link" data-view-target="analytics" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M6 17.5h12M7.5 17.5V11M12 17.5V6.5M16.5 17.5V9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M5 5.5h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity=".55"/></svg>
+              Analitik
+            </button>
+            <button class="nav-link" data-view-target="providers" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M7 12h10M12 7v10M5 4h14a1 1 0 0 1 1 1v14a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              Endpoint Provider
+            </button>
+            <button class="nav-link" data-view-target="tester" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 4h8M9 4v5l-4 8a2 2 0 0 0 1.8 3h10.4A2 2 0 0 0 19 17l-4-8V4M8 14h8" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Tester Layanan
+            </button>
+            <button class="nav-link" data-view-target="products" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.7"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.7"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.7"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5" stroke="currentColor" stroke-width="1.7"/></svg>
+              Produk API
+            </button>
+            <button class="nav-link" data-view-target="packages" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 8.75 12 4l8 4.75-8 4.75L4 8.75Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 14.1 12 19l8-4.9M4 8.8v5.3M20 8.8v5.3M12 13.5V19" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Paket & Harga
+            </button>
+          </div>
+          <div class="nav-group">
+            <p class="nav-label">Keamanan & Trafik</p>
+            <button class="nav-link" data-view-target="rate-limits" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 4v8l5 3M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Rate Limit
+            </button>
+            <button class="nav-link" data-view-target="api-keys" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14.5 10.5a4 4 0 1 0-5.66-5.66 4 4 0 0 0 5.66 5.66ZM12 9.3l-8.2 8.2v2.7h2.7l1.45-1.45 1.35 1.35 1.8-1.8-1.35-1.35L12 14.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Kunci API
+            </button>
+            <button class="nav-link" data-view-target="members" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M16 19.5c-.6-3-2.5-4.5-4-4.5s-3.4 1.5-4 4.5M12 11.5a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Member
+            </button>
+            <button class="nav-link" data-view-target="orders" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 5.5h16v13H4z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 8h16M8 12h3M8 15h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              Order QRIS
+            </button>
+            <button class="nav-link" data-view-target="history" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Riwayat Cek
+            </button>
+            <button class="nav-link" data-view-target="activity" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 8v4l2.75 2.75M20 12a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Aktivitas
+            </button>
+            <button class="nav-link" data-view-target="admins" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/><circle cx="9" cy="7" r="4" stroke="currentColor" stroke-width="1.7"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              Admin
+            </button>
+          </div>
+          <div class="nav-group nav-group-bottom">
+            <p class="nav-label">Platform</p>
+            <button class="nav-link" data-view-target="settings" type="button">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9.7 4.4a2.5 2.5 0 0 1 4.6 0l.27.68a2.5 2.5 0 0 0 3.12 1.46l.72-.24a2.5 2.5 0 0 1 3.25 3.25l-.24.72a2.5 2.5 0 0 0 1.46 3.12l.68.27a2.5 2.5 0 0 1 0 4.6l-.68.27a2.5 2.5 0 0 0-1.46 3.12l.24.72a2.5 2.5 0 0 1-3.25 3.25l-.72-.24a2.5 2.5 0 0 0-3.12 1.46l-.27.68a2.5 2.5 0 0 1-4.6 0l-.27-.68a2.5 2.5 0 0 0-3.12-1.46l-.72.24a2.5 2.5 0 0 1-3.25-3.25l.24-.72a2.5 2.5 0 0 0-1.46-3.12l-.68-.27a2.5 2.5 0 0 1 0-4.6l.68-.27a2.5 2.5 0 0 0 1.46-3.12l-.24-.72a2.5 2.5 0 0 1 3.25-3.25l.72.24a2.5 2.5 0 0 0 3.12-1.46l.27-.68Z" stroke="currentColor" stroke-width="1.35"/><circle cx="12" cy="15.7" r="2.4" stroke="currentColor" stroke-width="1.6"/></svg>
+              Pengaturan
+            </button>
+            <a class="nav-link" href="/openapi/openapi.yaml" target="_blank" rel="noreferrer">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M14 3H6.7A2.7 2.7 0 0 0 4 5.7v12.6A2.7 2.7 0 0 0 6.7 21h10.6a2.7 2.7 0 0 0 2.7-2.7V8l-6-5Z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 3v5h6M8 13h8M8 16.5h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+              Dokumentasi API
+            </a>
+          </div>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="security-note"><span class="shield-mini">✓</span><span><strong>Data dilindungi</strong><small>Audit dan masking aktif</small></span></div>
+          <div class="profile-card">
+            <div class="avatar" id="profile-avatar">A</div>
+            <div class="profile-name"><strong id="profile-name">Administrator</strong><small id="profile-email">Memuat sesi...</small></div>
+            <button class="icon-button" id="logout-button" type="button" aria-label="Keluar">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M10 5H6.7A2.7 2.7 0 0 0 4 7.7v8.6A2.7 2.7 0 0 0 6.7 19H10M14 8l4 4-4 4M18 12H9" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      <main class="main-content">
+        <header class="topbar">
+          <div class="topbar-leading">
+            <button class="menu-button" id="menu-button" type="button" aria-label="Buka navigasi">
+              <span></span><span></span><span></span>
+            </button>
+            <div class="breadcrumb"><span>Rajacek</span><span class="breadcrumb-separator">/</span><strong id="breadcrumb-title">Ringkasan</strong></div>
+          </div>
+          <div class="topbar-actions">
+            <div class="live-status"><span class="pulse"></span><span>Semua sistem normal</span></div>
+            <button class="icon-button notification-button" type="button" aria-label="Notifikasi">
+              <svg viewBox="0 0 24 24" fill="none"><path d="M18 10a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9ZM9.8 21h4.4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="notification-dot"></span>
+            </button>
+            <button class="help-button" type="button" data-toast="Pusat bantuan akan segera tersedia.">Bantuan <span>?</span></button>
+          </div>
+        </header>
+
+        <div class="content-wrap">
+          <section class="view is-visible" id="view-overview" aria-labelledby="overview-heading">
+            <div class="page-heading heading-row">
+              <div>
+                <div class="eyebrow">Selamat datang kembali</div>
+                <h1 id="overview-heading">Kendali penuh, performa tanpa kompromi.</h1>
+                <p>Monitor trafik, kualitas provider, dan pendapatan API Anda dalam satu ruang kerja yang elegan.</p>
+              </div>
+              <div class="heading-actions">
+                <button class="button button-secondary" id="refresh-overview" type="button"><svg viewBox="0 0 24 24" fill="none"><path d="M20 12a8 8 0 1 1-2.34-5.66L20 8.67M20 4v4.67h-4.67" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>Perbarui data</button>
+                <button class="button button-primary" id="quick-create-key" type="button"><svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>Buat Kunci API</button>
+              </div>
+            </div>
+
+            <div class="mode-banner" id="mode-banner" hidden>
+              <span class="mode-icon">i</span><span><strong>Mode demo aktif.</strong> Provider, penyimpanan event, dan rate limit sedang menggunakan konfigurasi aman untuk pengembangan.</span><button type="button" class="banner-dismiss" aria-label="Tutup">×</button>
+            </div>
+
+            <p id="dashboard-load-error" class="tester-audit-note" hidden>Sebagian data dashboard gagal dimuat (bukan masalah sesi) — menampilkan data yang berhasil. Coba tombol Perbarui data.</p>
+
+            <div class="metric-grid" id="metric-grid">
+              <article class="metric-card metric-card-primary"><div class="metric-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M4 16.5 9 11.5l3.2 3.2L20 7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M15.5 7H20v4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div><span>Total request hari ini</span><strong data-metric="total_requests_today">—</strong><small class="positive" data-change="request_change_percent">—</small></div></article>
+              <article class="metric-card"><div class="metric-icon icon-violet"><svg viewBox="0 0 24 24" fill="none"><path d="M7 12.5 10.2 16 17 8.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.6"/></svg></div><div><span>Tingkat keberhasilan</span><strong data-metric="success_rate">—</strong><small class="positive" data-change="success_rate_change_percent">—</small></div></article>
+              <article class="metric-card"><div class="metric-icon icon-amber"><svg viewBox="0 0 24 24" fill="none"><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="8.5" stroke="currentColor" stroke-width="1.6"/></svg></div><div><span>Rata-rata latensi</span><strong data-metric="average_latency_ms">—</strong><small class="positive" data-change="average_latency_change_percent">—</small></div></article>
+              <article class="metric-card"><div class="metric-icon icon-cyan"><svg viewBox="0 0 24 24" fill="none"><path d="M6 17.5h12M7.5 17.5V11M12 17.5V6.5M16.5 17.5V9" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><path d="M5 5.5h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" opacity=".55"/></svg></div><div><span>Estimasi pendapatan</span><strong data-metric="estimated_revenue">—</strong><small class="positive" data-change="revenue_change_percent">—</small></div></article>
+            </div>
+
+            <div class="overview-grid">
+              <article class="panel chart-panel">
+                <div class="panel-heading"><div><span class="section-kicker">Aktivitas API</span><h2>Volume validasi</h2></div><div class="chart-legend"><span><i class="legend-fill"></i>Total request</span><span><i class="legend-line"></i>Berhasil</span></div></div>
+                <div class="chart-wrap" id="traffic-chart" aria-label="Grafik volume validasi"></div>
+              </article>
+              <article class="panel health-panel">
+                <div class="panel-heading"><div><span class="section-kicker">Kesehatan sistem</span><h2>Semua layanan terpantau</h2></div><button class="text-button" data-view-target="settings" type="button">Lihat detail</button></div>
+                <div id="service-list" class="service-list"></div>
+              </article>
+            </div>
+
+            <div class="overview-grid bottom-grid">
+              <article class="panel activity-panel">
+                <div class="panel-heading"><div><span class="section-kicker">Jejak terkini</span><h2>Aktivitas terbaru</h2></div><button class="text-button" data-view-target="activity" type="button">Lihat semua</button></div>
+                <div id="recent-activity-list" class="activity-list"></div>
+              </article>
+              <article class="insight-card">
+                <div class="insight-orbit orbit-one"></div><div class="insight-orbit orbit-two"></div>
+                <span class="section-kicker">Ruang kendali cerdas</span>
+                <h2>Biarkan Rajacek menjaga setiap hit Anda.</h2>
+                <p>Rate limit berlapis, audit terstruktur, dan event asinkron menjaga API tetap responsif saat trafik meningkat.</p>
+                <div class="insight-stat"><strong>99,95%</strong><span>target ketersediaan layanan</span></div>
+                <button class="button button-light" data-view-target="rate-limits" type="button">Atur proteksi trafik <span>→</span></button>
+              </article>
+            </div>
+          </section>
+
+          <section class="view" id="view-analytics" aria-labelledby="analytics-heading">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Pendapatan &amp; pemakaian nyata</div><h1 id="analytics-heading">Analitik.</h1><p>Pendapatan dihitung hanya dari order lunas (paid) dan ter-grant (granted); order menunggu bayar, kedaluwarsa, dibatalkan, atau perlu tinjauan tidak masuk. Success rate = valid + belum KYC dibanding hasil final saja.</p></div><button class="button button-secondary" id="refresh-analytics" type="button">Muat ulang</button></div>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Rentang</span><h2>Periode analitik</h2></div><span class="count-chip" id="analytics-meta">Memuat...</span></div><form id="analytics-range-form" class="form-grid"><label>Rentang<select id="analytics-days"><option value="7">7 hari terakhir</option><option value="30" selected>30 hari terakhir</option><option value="90">90 hari terakhir</option></select></label><div class="form-actions"><button class="button button-primary" type="submit">Tampilkan</button></div></form><p class="tester-audit-note" id="analytics-note"></p></article>
+            <div class="metric-grid" id="analytics-metrics">
+              <article class="metric-card metric-card-primary"><div><span>Pendapatan (rentang)</span><strong id="analytics-revenue-total">—</strong><small id="analytics-revenue-orders">—</small></div></article>
+              <article class="metric-card"><div><span>Total hit (rentang)</span><strong id="analytics-hits-total">—</strong><small>semua hasil validasi</small></div></article>
+              <article class="metric-card"><div><span>Rata-rata harian</span><strong id="analytics-revenue-daily">—</strong><small>pendapatan per hari</small></div></article>
+            </div>
+            <article class="panel chart-panel"><div class="panel-heading"><div><span class="section-kicker">Pendapatan harian</span><h2>Grafik batang per hari</h2></div></div><div class="analytics-bars" id="analytics-revenue-chart" aria-label="Grafik batang pendapatan harian"></div><div class="table-scroll"><table><thead><tr><th>Hari</th><th>Pendapatan</th><th>Order lunas</th></tr></thead><tbody id="analytics-revenue-table"></tbody></table></div></article>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Per produk</span><h2>Hit &amp; success rate</h2></div></div><div class="table-scroll"><table><thead><tr><th>Produk</th><th>Total hit</th><th>Hasil final</th><th>Sukses (valid + belum KYC)</th><th>Success rate</th><th>Rata-rata latensi</th></tr></thead><tbody id="analytics-product-table"></tbody></table></div></article>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Hit harian per produk</span><h2>Volume per hari</h2></div></div><div class="table-scroll"><table><thead><tr><th>Hari</th><th>Rekening</th><th>E-wallet</th><th>WhatsApp</th><th>Total</th></tr></thead><tbody id="analytics-hits-table"></tbody></table></div></article>
+          </section>
+          <section class="view" id="view-providers" aria-labelledby="providers-heading">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Integrasi pihak ketiga</div><h1 id="providers-heading">Server provider per layanan.</h1><p>Server aktif di-hit bersamaan; hasil valid tercepat yang dipakai. Matikan server yang tak ingin dipakai lewat saklar di barisnya.</p></div><button class="button button-secondary" id="refresh-providers" type="button">Muat ulang</button></div>
+            <article class="security-banner"><span class="security-banner-icon">✓</span><div><strong>Perlindungan SSRF dan secret aktif</strong><p>Hanya HTTPS ke host yang diizinkan · redirect dimatikan · API key terenkripsi.</p></div></article>
+            <article class="panel provider-contract-summary" id="provider-contract-summary"><span class="section-kicker">Kontrak aktif</span><h2>Memuat konfigurasi Tukangcek...</h2><p>Mode request, URL produk, dan header autentikasi akan ditampilkan di sini.</p></article>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Kesehatan rute · 24 jam terakhir</span><h2>Monitor rute &amp; failover</h2></div><button class="button button-secondary" id="refresh-provider-health" type="button">Muat ulang</button></div><p class="tester-audit-note">Status circuit breaker dibaca live dari guard (tidak di-cache). Latensi per rute tidak tersedia — ledger tidak menyimpan id rute — jadi latensi, p95, dan success rate ditampilkan per produk. Tombol failover memakai saklar aktif/nonaktif yang sama dengan daftar server di bawah; setiap aksi tercatat di audit admin.</p><p class="tester-audit-note" id="provider-health-note"></p><div id="provider-health-products" class="ep-sum"></div><div class="table-scroll"><table><thead><tr><th>Rute</th><th>Produk</th><th>Aktif</th><th>Circuit</th><th>Gagal beruntun</th><th>Failover</th></tr></thead><tbody id="provider-health-table"></tbody></table></div></article>
+            <div class="product-grid" id="provider-grid"></div>
+          </section>
+
+
+          <section class="view" id="view-tester" aria-labelledby="tester-heading">
+            <div class="page-heading"><div class="eyebrow">Uji integrasi terkontrol</div><h1 id="tester-heading">Tester layanan provider.</h1><p>Pilih layanan dan masukkan hanya data uji yang berhak digunakan. Request dikirim melalui endpoint aktif; respons asli tersedia khusus admin dan dapat berisi data sensitif.</p></div>
+            <div class="tester-layout"><article class="panel tester-form-card"><div class="panel-heading"><div><span class="section-kicker">Request tester</span><h2>Pilih layanan</h2></div><span class="status-badge demo">Admin only</span></div><form id="provider-tester-form" class="form-grid"><label class="full-width">Server<select id="tester-endpoint"><option value="">Semua server aktif (balapan)</option></select></label><label class="full-width">Layanan<select id="tester-product"><option value="bank_account">Bank</option><option value="ewallet">E-wallet</option><option value="whatsapp">WhatsApp</option></select></label><label class="full-width tester-bank-field">Bank<select id="tester-bank-code"></select></label><label class="full-width tester-ewallet-field" hidden>Provider e-wallet<select id="tester-ewallet-provider"><option value="dana">DANA</option><option value="gopay">GoPay</option><option value="ovo">OVO</option><option value="shopeepay">ShopeePay</option><option value="linkaja">LinkAja</option></select></label><label class="full-width"><span id="tester-target-label">Nomor rekening</span><input id="tester-target" required maxlength="32" inputmode="numeric" placeholder="1234567890" /></label><div class="form-actions full-width"><button class="button button-primary" type="submit">Jalankan Tes</button></div></form></article><article class="panel tester-result-card"><div class="panel-heading"><div><span class="section-kicker">Hasil tester</span><h2>Respons provider</h2></div></div><div class="tester-tabs" role="tablist" aria-label="Format respons tester"><button type="button" class="tester-tab is-active" role="tab" id="tester-tab-html" aria-controls="tester-panel-html" aria-selected="true" tabindex="0" data-tester-tab="html">HTML</button><button type="button" class="tester-tab" role="tab" id="tester-tab-json" aria-controls="tester-panel-json" aria-selected="false" tabindex="-1" data-tester-tab="json">JSON</button><button type="button" class="tester-tab" role="tab" id="tester-tab-raw" aria-controls="tester-panel-raw" aria-selected="false" tabindex="-1" data-tester-tab="raw">Respons Asli</button></div><div id="tester-panel-html" role="tabpanel" aria-labelledby="tester-tab-html" tabindex="0"><div id="tester-result" class="tester-result empty-state" aria-live="polite">Belum ada pengujian. Pilih layanan dan jalankan tes.</div></div><div id="tester-panel-json" role="tabpanel" aria-labelledby="tester-tab-json" tabindex="0" hidden><pre id="tester-json" class="tester-json" aria-live="polite">Belum ada respons JSON. Jalankan tes terlebih dahulu.</pre></div><div id="tester-panel-raw" role="tabpanel" aria-labelledby="tester-tab-raw" tabindex="0" hidden><p id="tester-raw-status" class="tester-audit-note" aria-live="polite">Belum ada respons provider.</p><pre id="tester-raw" class="tester-json" aria-live="polite">Jalankan tes terlebih dahulu.</pre></div><p class="tester-audit-note">HTML/JSON menampilkan hasil Rajacek yang dinormalisasi. Respons Asli menampilkan isi respons provider tanpa penyaringan, maksimum 64 KiB; dapat berisi data pribadi atau rahasia yang dikirim ulang oleh provider. Jangan salin atau simpan tanpa izin.</p></article></div>
+          </section>
+
+          <section class="view" id="view-products" aria-labelledby="products-heading">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Katalog layanan</div><h1 id="products-heading">Produk API yang presisi.</h1><p>Atur status, rute provider, dan harga dasar setiap produk validasi.</p></div><button class="button button-secondary" data-toast="Gunakan tombol edit pada setiap produk untuk mengubah konfigurasi.">Panduan produk</button></div>
+            <div class="product-grid" id="product-grid"></div>
+          </section>
+
+          <section class="view" id="view-packages" aria-labelledby="packages-heading">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Monetisasi fleksibel</div><h1 id="packages-heading">Paket yang tumbuh bersama pelanggan.</h1><p>Buat kombinasi kuota, produk, dan batas trafik yang sesuai dengan strategi bisnis Anda.</p></div><button class="button button-primary" id="create-package-button" type="button"><svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>Buat Paket</button></div>
+            <div class="package-grid" id="package-grid"></div>
+          </section>
+
+          <section class="view" id="view-rate-limits" aria-labelledby="rate-heading">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Kendali trafik adaptif</div><h1 id="rate-heading">Rate limit tanpa titik buta.</h1><p>Batasi trafik global, kunci API, IP, paket, atau endpoint dengan lapisan proteksi yang terukur.</p></div><button class="button button-primary" id="create-rate-limit-button" type="button"><svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>Tambah Kebijakan</button></div>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Nilai bawaan</span><h2>Rate limit bawaan (per menit)</h2></div><span class="count-chip">Langsung aktif tanpa restart</span></div><p class="tester-audit-note">Nilai ini menjadi limit kunci API baru yang tidak diisi eksplisit, sekaligus dasar bucket per-IP (×3) dan plafon global (×100, min 1000). Kunci yang sudah terbit <strong>tidak berubah</strong> — atur limitnya per kunci atau lewat paket.</p><form id="rate-default-form" class="form-grid"><label>Request per menit<input id="rate-default-input" type="number" min="1" max="100000" step="1" required /></label><div class="form-actions"><button class="button button-primary" type="submit">Simpan rate limit bawaan</button></div></form><p id="rate-default-note" class="tester-audit-note"></p></article>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Kebijakan aktif</span><h2>Aturan perlindungan trafik</h2></div><span class="count-chip" id="rate-limit-count">0 kebijakan</span></div><div class="table-scroll"><table><thead><tr><th>Nama kebijakan</th><th>Scope</th><th>Target</th><th>Limit</th><th>Burst</th><th>Konkurensi</th><th>Status</th><th></th></tr></thead><tbody id="rate-limit-table"></tbody></table></div></article>
+            <article class="protection-note"><span class="protection-icon">✦</span><div><strong>Proteksi berlapis direkomendasikan</strong><p>Gunakan minimal satu kebijakan global, per-IP, dan per-kunci API agar provider serta saldo pelanggan tetap terlindungi.</p></div></article>
+          </section>
+
+          <section class="view" id="view-api-keys" aria-labelledby="keys-heading">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Akses terkontrol</div><h1 id="keys-heading">Kunci API yang aman sejak awal.</h1><p>Buat scope spesifik, pantau pemakaian, dan cabut akses kapan saja.</p></div><button class="button button-primary" id="create-key-button" type="button"><svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg>Buat Kunci API</button></div>
+            <article class="security-banner"><span class="security-banner-icon"><svg viewBox="0 0 24 24" fill="none"><path d="m12 3 7 3v5c0 4.5-2.95 8.55-7 10-4.05-1.45-7-5.5-7-10V6l7-3Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="m9.3 12 1.7 1.7 3.9-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span><div><strong>Rahasia hanya ditampilkan sekali.</strong><p>Kunci disimpan sebagai hash terenkripsi. Salin dan simpan dengan aman segera setelah Anda membuatnya.</p></div></article>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Kunci terbit</span><h2>Akses integrasi</h2></div><span class="count-chip" id="api-key-count">0 kunci</span></div><div class="table-scroll"><table><thead><tr><th>Nama</th><th>Prefix</th><th>Scope</th><th>Pemilik</th><th>Rate limit</th><th>Terakhir dipakai</th><th>Status</th><th></th></tr></thead><tbody id="api-key-table"></tbody></table></div></article>
+          </section>
+
+          <section class="view" id="view-activity" aria-labelledby="activity-heading">
+            <div class="page-heading"><div class="eyebrow">Audit transparan</div><h1 id="activity-heading">Setiap perubahan memiliki jejak.</h1><p>Aktivitas validasi dan perubahan administrasi terbaru ditampilkan secara aman dengan data sensitif yang dimasking.</p></div>
+            <article class="panel activity-feed-panel"><div class="panel-heading"><div><span class="section-kicker">Audit terkini</span><h2>Riwayat aktivitas validasi</h2></div><button class="button button-secondary" id="refresh-activity" type="button">Muat ulang</button></div><div id="full-activity-list" class="activity-feed"></div></article>
+            <article class="panel activity-feed-panel"><div class="panel-heading"><div><span class="section-kicker">Jejak audit admin</span><h2>Aktivitas admin (persisten)</h2></div></div><p class="tester-audit-note">Aksi admin (grant, cabut kunci, paket, pengaturan, login/logout) dari database — bertahan melewati restart, berbeda dari riwayat validasi di atas.</p><form id="admin-activity-filter" class="form-grid"><label>Aksi<input id="admin-activity-action" type="text" placeholder="cth. Kunci API dicabut" autocomplete="off" /></label><label>Aktor (email)<input id="admin-activity-actor" type="text" placeholder="cth. admin@contoh.id" autocomplete="off" /></label><label>Dari tanggal<input id="admin-activity-from" type="date" autocomplete="off" /></label><label>Sampai tanggal<input id="admin-activity-to" type="date" autocomplete="off" /></label><div class="form-actions"><button class="button button-primary" type="submit">Terapkan filter</button></div></form><div id="admin-activity-list" class="activity-feed"></div><div class="form-actions full-width"><button class="button button-secondary" id="admin-activity-prev" type="button">← Sebelumnya</button><span id="admin-activity-page-info" class="tester-audit-note"></span><button class="button button-secondary" id="admin-activity-next" type="button">Berikutnya →</button></div></article>
+          </section>
+
+          <section class="view" id="view-admins" aria-labelledby="admins-heading">
+            <div class="page-heading"><div class="eyebrow">Tata kelola</div><h1 id="admins-heading">Admin & peran.</h1><p>Hanya owner yang dapat menambah, mengubah peran, menonaktifkan, atau menghapus admin. Peran lain yang membuka halaman ini akan ditolak server (403). Akun baru juga harus masuk daftar email admin server (env ADMIN_GOOGLE_EMAILS) agar bisa login.</p></div>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Daftar admin</span><h2>Semua admin</h2></div><button class="button button-secondary" id="refresh-admins" type="button">Muat ulang</button></div>
+            <div class="table-scroll"><table><thead><tr><th>Email</th><th>Peran</th><th>Status</th><th>Dibuat</th><th></th></tr></thead><tbody id="admins-table"></tbody></table></div>
+            <p id="admins-empty" class="tester-audit-note" hidden>Belum ada admin.</p></article>
+            <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Tambah admin</span><h2>Admin baru</h2></div></div>
+            <form id="admins-add-form" class="form-grid"><label>Email<input id="admins-add-email" type="email" required maxlength="254" placeholder="admin@contoh.id" autocomplete="off" /></label><label>Peran<select id="admins-add-role"><option value="viewer">Viewer (baca saja)</option><option value="support">Support</option><option value="manager">Manager</option><option value="owner">Owner</option></select></label><div class="form-actions"><button class="button button-primary" type="submit">Tambah admin</button></div></form>
+            <p class="tester-audit-note">Menambah admin di sini tidak membuka login: email juga harus terdaftar di ADMIN_GOOGLE_EMAILS server agar bisa masuk.</p></article>
+          </section>
+
+          <section class="view" id="view-history" aria-labelledby="history-heading">
+            <div class="page-heading"><div class="eyebrow">Pemantauan member</div><h1 id="history-heading">Riwayat cek semua member.</h1><p>Setiap validasi yang diproses tercatat dengan target tersamar — nomor rekening asli tidak pernah ditampilkan. "Member" di sini adalah pemilik kunci API (prefix kunci).</p></div>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Riwayat validasi</span><h2>Semua pengecekan</h2></div><span class="count-chip" id="history-source">Memuat...</span><span class="count-chip live-chip" id="history-live">● Realtime</span></div>
+            <div class="history-stats"><div class="history-stat"><span class="section-kicker">Rata-rata hit / detik</span><strong id="history-avg-second">—</strong><span class="history-stat-sub" id="history-avg-second-sub">60 detik terakhir</span></div><div class="history-stat"><span class="section-kicker">Rata-rata hit / menit</span><strong id="history-avg-minute">—</strong><span class="history-stat-sub" id="history-avg-minute-sub">60 menit terakhir</span></div></div>
+            <form id="history-filter" class="form-grid"><label>Kata kunci (prefix/request/target)<input id="history-q" type="text" placeholder="mis. rv_live_ab12" autocomplete="off" /></label><label>Dari<input id="history-from" type="date" /></label><label>Sampai<input id="history-to" type="date" /></label><label>Produk<select id="history-product"><option value="">Semua produk</option><option value="bank_account">Rekening Bank</option><option value="ewallet">E-Wallet</option><option value="whatsapp">WhatsApp</option></select></label><label>Hasil<select id="history-outcome"><option value="">Semua hasil</option><option value="valid">Valid</option><option value="invalid">Tidak valid</option><option value="not_found">Tidak ditemukan</option><option value="provider_error">Error provider</option><option value="pending">Menunggu</option><option value="rate_limited">Kena rate limit</option><option value="quota_exhausted">Kuota habis</option></select></label><label>Prefix kunci API member<input id="history-prefix" type="text" placeholder="mis. rv_live_ab12" autocomplete="off" /></label><div class="form-actions"><button class="button button-primary" type="submit">Terapkan filter</button><button class="button button-secondary" id="export-history" type="button">Export CSV pemakaian</button></div></form>
+            <div class="table-scroll"><table><thead><tr><th>No.</th><th>Waktu</th><th>Member (prefix)</th><th>Produk</th><th>Target</th><th>Hasil</th><th>Latensi (provider → member)</th><th>Request ID</th></tr></thead><tbody id="history-table"></tbody></table></div>
+            <div class="form-actions full-width"><button class="button button-secondary" id="history-prev" type="button">← Sebelumnya</button><span id="history-page-info" class="tester-audit-note"></span><button class="button button-secondary" id="history-next" type="button">Berikutnya →</button></div></article>
+          </section>
+
+          <section class="view" id="view-members" aria-labelledby="members-heading">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Member terdaftar</div><h1 id="members-heading">Member Google & paketnya.</h1><p>Akun yang mendaftar lewat Google (trial/paket), beserta kunci, kuota, dan masa aktifnya. Atur paket manual, rate limit, dan status dari sini.</p></div><button class="button button-secondary" id="refresh-members" type="button">Muat ulang</button></div>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Daftar member</span><h2>Semua member</h2></div><span class="count-chip" id="members-count">Memuat...</span></div>
+            <form id="members-filter" class="form-grid"><label>Cari (email/nama/id)<input id="members-q" type="text" placeholder="mis. ani@contoh.id" autocomplete="off" /></label><label>Filter status<select id="members-status-filter"><option value="">Semua status</option><option value="active">Aktif</option><option value="disabled">Nonaktif</option></select></label><label>Dari<input id="members-from" type="date" /></label><label>Sampai<input id="members-to" type="date" /></label><div class="form-actions"><button class="button button-primary" type="submit">Terapkan filter</button><button class="button button-secondary" id="export-members" type="button">Export CSV member</button></div></form>
+            <div class="table-scroll"><table><thead><tr><th>Member</th><th>Plan</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Login terakhir</th><th></th></tr></thead><tbody id="members-table"></tbody></table></div>
+            <p id="members-empty" class="tester-audit-note" hidden>Belum ada member Google. Member muncul di sini setelah pendaftaran pertama lewat tombol Google di portal member.</p></article>
+
+            <article class="panel" id="member-manage-panel" hidden><div class="panel-heading"><div><span class="section-kicker">Kelola member</span><h2 id="member-manage-title">—</h2><p class="tester-audit-note" id="member-manage-sub" style="margin:2px 0 0;"></p></div><button class="button button-secondary" id="member-manage-close" type="button">Tutup</button></div>
+            <div class="member-key-row"><span>API key:</span><code id="member-key-masked">—</code><button class="button button-secondary" type="button" id="member-key-eye" title="Lihat kunci"></button><button class="button button-secondary" type="button" id="member-key-copy" hidden>Salin</button></div>
+            <p id="member-key-note" class="tester-audit-note" hidden></p>
+            <form id="member-assign-form" class="form-grid">
+              <label>Sumber paket<select id="member-assign-source"><option value="package">Paket yang ada</option><option value="manual">Manual (custom)</option></select></label>
+              <label id="member-assign-package-wrap">Paket<select id="member-assign-package"></select></label>
+              <label>Mode<select id="member-assign-mode"><option value="replace">Ganti (kuota & masa aktif mulai ulang)</option><option value="add">Tambah (kuota ditambah, masa diperpanjang)</option></select></label>
+              <label id="member-assign-hits-wrap" hidden>Hit manual<input id="member-assign-hits" type="number" min="1" step="1" placeholder="cth. 500" /></label>
+              <label>Masa aktif (hari)<input id="member-assign-days" type="number" min="1" max="3650" step="1" value="30" required /></label>
+              <label class="full-width">Rate limit (per menit — kosong: ikut paket; untuk Manual tidak berubah)<input id="member-assign-rate" type="number" min="1" max="100000" step="1" placeholder="otomatis" /></label>
+              <div class="form-actions full-width"><button class="button button-primary" type="submit">Terapkan paket</button></div>
+            </form>
+            <form id="member-rate-form" class="form-grid">
+              <label>Rate limit khusus member ini (per menit)<input id="member-rate-value" type="number" min="1" max="100000" step="1" required /></label>
+              <div class="form-actions"><button class="button button-secondary" type="submit">Simpan rate limit</button><button class="button button-secondary" id="member-rate-reset" type="button">Reset ke default global</button></div>
+            </form>
+            <div class="form-actions full-width">
+              <button class="button button-secondary" id="member-toggle-status" type="button">Nonaktifkan member</button>
+              <button class="button button-secondary" id="member-regenerate" type="button">Regenerasi kunci API</button>
+            </div>
+            <p id="member-new-key" class="tester-audit-note" hidden></p>
+            </article>
+
+            <article class="panel" id="member-detail-panel" hidden><div class="panel-heading"><div><span class="section-kicker">Detail member</span><h2 id="member-detail-title">—</h2><p class="tester-audit-note" id="member-detail-sub" style="margin:2px 0 0;"></p></div><button class="button button-secondary" id="member-detail-close" type="button">Tutup</button></div>
+            <h3>Kunci</h3>
+            <div class="table-scroll"><table><thead><tr><th>Kunci</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Gratis invalid hari ini</th><th>Adjust kuota manual</th></tr></thead><tbody id="member-detail-keys"></tbody></table></div>
+            <p class="tester-audit-note">Adjust kuota bersifat relatif (sisa ditambah/dikurangi delta, bukan di-set absolut) dan selalu dicatat di Aktivitas beserta alasan. Delta positif yang melampaui total ikut menaikkan total; delta negatif tidak mengubah total.</p>
+            <h3>Order</h3>
+            <div class="table-scroll"><table><thead><tr><th>Waktu</th><th>Paket</th><th>Nominal</th><th>Status</th><th>Grant</th></tr></thead><tbody id="member-detail-orders"></tbody></table></div>
+            <div class="form-actions full-width"><button class="button button-secondary" id="member-detail-orders-prev" type="button">← Sebelumnya</button><span id="member-detail-orders-info" class="tester-audit-note"></span><button class="button button-secondary" id="member-detail-orders-next" type="button">Berikutnya →</button></div>
+            <h3>Pemakaian 30 hari terakhir</h3>
+            <p class="tester-audit-note" id="member-detail-usage-note"></p>
+            <div id="member-detail-usage"></div>
+            </article>
+
+            <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Trial pendaftaran</span><h2>Paket trial member baru</h2></div><span class="count-chip">Berlaku untuk pendaftaran berikutnya</span></div>
+            <form id="trial-form" class="form-grid"><label>Kuota trial (hit)<input id="trial-quota" type="number" min="1" max="100000" step="1" required /></label><label>Masa aktif trial (hari)<input id="trial-days" type="number" min="1" max="90" step="1" required /></label><div class="form-actions"><button class="button button-primary" type="submit">Simpan pengaturan trial</button></div></form></article>
+          </section>
+
+          <section class="view" id="view-orders" aria-labelledby="orders-heading">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Pembelian mandiri</div><h1 id="orders-heading">Order QRIS member.</h1><p>Order pembelian paket lewat QRIS: status pembayaran, nominal, dan hasil grant kuota. Order yang lunas tapi bermasalah muncul sebagai "Perlu tinjauan" — selesaikan manual lewat assign paket.</p></div><button class="button button-secondary" id="refresh-orders" type="button">Muat ulang</button></div>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Daftar order</span><h2>Order terbaru</h2></div><span class="count-chip" id="orders-count">Memuat...</span></div>
+            <form id="orders-filter" class="form-grid"><label>Cari (email/id order/paket)<input id="orders-q" type="text" placeholder="mis. ani@contoh.id" autocomplete="off" /></label><label>Filter status<select id="orders-status-filter"><option value="">Semua status</option><option value="waiting_payment">Menunggu bayar</option><option value="paid">Lunas (belum grant)</option><option value="granted">Ter-grant</option><option value="expired">Kedaluwarsa</option><option value="canceled">Dibatalkan</option><option value="needs_review">Perlu tinjauan</option></select></label><label>Dari tanggal<input id="orders-from-filter" type="date"></label><label>Sampai tanggal<input id="orders-to-filter" type="date"></label><div class="form-actions"><button class="button button-secondary" id="orders-apply-filter" type="button">Terapkan filter</button><button class="button button-secondary" id="export-orders" type="button">Export CSV order</button></div><p class="tester-audit-note">Rentang tanggal maksimal 366 hari; isi keduanya sekaligus. Ringkasan di bawah memakai rentang yang sama.</p></form>
+            <div id="orders-recon" class="metric-grid"></div>
+            <p id="alert-status" class="tester-audit-note"></p>
+            <div class="table-scroll"><table><thead><tr><th>Waktu</th><th>Member</th><th>Paket</th><th>Nominal</th><th>Status</th><th></th></tr></thead><tbody id="orders-table"></tbody></table></div>
+            <div class="form-actions full-width"><button class="button button-secondary" id="orders-prev" type="button">← Sebelumnya</button><span id="orders-page-info" class="tester-audit-note"></span><button class="button button-secondary" id="orders-next" type="button">Berikutnya →</button></div>
+            <p id="orders-empty" class="tester-audit-note" hidden>Belum ada order QRIS.</p></article>
+            <article class="panel" id="order-detail" hidden><div class="panel-heading"><div><span class="section-kicker">Detail order</span><h2 id="order-detail-title">—</h2></div><button class="button button-secondary" id="order-detail-close" type="button">Tutup</button></div><div id="order-detail-body"></div></article>
+          </section>
+
+          <section class="view" id="view-settings" aria-labelledby="settings-heading">
+            <div class="page-heading"><div class="eyebrow">Kesiapan produksi</div><h1 id="settings-heading">Konfigurasi yang menjaga kepercayaan.</h1><p>Tinjau integrasi penting sebelum mengaktifkan trafik produksi.</p></div>
+            <div class="settings-grid">
+              <article class="panel settings-card"><div class="settings-icon icon-violet"><svg viewBox="0 0 24 24" fill="none"><path d="M4 5.5h16v13H4z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M4 8h16M8 12h3M8 15h5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div><h2>Autentikasi Google</h2><p>Kelola client ID, redirect URI, daftar email admin, dan kebijakan akses organisasi.</p><span class="settings-status" id="google-status">Memeriksa status...</span></article>
+              <article class="panel settings-card"><div class="settings-icon icon-cyan"><svg viewBox="0 0 24 24" fill="none"><ellipse cx="12" cy="5.5" rx="7" ry="2.5" stroke="currentColor" stroke-width="1.7"/><path d="M5 5.5v6c0 1.38 3.13 2.5 7 2.5s7-1.12 7-2.5v-6M5 11.5v6C5 18.88 8.13 20 12 20s7-1.12 7-2.5v-6" stroke="currentColor" stroke-width="1.7"/></svg></div><h2>MySQL & Ledger</h2><p>Gunakan MySQL sebagai sumber kebenaran untuk pengguna, harga, saldo, dan ledger penggunaan yang tidak dapat diubah.</p><span class="settings-status">Migrasi tersedia</span></article>
+              <article class="panel settings-card"><div class="settings-icon icon-amber"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v18M7 7.5c0-1.38 2.24-2.5 5-2.5s5 1.12 5 2.5-2.24 2.5-5 2.5-5 1.12-5 2.5 2.24 2.5 5 2.5 5 1.12 5 2.5S14.76 19.5 12 19.5 7 18.38 7 17" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></div><h2>Provider Validasi</h2><p>Gunakan adapter terisolasi, timeout ketat, circuit breaker, dan kredensial dari secret manager.</p><span class="settings-status" id="provider-status">Memeriksa status...</span></article>
+            </div>
+            <article class="panel production-checklist" id="guard-panel"><div class="panel-heading"><div><span class="section-kicker">Provider guard</span><h2>Semaphore &amp; circuit breaker Tukangcek</h2></div><span class="count-chip">Langsung aktif tanpa restart</span></div><p id="guard-unavailable" class="tester-audit-note" hidden>Pengaturan ini hanya aktif pada mode provider HTTP. Pada mode demo tidak ada panggilan provider nyata.</p><form id="guard-form" class="form-grid"><label>Konkurensi maks per produk<input id="guard-max-concurrency" type="number" min="1" max="128" step="1" required /></label><label>Tunggu antre maks (ms)<input id="guard-queue-wait" type="number" min="0" max="10000" step="100" required /></label><label>Ambang kegagalan breaker<input id="guard-failure-threshold" type="number" min="1" max="50" step="1" required /></label><label>Cooldown breaker (detik)<input id="guard-cooldown" type="number" min="1" max="600" step="1" required /></label><label>Maks percobaan per request<input id="guard-max-attempts" type="number" min="1" max="3" step="1" required /></label><label>Jarak antar hit provider (ms)<input id="guard-pace-interval" type="number" min="0" max="5000" step="1" required /></label><label>Tunggu antre pacer maks (ms)<input id="guard-pace-max-wait" type="number" min="0" max="60000" step="500" required /></label><p class="tester-audit-note full-width">Pacer global: semua hit ke Tukangcek (semua produk, termasuk percobaan ulang) berjarak minimal sebesar nilai ini — 334 ms = maks 3 hit/detik sesuai limit provider. Request yang gilirannya lebih jauh dari batas tunggu ditolak 429. Isi 0 untuk mematikan pacer.</p><div class="form-actions full-width"><button class="button button-primary" type="submit">Simpan pengaturan guard</button></div></form><p id="guard-persisted-note" class="tester-audit-note"></p><div id="guard-products" class="latency-grid"></div></article>
+            <article class="panel production-checklist"><div class="panel-heading"><div><span class="section-kicker">Status publik &amp; maintenance</span><h2>Pengumuman, banner &amp; blokir validasi</h2></div><span class="count-chip">Tampil di /status, portal &amp; landing</span></div><p class="tester-audit-note full-width">Pengumuman dan banner maintenance tampil di halaman status publik, portal member, dan landing (diambil dari GET /v1/status). PERHATIAN: mencentang "Blokir validasi" membuat SEMUA endpoint validasi (rekening, e-wallet, WhatsApp — API maupun portal) menjawab 503 "Layanan sedang dalam pemeliharaan" sampai sakelar dimatikan; health, login, dan portal tidak diblokir. Setiap perubahan tercatat di jejak audit.</p><form id="site-settings-form" class="form-grid"><label class="full-width">Teks pengumuman<input id="site-announcement-text" maxlength="2000" placeholder="Kosong = tidak ada pengumuman" /></label><label class="checkbox-field"><input id="site-announcement-active" type="checkbox" /> Tampilkan pengumuman</label><label class="full-width">Teks banner maintenance<input id="site-maintenance-banner-text" maxlength="2000" placeholder="Kosong = tidak ada banner" /></label><label class="checkbox-field"><input id="site-maintenance-banner-active" type="checkbox" /> Tampilkan banner maintenance</label><label class="checkbox-field full-width"><input id="site-maintenance-block" type="checkbox" /> Blokir validasi (mode maintenance)</label><div class="form-actions full-width"><button class="button button-primary" type="submit">Simpan pengaturan situs</button><a class="button button-secondary" href="/status" target="_blank" rel="noopener">Lihat halaman status</a></div></form><p id="site-settings-status" class="tester-audit-note"></p></article>
+            <article class="panel production-checklist"><div class="panel-heading"><div><span class="section-kicker">Pembayaran QRIS</span><h2>Pembelian paket mandiri</h2></div><span class="count-chip">Kill switch pembelian</span></div><p class="tester-audit-note full-width">Selama nonaktif, tombol Beli di portal member disembunyikan dan pembuatan order ditolak — tapi order yang sudah dibayar tetap bisa selesai lewat sweep. API key &amp; webhook secret tersimpan terenkripsi; kosongkan untuk mempertahankan nilai lama. Webhook Cutiezy (slot Rp 2.000/slot/bulan; secret dari menu /qris di dashboard) harus didaftarkan di dashboard Cutiezy ke <code>/v1/payments/qris/webhook</code>. Webhook hanya memicu sweep — grant tetap diputuskan lewat check-status + cocok nominal.</p><form id="qris-form" class="form-grid"><label class="checkbox-field full-width"><input id="qris-enabled" type="checkbox" /> Aktifkan pembelian paket (QRIS)</label><label>Masa berlaku QR (menit)<select id="qris-expiry"><option value="3">3</option><option value="5">5</option><option value="10">10</option><option value="12">12</option><option value="15">15</option></select></label><label>Masa aktif paket dari pembelian (hari)<input id="qris-valid-days" type="number" min="1" max="3650" step="1" required /></label><label>Source ID QRIS (opsional)<input id="qris-source-id" type="number" min="1" step="1" placeholder="Kosong = QRIS default akun" /></label><label class="full-width">API key QRIS Cutiezy<input id="qris-api-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="Kosongkan untuk mempertahankan kunci lama" /></label><label class="full-width">Webhook secret Cutiezy<input id="qris-webhook-secret" type="password" maxlength="4096" autocomplete="new-password" placeholder="Kosongkan untuk mempertahankan secret lama" /></label><div class="form-actions full-width"><button class="button button-primary" type="submit">Simpan pengaturan QRIS</button></div></form><p id="qris-status" class="tester-audit-note"></p></article>
+            <article class="panel production-checklist"><div class="panel-heading"><div><span class="section-kicker">Sebelum produksi</span><h2>Daftar pemeriksaan utama</h2></div><span class="count-chip">Wajib ditinjau</span></div><ol><li><span>1</span> Isi konfigurasi Google OIDC dan daftar email administrator yang diizinkan.</li><li><span>2</span> Hubungkan MySQL, Redis HA, dan aktifkan worker Redis Streams terpisah.</li><li><span>3</span> Masukkan kontrak serta kredensial provider melalui penyimpanan secret yang terenkripsi.</li><li><span>4</span> Jalankan pengujian beban, audit keamanan, dan verifikasi kebijakan retensi PII.</li></ol></article>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="modal-backdrop" hidden></div>
+    <section class="modal" id="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-title" hidden>
+      <button class="modal-close" data-close-modal type="button" aria-label="Tutup">×</button>
+      <div class="modal-brand"><span class="brand-mark"><svg viewBox="0 0 34 34" fill="none"><path d="M8.5 11.2c0-2.27 1.84-4.1 4.1-4.1h8.8c2.26 0 4.1 1.83 4.1 4.1v11.6c0 2.27-1.84 4.1-4.1 4.1h-8.8a4.1 4.1 0 0 1-4.1-4.1V11.2Z" fill="currentColor" opacity=".92"/><path d="M12.2 17h9.6M17 12.2v9.6" stroke="#071225" stroke-width="2.5" stroke-linecap="round"/></svg></span><span>raja<span>cek</span></span></div>
+      <span class="section-kicker">Akses administrator</span><h2 id="auth-title">Masuk ke pusat kendali.</h2><p>Gunakan Google untuk akses produksi. Akun dummy dan token lokal hanya tersedia pada lingkungan pengembangan.</p>
+      <a class="button button-google" id="google-login-button" href="/v1/auth/google/start"><span class="google-g">G</span>Lanjutkan dengan Google</a>
+      <div class="auth-divider"><span>atau</span></div>
+      <form id="local-login-form" class="development-login" hidden><label for="local-email">Akun dummy pengembangan</label><input id="local-email" type="email" autocomplete="username" placeholder="Email lokal" /><div class="input-with-action"><input id="local-password" type="password" autocomplete="current-password" placeholder="Password lokal" /><button class="icon-button" id="toggle-local-password" type="button" aria-label="Tampilkan password">◉</button></div><button class="button button-primary button-full" type="submit">Masuk dengan akun lokal</button></form>
+      <form id="development-token-form" class="development-login"><label for="development-token">Token administrator pengembangan</label><div class="input-with-action"><input id="development-token" type="password" autocomplete="off" placeholder="Masukkan DEVELOPMENT_ADMIN_TOKEN" /><button class="icon-button" id="toggle-token-visibility" type="button" aria-label="Tampilkan token">◉</button></div><button class="button button-secondary button-full" type="submit">Masuk ke mode pengembangan</button></form>
+      <p class="auth-footnote">Akses dicatat untuk keamanan. Jangan pernah membagikan kunci atau token Anda.</p>
+    </section>
+
+    <section class="modal modal-wide" id="package-modal" role="dialog" aria-modal="true" aria-labelledby="package-modal-title" hidden>
+      <button class="modal-close" data-close-modal type="button" aria-label="Tutup">×</button>
+      <span class="section-kicker">Paket komersial</span><h2 id="package-modal-title">Buat paket baru</h2><p>Tentukan batas penggunaan yang jelas dan produk yang tersedia bagi pelanggan.</p>
+      <form id="package-form" class="form-grid"><input type="hidden" id="package-id" /><label>Nama paket<input id="package-name" required maxlength="120" placeholder="Contoh: Business" /></label><label>Slug<input id="package-slug" required maxlength="80" pattern="[a-z0-9-]+" placeholder="business" /></label><label>Harga per paket (Rp)<input id="package-price" required min="1" type="number" placeholder="799000" /></label><label>Kuota hit<input id="package-hits" required min="1" type="number" placeholder="5000" /></label><label>Rate limit (RPM)<input id="package-rpm" required min="1" type="number" placeholder="240" /></label><label>Promo (% potongan)<input id="package-promo-percent" type="number" min="0" max="100" placeholder="0 = tanpa promo" /></label><label>Promo berakhir<input id="package-promo-ends" type="datetime-local" /></label><p class="full-width" style="margin:0;color:#8097b9;font-size:12px;">Promo aktif bila persen &gt; 0 dan tanggal berakhir diisi (wajib) — harga yang tampil di kartu adalah harga yang ditagih.</p><label class="full-width">Deskripsi<textarea id="package-description" maxlength="2000" rows="3" placeholder="Nilai utama paket ini"></textarea></label><div class="full-width checkbox-group"><span>Produk yang tersedia</span><label><input type="checkbox" name="package-product" value="bank_account" checked /> Validasi rekening</label><label><input type="checkbox" name="package-product" value="ewallet" checked /> Validasi e-wallet</label><label><input type="checkbox" name="package-product" value="whatsapp" checked /> Validasi WhatsApp</label></div><div class="full-width checkbox-group inline-checks"><label><input id="package-active" type="checkbox" checked /> Paket aktif</label><label><input id="package-highlighted" type="checkbox" /> Tandai sebagai pilihan utama</label></div><div class="form-actions full-width"><button class="button button-secondary" data-close-modal type="button">Batal</button><button class="button button-primary" type="submit">Simpan Paket</button></div></form>
+    </section>
+
+    <section class="modal modal-wide" id="rate-limit-modal" role="dialog" aria-modal="true" aria-labelledby="rate-limit-modal-title" hidden>
+      <button class="modal-close" data-close-modal type="button" aria-label="Tutup">×</button>
+      <span class="section-kicker">Perlindungan trafik</span><h2 id="rate-limit-modal-title">Tambah kebijakan rate limit</h2><p>Atur limit yang masuk akal untuk melindungi pelanggan dan provider Anda.</p>
+      <form id="rate-limit-form" class="form-grid"><input type="hidden" id="rate-limit-id" /><label>Nama kebijakan<input id="rate-limit-name" required maxlength="120" placeholder="Contoh: Limit partner prioritas" /></label><label>Scope<select id="rate-limit-scope"><option value="global">Global</option><option value="api_key">Kunci API</option><option value="ip">IP</option><option value="package">Paket</option><option value="endpoint">Endpoint</option></select></label><label class="full-width">Target<input id="rate-limit-target" required maxlength="240" placeholder="Contoh: Semua endpoint /v1/validate/*" /></label><label>Request per menit<input id="rate-limit-rpm" type="number" required min="1" value="120" /></label><label>Burst<input id="rate-limit-burst" type="number" required min="1" value="30" /></label><label>Batas konkurensi<input id="rate-limit-concurrency" type="number" required min="1" value="12" /></label><label class="checkbox-field"><input id="rate-limit-active" type="checkbox" checked /> Kebijakan aktif</label><div class="form-actions full-width"><button class="button button-secondary" data-close-modal type="button">Batal</button><button class="button button-primary" type="submit">Simpan Kebijakan</button></div></form>
+    </section>
+
+    <section class="modal modal-wide" id="api-key-modal" role="dialog" aria-modal="true" aria-labelledby="api-key-modal-title" hidden>
+      <button class="modal-close" data-close-modal type="button" aria-label="Tutup">×</button>
+      <span class="section-kicker">Akses aman</span><h2 id="api-key-modal-title">Buat kunci API baru</h2><p>Batasi kunci hanya pada produk yang diperlukan oleh integrasi.</p>
+      <form id="api-key-form" class="form-grid"><label class="full-width">Nama kunci<input id="api-key-name" required maxlength="120" placeholder="Contoh: Integrasi checkout produksi" /></label><label>Rate limit (RPM)<input id="api-key-rpm" type="number" min="1" placeholder="Gunakan limit default" /></label><div class="checkbox-group full-width"><span>Scope validasi</span><label><input type="checkbox" name="api-key-scope" value="validate:*" /> Semua produk</label><label><input type="checkbox" name="api-key-scope" value="validate:bank_account" checked /> Rekening</label><label><input type="checkbox" name="api-key-scope" value="validate:ewallet" checked /> E-wallet</label><label><input type="checkbox" name="api-key-scope" value="validate:whatsapp" checked /> WhatsApp</label></div><div class="form-actions full-width"><button class="button button-secondary" data-close-modal type="button">Batal</button><button class="button button-primary" type="submit">Terbitkan Kunci</button></div></form>
+    </section>
+
+    <section class="modal modal-wide" id="product-modal" role="dialog" aria-modal="true" aria-labelledby="product-modal-title" hidden>
+      <button class="modal-close" data-close-modal type="button" aria-label="Tutup">×</button>
+      <span class="section-kicker">Konfigurasi produk</span><h2 id="product-modal-title">Kelola produk API</h2><p>Perubahan rute provider akan dicatat dalam audit administrasi.</p>
+      <form id="product-form" class="form-grid"><input type="hidden" id="product-id" /><label>Nama produk<input id="product-name" required maxlength="240" /></label><label class="full-width">Deskripsi<textarea id="product-description" required maxlength="2000" rows="3"></textarea></label><label class="full-width">Rute provider<input id="product-provider-route" required maxlength="240" placeholder="Contoh: primary-bank-id" /></label><label class="checkbox-field full-width"><input id="product-active" type="checkbox" checked /> Produk aktif untuk member</label><div class="form-actions full-width"><button class="button button-secondary" data-close-modal type="button">Batal</button><button class="button button-primary" type="submit">Simpan Produk</button></div></form>
+    </section>
+
+    <section class="modal modal-wide provider-modal" id="provider-modal" role="dialog" aria-modal="true" aria-labelledby="provider-modal-title" hidden>
+      <button class="modal-close" data-close-modal type="button" aria-label="Tutup">×</button>
+      <span class="section-kicker">Endpoint pihak ketiga</span><h2 id="provider-modal-title">Kelola endpoint provider</h2><p>Atur koneksi dan petakan respons JSON provider ke format Rajacek. Biarkan kredensial kosong untuk mempertahankan rahasia lama.</p>
+      <form id="provider-form" class="form-grid"><input type="hidden" id="provider-id" /><input type="hidden" id="provider-product" /><label>Nama provider<input id="provider-name" required maxlength="160" placeholder="Contoh: Provider Bank Utama" /></label><label>Timeout (ms)<input id="provider-timeout" type="number" required min="100" max="60000" value="8000" /></label><label>Format request<select id="provider-request-mode"><option value="generic">Generic Rajacek</option><option value="tukangcek">Tukangcek</option><option value="cutiezy">Cutiezy</option></select></label><label>Header API key<input id="provider-auth-header" required maxlength="80" value="Authorization" placeholder="X-API-Key" /></label><label class="full-width">URL endpoint<input id="provider-base-url" type="url" required maxlength="2048" placeholder="https://api.provider.example/v1/validate" /></label><label class="full-width">API key / bearer token<input id="provider-api-key" type="password" maxlength="4096" autocomplete="new-password" placeholder="Kosongkan jika tidak ingin merotasi kredensial" /></label><div class="full-width mapping-panel" id="provider-http-fields" hidden><div class="mapping-heading"><div><span class="section-kicker">Metode &amp; param query</span><strong>Hanya untuk mode Generic.</strong></div></div><p class="mapping-help">POST mengirim body JSON <code>{product, target, provider_hint, request_reference}</code>. GET mengirim kode + nomor sebagai query string dengan nama param di bawah; kunci query opsional — kosong berarti kunci hanya lewat header di atas.</p><div class="form-grid mapping-grid"><label>Metode HTTP<select id="provider-http-method"><option value="POST">POST — body JSON</option><option value="GET">GET — query string</option></select></label><label>Nama param kode<input id="provider-code-param" maxlength="80" value="code" placeholder="code" /></label><label>Nama param nomor<input id="provider-number-param" maxlength="80" value="target" placeholder="target" /></label><label>Nama param kunci query (opsional)<input id="provider-key-param" maxlength="80" placeholder="Kosong = kunci hanya lewat header" /></label></div></div><div class="full-width mapping-panel"><div class="mapping-heading"><div><span class="section-kicker">Mapping respons JSON</span><strong id="mapping-product-note">Sesuaikan path dengan respons provider.</strong></div><button class="table-action" id="reset-provider-mapping" type="button">Reset default</button></div><p class="mapping-help">Gunakan path bertitik seperti <code>data.account.name</code> atau indeks seperti <code>data.items[0].status</code>. Nilai status dipisahkan koma dan tidak peka huruf besar/kecil.</p><div class="form-grid mapping-grid"><label>Path status<input id="mapping-status-path" required maxlength="240" placeholder="data.status" /></label><label>Path pesan<input id="mapping-message-path" maxlength="240" placeholder="data.message (opsional)" /></label><label>Nilai valid<input id="mapping-valid-values" required maxlength="500" placeholder="valid, success, registered" /></label><label>Nilai tidak valid<input id="mapping-invalid-values" maxlength="500" placeholder="invalid, unregistered" /></label><label>Nilai tidak ditemukan<input id="mapping-not-found-values" maxlength="500" placeholder="not_found, missing" /></label><label>Nilai pending<input id="mapping-pending-values" maxlength="500" placeholder="pending, processing" /></label><label class="mapping-bank-field">Path nama pemilik akun<input id="mapping-account-name-path" maxlength="240" placeholder="data.account.name" /></label><label class="mapping-provider-field">Path nama/kode provider<input id="mapping-provider-path" maxlength="240" placeholder="data.provider" /></label><label class="mapping-registration-field">Path status terdaftar<input id="mapping-registered-path" maxlength="240" placeholder="data.registered" /></label><label class="mapping-reference-field">Path referensi<input id="mapping-reference-path" maxlength="240" placeholder="data.reference" /></label></div><div class="mapping-privacy-note" id="mapping-privacy-note"></div></div><div class="full-width mapping-panel" id="service-mapping-panel" hidden><div class="mapping-heading"><div><span class="section-kicker">Mapping kode pihak ketiga</span><strong>Kode member &rarr; kode yang dikirim ke provider ini.</strong></div></div><p class="mapping-help">Hanya untuk e-wallet mode Generic. Terisi awal dengan kode member sendiri (dikirim apa adanya); ubah sesuai kode di pihak ketiga. Contoh: isi <code>dana009</code> di baris DANA agar request member <code>dana</code> terkirim sebagai <code>dana009</code>. Baris yang dikosongkan berarti dikirim apa adanya.</p><div class="form-grid mapping-grid"><label>DANA (dana)<input id="service-code-dana" maxlength="100" /></label><label>GoPay (gopay)<input id="service-code-gopay" maxlength="100" /></label><label>OVO (ovo)<input id="service-code-ovo" maxlength="100" /></label><label>LinkAja (linkaja)<input id="service-code-linkaja" maxlength="100" /></label><label>ShopeePay (shopeepay)<input id="service-code-shopeepay" maxlength="100" /></label><label>AstraPay (astrapay)<input id="service-code-astrapay" maxlength="100" /></label><label>GoPay Driver (gopay_driver)<input id="service-code-gopay_driver" maxlength="100" /></label><label>i.Saku (isaku)<input id="service-code-isaku" maxlength="100" /></label><label>KasPro (kaspro)<input id="service-code-kaspro" maxlength="100" /></label></div></div><div class="full-width mapping-panel" id="bank-mapping-panel" hidden><div class="mapping-heading"><div><span class="section-kicker">Mapping kode bank pihak ketiga</span><strong>Kode member &rarr; kode yang dikirim ke provider ini.</strong></div></div><p class="mapping-help">Hanya untuk bank mode Generic. Tambah baris hanya untuk kode yang berbeda dari kode member; tanpa baris, kode dikirim apa adanya. Contoh: baris 014 &rarr; BCA agar request member <code>014</code> terkirim sebagai <code>BCA</code>.</p><div id="bank-mapping-rows"></div><button class="table-action" id="add-bank-mapping-row" type="button">+ Tambah baris</button></div><div class="full-width mapping-panel" id="provider-preview-panel"><div class="mapping-heading"><div><span class="section-kicker">Pratinjau request</span><strong>Persis yang akan dikirim ke provider ini.</strong></div></div><div class="form-grid mapping-grid"><label>Nomor contoh<input id="provider-sample-target" maxlength="32" value="1234567890" /></label><label id="provider-sample-code-label">Kode contoh<input id="provider-sample-code" maxlength="100" value="014" /></label></div><pre id="provider-preview" class="tester-json"></pre></div><label class="checkbox-field full-width"><input id="provider-active" type="checkbox" checked /> Endpoint aktif untuk validasi produk ini</label><div class="form-actions full-width"><button class="button button-secondary" data-close-modal type="button">Batal</button><button class="button button-primary" type="submit">Simpan Endpoint & Mapping</button></div></form>
+    </section>
+
+    <section class="modal secret-modal" id="created-key-modal" role="dialog" aria-modal="true" aria-labelledby="created-key-title" hidden>
+      <button class="modal-close" data-close-modal type="button" aria-label="Tutup">×</button>
+      <div class="secret-icon">✓</div><span class="section-kicker">Kunci berhasil diterbitkan</span><h2 id="created-key-title">Simpan rahasia Anda sekarang.</h2><p id="created-key-warning">Kunci ini tidak akan dapat ditampilkan kembali.</p><div class="secret-value"><code id="created-key-value"></code><button id="copy-created-key" type="button" aria-label="Salin kunci">Salin</button></div><button class="button button-primary button-full" data-close-modal type="button">Saya sudah menyimpan kunci ini</button>
+    </section>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <script src="/app.js?v=20261026-5" defer></script>
+  </body>
+</html>

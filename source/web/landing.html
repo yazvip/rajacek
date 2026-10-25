@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rajacek — API Validasi Rekening, E-Wallet & WhatsApp</title>
+    <meta name="description" content="Validasi rekening bank, e-wallet, dan WhatsApp Indonesia lewat satu API — cepat, idempoten, siap integrasi. Coba gratis 10× cek." />
+    <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1" />
+    <meta name="author" content="PT DATA BRIDGE NUSANTARA" />
+    <meta name="theme-color" content="#071225" />
+    <link rel="canonical" href="https://www.rajacek.com/" />
+    <link rel="icon" href="/favicon.png" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Rajacek" />
+    <meta property="og:locale" content="id_ID" />
+    <meta property="og:title" content="Rajacek — API Validasi Rekening, E-Wallet &amp; WhatsApp" />
+    <meta property="og:description" content="Validasi rekening bank, akun e-wallet, dan nomor WhatsApp Indonesia lewat satu API — cepat, idempoten, dan siap integrasi. Coba gratis 10× cek, tanpa kartu kredit." />
+    <meta property="og:url" content="https://www.rajacek.com/" />
+    <meta property="og:image" content="https://www.rajacek.com/og-cover.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Rajacek — API Validasi Rekening, E-Wallet &amp; WhatsApp Indonesia" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Rajacek — API Validasi Rekening, E-Wallet &amp; WhatsApp" />
+    <meta name="twitter:description" content="Validasi rekening bank, akun e-wallet, dan nomor WhatsApp Indonesia lewat satu API — cepat, idempoten, dan siap integrasi. Coba gratis 10× cek, tanpa kartu kredit." />
+    <meta name="twitter:image" content="https://www.rajacek.com/og-cover.png" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/landing.css?v=20261025-5" />
+    <style>
+      /* AREA 6: banner pengumuman/maintenance dari GET /v1/status.
+         Teks diisi lewat textContent di script bawah (bukan innerHTML),
+         jadi markup di dalam teks admin tidak pernah dieksekusi. */
+      .site-banner { max-width: 1120px; margin: 16px auto 0; padding: 12px 16px; border-radius: 12px; background: #ecfdf5; border: 1px solid #a7f3d0; color: #065f46; font-size: 14px; line-height: 1.5; }
+      .site-banner.maintenance { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+    </style>
+    <script type="application/ld+json">
+      {"@context":"https://schema.org","@graph":[{"@type":"Organization","email":"apivalidasi@gmail.com","legalName":"PT DATA BRIDGE NUSANTARA","logo":"https://www.rajacek.com/logo-mark.png","name":"Rajacek","sameAs":["https://t.me/xyz_yaz"],"url":"https://www.rajacek.com/"},{"@type":"WebSite","name":"Rajacek","url":"https://www.rajacek.com/","inLanguage":"id-ID"},{"@type":"SoftwareApplication","name":"Rajacek","url":"https://www.rajacek.com/","applicationCategory":"BusinessApplication","operatingSystem":"Web","inLanguage":"id-ID","description":"API untuk validasi rekening bank, akun e-wallet, dan nomor WhatsApp Indonesia.","offers":{"@type":"AggregateOffer","priceCurrency":"IDR","lowPrice":"{{LOW_PRICE}}","highPrice":"{{HIGH_PRICE}}","offerCount":"{{OFFER_COUNT}}"}},{"@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Apakah Rajacek sudah bisa dipakai untuk produksi?","acceptedAnswer":{"@type":"Answer","text":"Ya. Rajacek berjalan sebagai layanan produksi dan memproses validasi nyata setiap hari. Setiap API key memiliki kuota dan rate limit sendiri, dan seluruh riwayat cek tersimpan untuk audit."}},{"@type":"Question","name":"Bank dan e-wallet apa saja yang didukung?","acceptedAnswer":{"@type":"Answer","text":"111 kode bank Indonesia serta e-wallet populer — DANA, GoPay, OVO, LinkAja, ShopeePay, dan lainnya. Daftar lengkap tersedia di endpoint GET /v1/banks dan halaman dokumentasi."}},{"@type":"Question","name":"Bagaimana API menangani request yang diulang?","acceptedAnswer":{"@type":"Answer","text":"Kirim Idempotency-Key yang sama saat retry: respons pertama diputar ulang tanpa memotong kuota dua kali. Jika Anda tidak mengirimnya, server membuatkan kunci otomatis — request tetap diproses, tetapi pengiriman ulang dihitung sebagai cek baru."}},{"@type":"Question","name":"Data apa yang disimpan Rajacek?","acceptedAnswer":{"@type":"Answer","text":"Setiap cek tercatat di riwayat: produk, hasil, latensi, dan target dalam bentuk tersamar. Nomor asli tidak pernah ditampilkan di panel, riwayat, maupun respons member lain."}},{"@type":"Question","name":"Bagaimana cara mulai?","acceptedAnswer":{"@type":"Answer","text":"Daftar dengan akun Google — API key langsung terbit dengan trial 10× cek selama 7 hari. Anda bisa mencoba langsung dari portal member (Coba Cek Live) atau integrasi mengikuti dokumentasi."}}]}]}
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#content">Lewati ke konten utama</a>
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Rajacek, beranda">
+        <img class="brand-mark-img" src="/logo-mark.png" alt="" aria-hidden="true"><span>aja<span>cek</span></span>
+      </a>
+      <nav aria-label="Navigasi utama">
+        <a href="#produk">Produk</a><a href="#cara-kerja">Cara kerja</a><a href="#harga">Harga</a><a href="#keamanan">Keamanan</a><a href="#faq">FAQ</a>
+      </nav>
+      <a class="nav-cta" href="/member">Masuk dashboard <span aria-hidden="true">→</span></a>
+    </header>
+
+    <div id="site-banners" aria-live="polite">
+      <div id="site-banner-announcement" class="site-banner" hidden></div>
+      <div id="site-banner-maintenance" class="site-banner maintenance" hidden></div>
+    </div>
+
+    <main id="content">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Infrastruktur validasi untuk Indonesia</p>
+          <h1 id="hero-title">Validasi dulu, <em>baru transaksi.</em></h1>
+          <p class="hero-lede">Validasi rekening bank, akun e-wallet, dan nomor WhatsApp lewat satu API yang dirancang untuk alur pembayaran dan onboarding yang lebih pasti.</p>
+          <div class="hero-actions"><a class="button button-primary" href="/v1/auth/google/member/start">Coba gratis — 10× cek <span aria-hidden="true">→</span></a><a class="button button-quiet" href="/docs">Lihat dokumentasi API</a></div>
+          <p class="hero-note">Daftar cukup dengan akun Google — API key langsung terbit, tanpa kartu kredit. Trial berlaku 7 hari; lanjutkan kapan saja dengan paket.</p>
+          <ul class="trust-row" aria-label="Keunggulan Rajacek"><li><strong>1 API</strong><span>tiga kebutuhan validasi</span></li><li><strong>Idempoten</strong><span>aman untuk retry</span></li><li><strong>Berbasis izin</strong><span>data tetap terkendali</span></li></ul>
+        </div>
+        <div class="hero-visual" aria-label="Contoh respons API validasi" role="img">
+          <div class="visual-glow"></div>
+          <div class="code-window">
+            <div class="code-bar"><span></span><span></span><span></span><b>response.json</b><i>200 OK</i></div>
+            <pre><code><span class="syntax-key">{</span>
+  <span class="syntax-prop">"status"</span>: <span class="syntax-string">"valid"</span>,
+  <span class="syntax-prop">"product"</span>: <span class="syntax-string">"bank_account"</span>,
+  <span class="syntax-prop">"result"</span>: <span class="syntax-key">{</span>
+    <span class="syntax-prop">"account_number"</span>: <span class="syntax-string">"1234667890"</span>,
+    <span class="syntax-prop">"service_code"</span>: <span class="syntax-string">"014"</span>,
+    <span class="syntax-prop">"bank_name"</span>: <span class="syntax-string">"BCA"</span>,
+    <span class="syntax-prop">"account_name"</span>: <span class="syntax-string">"NAMA PELANGGAN"</span>
+  <span class="syntax-key">}</span>,
+  <span class="syntax-prop">"meta"</span>: <span class="syntax-key">{</span>
+    <span class="syntax-prop">"remaining_quota"</span>: <span class="syntax-number">4999</span>
+  <span class="syntax-key">}</span>
+<span class="syntax-key">}</span></code></pre>
+          </div>
+          <div class="result-card"><span class="result-icon" aria-hidden="true">✓</span><div><small>Hasil tervalidasi</small><strong>Rekening cocok ditemukan</strong></div><span class="latency">Respons API</span></div>
+        </div>
+      </section>
+
+      <section class="signal-band" aria-label="Manfaat utama"><p>Kurangi transaksi gagal. Tingkatkan keyakinan. Bangun pengalaman yang lebih mulus.</p></section>
+
+      <section class="section products" id="produk" aria-labelledby="products-title">
+        <div class="section-intro"><p class="eyebrow">Satu integrasi, banyak kepastian</p><h2 id="products-title">Validasi yang mengikuti alur bisnis Anda.</h2><p>Gunakan endpoint yang tepat untuk checkout, pencairan dana, registrasi pelanggan, atau operasi internal.</p></div>
+        <div class="product-grid">
+          <article class="product-card"><span class="product-icon icon-blue" aria-hidden="true">⌁</span><h3>Validasi rekening</h3><p>Periksa kecocokan nomor rekening dan nama pemiliknya di 111 bank Indonesia — sebelum Anda mengirim atau menerima pembayaran.</p><a href="/docs#validasi-bank">Lihat endpoint bank <span aria-hidden="true">→</span></a></article>
+          <article class="product-card"><span class="product-icon icon-violet" aria-hidden="true">◒</span><h3>Validasi e-wallet</h3><p>Periksa nama pemilik akun DANA, GoPay, OVO, LinkAja, ShopeePay, dan e-wallet lainnya sebelum top-up atau payout diproses.</p><a href="/docs#validasi-ewallet">Lihat endpoint e-wallet <span aria-hidden="true">→</span></a></article>
+          <article class="product-card"><span class="product-icon icon-mint" aria-hidden="true">✦</span><h3>Validasi WhatsApp</h3><p>Pastikan nomor pelanggan benar-benar terdaftar di WhatsApp, sebelum tim Anda menghubunginya atau mengirim notifikasi.</p><a href="/docs#validasi-whatsapp">Lihat endpoint WhatsApp <span aria-hidden="true">→</span></a></article>
+        </div>
+      </section>
+
+      <section class="section workflow" id="cara-kerja" aria-labelledby="workflow-title">
+        <div class="workflow-copy"><p class="eyebrow">Dibuat untuk tim produk & engineering</p><h2 id="workflow-title">Dari request ke keputusan, tanpa jalur berbelit.</h2><p>Satu kontrak yang konsisten untuk tiga produk — tim Anda cukup integrasi sekali, lalu pakai di checkout, payout, atau onboarding.</p><a class="text-link" href="/openapi/openapi.yaml">Buka spesifikasi OpenAPI <span aria-hidden="true">→</span></a></div>
+        <ol class="steps"><li><span>01</span><div><h3>Kirim request</h3><p>Kirim nomor tujuan dan API key dari server Anda. Idempotency-Key dianjurkan agar retry tetap aman.</p></div></li><li><span>02</span><div><h3>Rajacek memproses</h3><p>Kami memeriksa scope dan kuota kunci Anda, meneruskan cek ke jaringan verifikasi, dan menjaga laju request agar sumber data tetap sehat.</p></div></li><li><span>03</span><div><h3>Gunakan hasilnya</h3><p>Satu format JSON yang sama untuk semua produk — status, nama pemilik, dan rincian latensi — lalu putuskan: lanjutkan atau tahan transaksinya.</p></div></li></ol>
+      </section>
+
+      <section class="section security" id="keamanan" aria-labelledby="security-title">
+        <div class="security-panel"><div><p class="eyebrow">Privasi bukan lapisan tambahan</p><h2 id="security-title">Data sensitif, diperlakukan dengan serius.</h2><p>Rajacek dirancang dengan scope API key, idempotensi, pembatasan request, masking data, serta jejak audit sebagai fondasi operasional.</p></div><ul><li><span>✓</span> API key berbasis scope</li><li><span>✓</span> Respons retry yang idempoten</li><li><span>✓</span> Batas laju dan kuota</li><li><span>✓</span> Audit & masking data sensitif</li></ul></div>
+      </section>
+
+      <section class="section pricing" id="harga" aria-labelledby="pricing-title">
+        <div class="section-intro"><p class="eyebrow">Harga transparan</p><h2 id="pricing-title">Paket sesuai volume cek Anda.</h2><p>Satu hit adalah satu cek yang tertagih — hasil valid, tidak valid, atau tidak ditemukan. Cek yang gagal di sisi kami tidak mengurangi kuota.</p></div>
+        <div class="product-grid">
+          <!--PRICING_CARDS-->
+        </div>
+        <p class="price-note">Semua paket berlaku <strong>30 hari</strong> sejak diaktifkan, dan dimulai dari trial gratis 10× cek selama 7 hari. Beli paket sendiri dari portal member — bayar QRIS, kuota langsung bertambah.</p>
+      </section>
+
+      <section class="section faq" id="faq" aria-labelledby="faq-title">
+        <div class="section-intro"><p class="eyebrow">Pertanyaan umum</p><h2 id="faq-title">Yang perlu diketahui sebelum mulai.</h2></div>
+        <div class="faq-list"><details><summary>Apakah Rajacek sudah bisa dipakai untuk produksi?</summary><p>Ya. Rajacek berjalan sebagai layanan produksi dan memproses validasi nyata setiap hari. Setiap API key memiliki kuota dan rate limit sendiri, dan seluruh riwayat cek tersimpan untuk audit.</p></details><details><summary>Bank dan e-wallet apa saja yang didukung?</summary><p>111 kode bank Indonesia serta e-wallet populer — DANA, GoPay, OVO, LinkAja, ShopeePay, dan lainnya. Daftar lengkap tersedia di endpoint <code>GET /v1/banks</code> dan halaman dokumentasi.</p></details><details><summary>Bagaimana API menangani request yang diulang?</summary><p>Kirim <code>Idempotency-Key</code> yang sama saat retry: respons pertama diputar ulang tanpa memotong kuota dua kali. Jika Anda tidak mengirimnya, server membuatkan kunci otomatis — request tetap diproses, tetapi pengiriman ulang dihitung sebagai cek baru.</p></details><details><summary>Data apa yang disimpan Rajacek?</summary><p>Setiap cek tercatat di riwayat: produk, hasil, latensi, dan target dalam bentuk tersamar. Nomor asli tidak pernah ditampilkan di panel, riwayat, maupun respons member lain.</p></details><details><summary>Bagaimana cara mulai?</summary><p>Daftar dengan akun Google — API key langsung terbit dengan trial 10× cek selama 7 hari. Anda bisa mencoba langsung dari portal member (Coba Cek Live) atau integrasi mengikuti dokumentasi.</p></details></div>
+      </section>
+
+      <section class="closing" id="mulai" aria-labelledby="closing-title"><p class="eyebrow">Siap membangun dengan lebih pasti?</p><h2 id="closing-title">Mulai dari API yang menjaga keputusan penting Anda.</h2><p>Daftar dengan Google untuk trial gratis 10× cek selama 7 hari, coba langsung dari portal member, atau pelajari kontrak API terlebih dahulu.</p><div class="hero-actions"><a class="button button-primary" href="/v1/auth/google/member/start">Coba gratis — 10× cek <span aria-hidden="true">→</span></a><a class="button button-quiet" href="/docs">Baca dokumentasi</a></div><p class="closing-contact">Ada pertanyaan? Hubungi kami di <a href="mailto:apivalidasi@gmail.com">apivalidasi@gmail.com</a> atau <a href="https://t.me/xyz_yaz" target="_blank" rel="noopener">Telegram @xyz_yaz</a>.</p></section>
+    </main>
+    <script>
+      // AREA 6: banner publik dari GET /v1/status (tanpa login).
+      // Sengaja textContent, bukan innerHTML: teks admin dirender
+      // sebagai teks polos sehingga <script> di dalamnya tidak jalan.
+      // Gagal fetch = halaman tetap tampil tanpa banner.
+      (function () {
+        function setBanner(id, text) {
+          var el = document.getElementById(id);
+          if (!el) return;
+          if (text) { el.textContent = text; el.hidden = false; }
+          else { el.hidden = true; }
+        }
+        fetch('/v1/status', { credentials: 'same-origin' })
+          .then(function (res) { return res.ok ? res.json() : null; })
+          .then(function (data) {
+            if (!data) return;
+            setBanner('site-banner-announcement', data.announcement || '');
+            setBanner('site-banner-maintenance', data.maintenance_banner || '');
+          })
+          .catch(function () {});
+      })();
+    </script>
+    <footer><a class="brand" href="/" aria-label="Rajacek, beranda"><img class="brand-mark-img" src="/logo-mark.png" alt="" aria-hidden="true"><span>aja<span>cek</span></span></a><p>© 2026 Rajacek · PT DATA BRIDGE NUSANTARA — Infrastruktur validasi untuk Indonesia.<br><span class="foot-contact">Hubungi kami: <a href="mailto:apivalidasi@gmail.com">apivalidasi@gmail.com</a> · <a href="https://t.me/xyz_yaz" target="_blank" rel="noopener">Telegram @xyz_yaz</a></span></p></footer>
+  </body>
+</html>

@@ -1,0 +1,604 @@
+{
+    "banks": [
+        {
+            "code_bank": "002",
+            "name_bank": "BRI",
+            "tukangcek_code": "BRIC1ID"
+        },
+        {
+            "code_bank": "008",
+            "name_bank": "Mandiri",
+            "tukangcek_code": "MDRIC1ID"
+        },
+        {
+            "code_bank": "009",
+            "name_bank": "BNI",
+            "tukangcek_code": "BNIC1ID"
+        },
+        {
+            "code_bank": "011",
+            "name_bank": "Danamon",
+            "tukangcek_code": "BDMNSC1ID"
+        },
+        {
+            "code_bank": "011",
+            "name_bank": "Danamon Syariah",
+            "tukangcek_code": "BDMNSC1ID"
+        },
+        {
+            "code_bank": "013",
+            "name_bank": "BANK PERMATA SYARIAH",
+            "tukangcek_code": "BNLIC1ID"
+        },
+        {
+            "code_bank": "013",
+            "name_bank": "Permata",
+            "tukangcek_code": "BNLIC1ID"
+        },
+        {
+            "code_bank": "014",
+            "name_bank": "BCA",
+            "tukangcek_code": "BCAC1ID"
+        },
+        {
+            "code_bank": "016",
+            "name_bank": "Maybank",
+            "tukangcek_code": "MABKC1ID"
+        },
+        {
+            "code_bank": "019",
+            "name_bank": "Panin",
+            "tukangcek_code": "PANIC1ID"
+        },
+        {
+            "code_bank": "022",
+            "name_bank": "CIMB Niaga",
+            "tukangcek_code": "CIMBSC1ID"
+        },
+        {
+            "code_bank": "022",
+            "name_bank": "CIMB Niaga Syariah",
+            "tukangcek_code": "CIMBSC1ID"
+        },
+        {
+            "code_bank": "023",
+            "name_bank": "UOB",
+            "tukangcek_code": "UOBC1ID"
+        },
+        {
+            "code_bank": "028",
+            "name_bank": "BANK OCBC NISP SYARIAH",
+            "tukangcek_code": "OCBCSC1ID"
+        },
+        {
+            "code_bank": "028",
+            "name_bank": "OCBC",
+            "tukangcek_code": "OCBCSC1ID"
+        },
+        {
+            "code_bank": "031",
+            "name_bank": "CITIBANK",
+            "tukangcek_code": "CITIC1ID"
+        },
+        {
+            "code_bank": "032",
+            "name_bank": "JPMCC1IN",
+            "tukangcek_code": "JPMCC1IN"
+        },
+        {
+            "code_bank": "033",
+            "name_bank": "Bank of America",
+            "tukangcek_code": "BOFAC1ID"
+        },
+        {
+            "code_bank": "036",
+            "name_bank": "CCB Indonesia",
+            "tukangcek_code": "CCBIC1ID"
+        },
+        {
+            "code_bank": "037",
+            "name_bank": "AG INT",
+            "tukangcek_code": "AGIC1ID"
+        },
+        {
+            "code_bank": "041",
+            "name_bank": "HSBC",
+            "tukangcek_code": "HSBCC1ID"
+        },
+        {
+            "code_bank": "042",
+            "name_bank": "Tokyo MUFJ",
+            "tukangcek_code": "MUFGC1ID"
+        },
+        {
+            "code_bank": "046",
+            "name_bank": "DBS",
+            "tukangcek_code": "DBSC1ID"
+        },
+        {
+            "code_bank": "047",
+            "name_bank": "Bank Resona Perdania",
+            "tukangcek_code": "BPIAC1ID"
+        },
+        {
+            "code_bank": "048",
+            "name_bank": "Bank Mizuho",
+            "tukangcek_code": "MZHOC1ID"
+        },
+        {
+            "code_bank": "050",
+            "name_bank": "Standard Charter",
+            "tukangcek_code": "SCBKC1ID"
+        },
+        {
+            "code_bank": "054",
+            "name_bank": "Capital Indonesia",
+            "tukangcek_code": "BACAC1ID"
+        },
+        {
+            "code_bank": "057",
+            "name_bank": "BNP",
+            "tukangcek_code": "BNPRC1ID"
+        },
+        {
+            "code_bank": "057",
+            "name_bank": "BNP Paribas",
+            "tukangcek_code": "BNPRC1ID"
+        },
+        {
+            "code_bank": "060",
+            "name_bank": "Rabobank",
+            "tukangcek_code": "RABOC1ID"
+        },
+        {
+            "code_bank": "061",
+            "name_bank": "ANZ",
+            "tukangcek_code": "ANZC1ID"
+        },
+        {
+            "code_bank": "067",
+            "name_bank": "Deutsche",
+            "tukangcek_code": "DBAGC1ID"
+        },
+        {
+            "code_bank": "069",
+            "name_bank": "CHINA LTD",
+            "tukangcek_code": "BOCC1ID"
+        },
+        {
+            "code_bank": "076",
+            "name_bank": "Bumi Arta",
+            "tukangcek_code": "BBAC1ID"
+        },
+        {
+            "code_bank": "087",
+            "name_bank": "Ekonomi Raharja",
+            "tukangcek_code": "BAEKC1ID"
+        },
+        {
+            "code_bank": "088",
+            "name_bank": "Antar Daerah",
+            "tukangcek_code": "ANDAC1ID"
+        },
+        {
+            "code_bank": "095",
+            "name_bank": "J Trust",
+            "tukangcek_code": "JTRBC1ID"
+        },
+        {
+            "code_bank": "097",
+            "name_bank": "Mayapada",
+            "tukangcek_code": "MAYAC1ID"
+        },
+        {
+            "code_bank": "110",
+            "name_bank": "BJB BPD JABAR BANTEN",
+            "tukangcek_code": "BJBC1ID"
+        },
+        {
+            "code_bank": "111",
+            "name_bank": "Bank Jakarta",
+            "tukangcek_code": "BDKIC1ID"
+        },
+        {
+            "code_bank": "112",
+            "name_bank": "BPD Yogyakarta",
+            "tukangcek_code": "DIYSC1ID"
+        },
+        {
+            "code_bank": "113",
+            "name_bank": "BPD JATENG",
+            "tukangcek_code": "BJTUSC1ID"
+        },
+        {
+            "code_bank": "113",
+            "name_bank": "BPD JAWA TENGAH SYARIAH",
+            "tukangcek_code": "BJTUSC1ID"
+        },
+        {
+            "code_bank": "114",
+            "name_bank": "BPD JATIM",
+            "tukangcek_code": "BJTC1ID"
+        },
+        {
+            "code_bank": "115",
+            "name_bank": "BPD JAMBI",
+            "tukangcek_code": "JMBISC1ID"
+        },
+        {
+            "code_bank": "116",
+            "name_bank": "ACEH",
+            "tukangcek_code": "ACEHSC1ID"
+        },
+        {
+            "code_bank": "116",
+            "name_bank": "BANK ACEH SYARIAH",
+            "tukangcek_code": "ACEHSC1ID"
+        },
+        {
+            "code_bank": "117",
+            "name_bank": "BPD SUMUT",
+            "tukangcek_code": "BSMTSC1ID"
+        },
+        {
+            "code_bank": "118",
+            "name_bank": "BANK NAGARI",
+            "tukangcek_code": "BNGRISC1ID"
+        },
+        {
+            "code_bank": "118",
+            "name_bank": "BANK NAGARI SYARIAH",
+            "tukangcek_code": "BNGRISC1ID"
+        },
+        {
+            "code_bank": "119",
+            "name_bank": "BPD RIAU KEPRI",
+            "tukangcek_code": "BRKC1ID"
+        },
+        {
+            "code_bank": "120",
+            "name_bank": "BPD SUMSEL BABEL",
+            "tukangcek_code": "SSBBC1ID"
+        },
+        {
+            "code_bank": "121",
+            "name_bank": "BPD LAMPUNG",
+            "tukangcek_code": "LMPGC1ID"
+        },
+        {
+            "code_bank": "122",
+            "name_bank": "BPD Kalimantan Selatan",
+            "tukangcek_code": "BKSC1ID"
+        },
+        {
+            "code_bank": "123",
+            "name_bank": "BPD KALBAR",
+            "tukangcek_code": "BKLBSC1ID"
+        },
+        {
+            "code_bank": "124",
+            "name_bank": "BPD KALTIM",
+            "tukangcek_code": "BKLTSC1ID"
+        },
+        {
+            "code_bank": "125",
+            "name_bank": "KALTENG",
+            "tukangcek_code": "BKTGC1ID"
+        },
+        {
+            "code_bank": "126",
+            "name_bank": "BPD SULSEL SELBAR",
+            "tukangcek_code": "BSLSBSC1ID"
+        },
+        {
+            "code_bank": "127",
+            "name_bank": "BPD SulutGo",
+            "tukangcek_code": "BSLUC1ID"
+        },
+        {
+            "code_bank": "128",
+            "name_bank": "BPD NTB",
+            "tukangcek_code": "BNTBC1ID"
+        },
+        {
+            "code_bank": "129",
+            "name_bank": "BPD BALI",
+            "tukangcek_code": "BALIC1ID"
+        },
+        {
+            "code_bank": "130",
+            "name_bank": "BPD NTT",
+            "tukangcek_code": "BNTTC1ID"
+        },
+        {
+            "code_bank": "131",
+            "name_bank": "BPD MALUKU",
+            "tukangcek_code": "MLKUC1ID"
+        },
+        {
+            "code_bank": "132",
+            "name_bank": "BPD PAPUA",
+            "tukangcek_code": "BPDPC1ID"
+        },
+        {
+            "code_bank": "133",
+            "name_bank": "BPD BENGKULU",
+            "tukangcek_code": "BGKLC1ID"
+        },
+        {
+            "code_bank": "134",
+            "name_bank": "BPD SULTENG",
+            "tukangcek_code": "SLTRC1ID"
+        },
+        {
+            "code_bank": "137",
+            "name_bank": "BPD Banten",
+            "tukangcek_code": "BEKSC1ID"
+        },
+        {
+            "code_bank": "145",
+            "name_bank": "BNP",
+            "tukangcek_code": "BBNPC1ID"
+        },
+        {
+            "code_bank": "146",
+            "name_bank": "BOII",
+            "tukangcek_code": "BSWDC1ID"
+        },
+        {
+            "code_bank": "147",
+            "name_bank": "Muamalat",
+            "tukangcek_code": "MMLTC1ID"
+        },
+        {
+            "code_bank": "151",
+            "name_bank": "Mestika",
+            "tukangcek_code": "BBMDC1ID"
+        },
+        {
+            "code_bank": "152",
+            "name_bank": "Bank Shinhan",
+            "tukangcek_code": "SHNBC1IN"
+        },
+        {
+            "code_bank": "153",
+            "name_bank": "Sinarmas",
+            "tukangcek_code": "BSIMC1ID"
+        },
+        {
+            "code_bank": "157",
+            "name_bank": "Maspion",
+            "tukangcek_code": "BMASC1ID"
+        },
+        {
+            "code_bank": "161",
+            "name_bank": "Ganesha",
+            "tukangcek_code": "BGTGC1ID"
+        },
+        {
+            "code_bank": "164",
+            "name_bank": "ICBC",
+            "tukangcek_code": "ICBCC1ID"
+        },
+        {
+            "code_bank": "167",
+            "name_bank": "QNB",
+            "tukangcek_code": "QNBC1ID"
+        },
+        {
+            "code_bank": "200",
+            "name_bank": "BTN",
+            "tukangcek_code": "BTNUSC1ID"
+        },
+        {
+            "code_bank": "212",
+            "name_bank": "BWS",
+            "tukangcek_code": "BWSC1ID"
+        },
+        {
+            "code_bank": "213",
+            "name_bank": "SMBC",
+            "tukangcek_code": "BTPNC1ID"
+        },
+        {
+            "code_bank": "422",
+            "name_bank": "BRI Syariah",
+            "tukangcek_code": "BRISC1ID"
+        },
+        {
+            "code_bank": "425",
+            "name_bank": "BJB Syariah",
+            "tukangcek_code": "BJBSC1ID"
+        },
+        {
+            "code_bank": "426",
+            "name_bank": "Mega",
+            "tukangcek_code": "BMGC1ID"
+        },
+        {
+            "code_bank": "427",
+            "name_bank": "BNI SYARIAH",
+            "tukangcek_code": "BNISC1ID"
+        },
+        {
+            "code_bank": "441",
+            "name_bank": "KB Bukopin",
+            "tukangcek_code": "BBKPC1ID"
+        },
+        {
+            "code_bank": "451",
+            "name_bank": "BSI",
+            "tukangcek_code": "MDRSC1ID"
+        },
+        {
+            "code_bank": "459",
+            "name_bank": "Krom",
+            "tukangcek_code": "BBIC1ID"
+        },
+        {
+            "code_bank": "472",
+            "name_bank": "Jasa Jakarta",
+            "tukangcek_code": "BJJC1ID"
+        },
+        {
+            "code_bank": "484",
+            "name_bank": "HANA",
+            "tukangcek_code": "HANAC1ID"
+        },
+        {
+            "code_bank": "485",
+            "name_bank": "MNC",
+            "tukangcek_code": "BMNCC1ID"
+        },
+        {
+            "code_bank": "490",
+            "name_bank": "Neo Commerce",
+            "tukangcek_code": "BBYBC1ID"
+        },
+        {
+            "code_bank": "494",
+            "name_bank": "BRI AGRO",
+            "tukangcek_code": "AGROC1ID"
+        },
+        {
+            "code_bank": "498",
+            "name_bank": "SBI",
+            "tukangcek_code": "SBIC1ID"
+        },
+        {
+            "code_bank": "501",
+            "name_bank": "BCA Digital",
+            "tukangcek_code": "RBIC1ID"
+        },
+        {
+            "code_bank": "503",
+            "name_bank": "NOBU",
+            "tukangcek_code": "NOBUC1ID"
+        },
+        {
+            "code_bank": "506",
+            "name_bank": "Mega Syariah",
+            "tukangcek_code": "BMGSC1ID"
+        },
+        {
+            "code_bank": "513",
+            "name_bank": "INA",
+            "tukangcek_code": "BINAC1ID"
+        },
+        {
+            "code_bank": "517",
+            "name_bank": "Panin Syariah",
+            "tukangcek_code": "PNBSC1ID"
+        },
+        {
+            "code_bank": "520",
+            "name_bank": "Prima Master",
+            "tukangcek_code": "PMBC1ID"
+        },
+        {
+            "code_bank": "521",
+            "name_bank": "BANK BUKOPIN SYARIAH",
+            "tukangcek_code": "BBKPSC1ID"
+        },
+        {
+            "code_bank": "523",
+            "name_bank": "Sampoerna",
+            "tukangcek_code": "BSSC1ID"
+        },
+        {
+            "code_bank": "526",
+            "name_bank": "Dinar",
+            "tukangcek_code": "DNARC1ID"
+        },
+        {
+            "code_bank": "531",
+            "name_bank": "Amar Bank",
+            "tukangcek_code": "AMARC1ID"
+        },
+        {
+            "code_bank": "535",
+            "name_bank": "Seabank Indonesia",
+            "tukangcek_code": "BKEC1ID"
+        },
+        {
+            "code_bank": "536",
+            "name_bank": "BCA Syariah",
+            "tukangcek_code": "BCASC1ID"
+        },
+        {
+            "code_bank": "542",
+            "name_bank": "BANK JAGO SYARIAH",
+            "tukangcek_code": "JAGOSC1ID"
+        },
+        {
+            "code_bank": "542",
+            "name_bank": "JAGO",
+            "tukangcek_code": "JAGOSC1ID"
+        },
+        {
+            "code_bank": "546",
+            "name_bank": "BANK NANO SYARIAH",
+            "tukangcek_code": "BSIMSC1ID"
+        },
+        {
+            "code_bank": "547",
+            "name_bank": "BTPN Syariah",
+            "tukangcek_code": "TPNSC1ID"
+        },
+        {
+            "code_bank": "548",
+            "name_bank": "MAS",
+            "tukangcek_code": "MASC1ID"
+        },
+        {
+            "code_bank": "553",
+            "name_bank": "MAYORA",
+            "tukangcek_code": "MYORC1ID"
+        },
+        {
+            "code_bank": "555",
+            "name_bank": "Index",
+            "tukangcek_code": "BISC1ID"
+        },
+        {
+            "code_bank": "559",
+            "name_bank": "Centratama",
+            "tukangcek_code": "CNBC1ID"
+        },
+        {
+            "code_bank": "562",
+            "name_bank": "SUPERBANK",
+            "tukangcek_code": "SPBNKC1ID"
+        },
+        {
+            "code_bank": "564",
+            "name_bank": "MANTAP",
+            "tukangcek_code": "SHBC1ID"
+        },
+        {
+            "code_bank": "566",
+            "name_bank": "Victoria",
+            "tukangcek_code": "VICC1ID"
+        },
+        {
+            "code_bank": "567",
+            "name_bank": "Allo Bank",
+            "tukangcek_code": "BHIC1ID"
+        },
+        {
+            "code_bank": "945",
+            "name_bank": "Bank IBK",
+            "tukangcek_code": "AGRSC1ID"
+        },
+        {
+            "code_bank": "947",
+            "name_bank": "BANK MAYBANK SYARIAH",
+            "tukangcek_code": "ALASC1ID"
+        },
+        {
+            "code_bank": "949",
+            "name_bank": "CHINATRUST",
+            "tukangcek_code": "BCTIC1ID"
+        }
+    ]
+}

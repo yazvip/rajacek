@@ -1,0 +1,96 @@
+name: rajacek
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: rajacek
+      MYSQL_USER: rajacek
+      MYSQL_PASSWORD: rajacek_dev_password
+      MYSQL_ROOT_PASSWORD: root_dev_password_change_me
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # `--default-authentication-plugin` was removed in MySQL 8.4; `caching_sha2_password`
+      # is already the default, so no explicit flag is needed here.
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot_dev_password_change_me"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks: [rajacek]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", "60", "1000"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [rajacek]
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      APP_ENV: development
+      BIND_ADDRESS: 0.0.0.0:8080
+      DATABASE_URL: mysql://rajacek:rajacek_dev_password@mysql:3306/rajacek
+      REDIS_URL: redis://redis:6379/0
+      AUTO_MIGRATE: "false"
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8080/health/live >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [rajacek]
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["rajacek-worker"]
+    env_file: .env
+    environment:
+      APP_ENV: development
+      DATABASE_URL: mysql://rajacek:rajacek_dev_password@mysql:3306/rajacek
+      REDIS_URL: redis://redis:6379/0
+      AUTO_MIGRATE: "true"
+      WORKER_CONSUMER_NAME: rajacek-worker-local
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [rajacek]
+
+volumes:
+  mysql-data:
+  redis-data:
+
+networks:
+  rajacek:
+    driver: bridge
