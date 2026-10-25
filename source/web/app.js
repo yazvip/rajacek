@@ -1087,7 +1087,7 @@
       <td>${member.expires_at ? escapeHtml(formatDate(member.expires_at)) : "—"}</td>
       <td>${member.rate_limit_per_minute == null ? "—" : `${formatNumber(member.rate_limit_per_minute)}/mnt`}</td>
       <td>${member.last_login_at ? escapeHtml(formatDate(member.last_login_at)) : "—"}</td>
-      <td><button class="button button-secondary" type="button" data-member-detail="${escapeHtml(member.id)}">Detail</button> <button class="button button-secondary" type="button" data-manage-member="${escapeHtml(member.id)}">Kelola</button></td>
+      <td><span class="row-actions"><button class="button button-secondary" type="button" data-member-detail="${escapeHtml(member.id)}">Detail</button><button class="button button-secondary" type="button" data-manage-member="${escapeHtml(member.id)}">Kelola</button></span></td>
     </tr>`).join("");
     $$("#members-table [data-manage-member]").forEach((button) => {
       button.addEventListener("click", () => openMemberManage(button.dataset.manageMember));

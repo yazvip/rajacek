@@ -1480,6 +1480,7 @@ tbody tr:hover {
 
 .row-actions {
   display: inline-flex;
+  align-items: center;
   gap: 5px;
 }
 
@@ -3096,4 +3097,28 @@ textarea { min-height: 96px; }
   padding: 0;
   border-radius: 4px;
   background: transparent;
+}
+
+/* Tombol Detail/Kelola tabel member (2026-10-26): sebelumnya dua .button
+   lepas hanya dipisah spasi — melipat sembarangan dan tidak sejajar isi
+   baris. Bungkus .row-actions (flex + gap + nowrap) dan sel aksi sejajar
+   tengah; di HP (≤640px) susun vertikal selebar sel agar kolom aksi tidak
+   melebar dan kedua tombol tetap mudah diketuk. */
+#members-table td:last-child {
+  vertical-align: middle;
+}
+#members-table .row-actions {
+  flex-wrap: nowrap;
+}
+#members-table .row-actions .button {
+  white-space: nowrap;
+}
+@media (max-width: 640px) {
+  #members-table .row-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  #members-table .row-actions .button {
+    width: 100%;
+  }
 }

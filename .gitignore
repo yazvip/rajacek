@@ -1,0 +1,7 @@
+# Jangan pernah push data produksi / secret
+/database/
+*.env
+.env.*
+/target/
+*.pem
+*.key
