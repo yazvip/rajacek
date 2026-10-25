@@ -205,6 +205,13 @@ textarea { resize: vertical; min-height: 76px; }
   margin-top: 6px;
 }
 .form-actions.full-width { justify-content: flex-start; }
+/* GLOBAL — perlu digabung koordinator (dipakai semua view):
+   span .tester-audit-note di baris pagination (.form-actions berisi
+   tombol Sebelumnya + info halaman + tombol Berikutnya) mewarisi
+   margin-top 12px sehingga teks info turun 12px dari sumbu tombol.
+   Nolkan margin itu hanya di dalam .form-actions agar info halaman
+   sejajar vertikal dengan tombol pagination. */
+.form-actions .tester-audit-note { margin-top: 0; }
 .checkbox-field {
   display: flex !important;
   align-items: center;
@@ -804,11 +811,15 @@ thead tr {
   font-size: 10px; font-weight: 700;
   text-transform: uppercase; letter-spacing: .06em;
 }
-th { padding: 10px 20px; font-weight: 700; white-space: nowrap; }
+th { padding: 10px 20px; font-weight: 700; white-space: nowrap; vertical-align: middle; }
 tbody tr { border-bottom: 1px solid var(--line-soft); font-size: 12px; }
 tbody tr:hover { background: #f8fafc; }
 tbody tr:last-child { border-bottom: none; }
-td { padding: 10px 16px; vertical-align: middle; }
+td { padding: 10px 16px; vertical-align: middle; overflow-wrap: anywhere; }
+/* Sel tepi sejajar header (20px, sama seperti portal member: th 10px 20px,
+   td pertama/terakhir 20px) — sebelumnya isi 16px vs header 20px. */
+td:first-child { padding-left: 20px; }
+td:last-child { padding-right: 20px; }
 .table-title { font-size: 13px; font-weight: 700; }
 .table-subtitle { color: var(--muted); font-size: 12px; }
 .cell-sub { display: block; color: var(--muted); font-size: 11px; }
@@ -1003,6 +1014,15 @@ td.empty-state { display: table-cell; }
 .settings-icon.icon-amber { background: var(--amber-bg); color: var(--amber); }
 .settings-icon.icon-cyan { background: var(--cyan-bg); color: var(--cyan); }
 .settings-status {
+/* Perbaikan kerapian view settings (scope worker settings, bukan global):
+   form panel settings sebelumnya menempel heading/catatan di atasnya
+   (margin-top 0; bandingkan .data-panel > form yang ber-padding atas 20px).
+   Chip terpanjang settings ("Tampil di /status, portal & landing",
+   ~246px) nyaris selebar konten panel di layar 320px (~252px) sehingga
+   berisiko meluber bila fallback font monospace lebih lebar; izinkan
+   chip settings membungkus, bukan memaksa satu baris. */
+#view-settings .panel > form.form-grid { margin-top: 16px; }
+#view-settings .panel-heading .count-chip { white-space: normal; }
   margin-top: auto;
   color: var(--muted);
   font-size: 12px; font-weight: 600;
@@ -1233,7 +1253,7 @@ td.empty-state { display: table-cell; }
   gap: 12px;
   flex-wrap: wrap;
 }
-.mapping-heading strong { display: block; margin-top: 2px; font-size: 13px; }
+.mapping-heading strong { display: block; margin-top: 6px; font-size: 13px; }
 .mapping-help { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .mapping-help code { background: #fff; }
 .mapping-grid { margin-top: 12px; }
@@ -1243,6 +1263,13 @@ td.empty-state { display: table-cell; }
 .mapping-bank-field, .mapping-provider-field, .mapping-reference-field,
 .mapping-registration-field, .tester-bank-field, .tester-ewallet-field { min-width: 0; }
 .bank-mapping-row { align-items: end; }
+/* Perbaikan kerapian modal provider (baris mapping bank dirender JS):
+   #bank-mapping-rows sebelumnya tanpa gap/margin — baris mapping
+   menempel baris sebelumnya (label baris berikut tepat di bawah tombol
+   Hapus baris sebelumnya) dan menempel teks bantuan di atasnya, dan
+   tombol "+ Tambah baris" menempel baris terakhir. */
+#bank-mapping-rows { display: flex; flex-direction: column; gap: 16px; margin-top: 12px; }
+#bank-mapping-panel > .table-action { margin-top: 12px; }
 .bank-mapping-code, .bank-mapping-value { font-family: 'JetBrains Mono', monospace; }
 
 /* ------------------------------------------------------------------ modal */
@@ -1288,6 +1315,13 @@ td.empty-state { display: table-cell; }
 .modal-close:hover { background: #f8fafc; color: var(--ink); }
 .modal-brand { margin-bottom: 20px; font-size: 22px; }
 .modal h2 { margin: 7px 0 8px; font-size: 20px; font-weight: 800; }
+/* Perbaikan kerapian modal (scope worker settings — semua modal di file
+   ini): tombol tutup absolut (kanan 15px + lebar 32px = 47px dari tepi
+   modal) sebelumnya bisa bersentuhan dengan baris pertama judul panjang
+   (mis. judul provider-modal) karena judul tak menyisakan ruang di kanan.
+   Sisakan 40px di kanan judul; modal secret dikecualikan karena judulnya
+   rata tengah dan pendek serta jauh dari zona tombol tutup. */
+.modal:not(.secret-modal) h2 { padding-right: 40px; }
 .modal > p { margin-top: 6px; color: var(--muted); font-size: 13px; line-height: 1.6; }
 .modal .form-grid { margin-top: 18px; }
 /* Garis pembatas digambar sebagai background 1px di belakang teks (bukan
@@ -1302,7 +1336,12 @@ td.empty-state { display: table-cell; }
   font-size: 12px;
   background: linear-gradient(var(--line), var(--line)) center / 100% 1px no-repeat;
 }
-.auth-divider span { background: #fff; padding: 0 4px; }
+.auth-divider span { background: #fff; padding: 0 12px; }
+/* Perbaikan kerapian modal auth: paragraf di atas tombol Google
+   sebelumnya menempel tombol (gap 0; paragraf lain di modal diikuti form
+   yang sudah bermargin atas 18px). Teks "atau" pada divider juga hanya
+   berjarak 4px dari garis (lihat padding span di atas, 4px -> 12px). */
+#auth-modal > p { margin-bottom: 16px; }
 .development-login { display: flex; flex-direction: column; gap: 10px; margin-top: 14px; }
 .development-login label { margin-bottom: 0; }
 .development-login label > input { margin-top: 6px; }
@@ -1460,6 +1499,10 @@ td.empty-state { display: table-cell; }
 }
 .latency-grid strong { display: block; margin-top: 5px; font-family: 'JetBrains Mono', monospace; color: var(--brand-700); }
 .latency-stack { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+/* Perbaikan kerapian panel guard (settings): sel guard dirender JS
+   sebagai span label + strong nilai + span sub ("N gagal berurutan");
+   sub sebelumnya tanpa margin sehingga menempel nilai di atasnya. */
+#guard-products > div > span:last-child { margin-top: 4px; }
 .latency-stack strong { font-family: 'JetBrains Mono', monospace; }
 
 /* ------------------------------------------------------------------ member & order */
@@ -1514,6 +1557,121 @@ td.empty-state { display: table-cell; }
 }
 .order-field { min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
 .order-field:last-child { border-bottom: 0; }
+/* ------------------------------------------------------------------
+   Perapian spasi area member & order (audit kerapian 2026-10-26).
+   HANYA spasi/tata letak; warna, font, radius, id, data-action, dan
+   perilaku JS tidak diubah. Semua aturan di bawah berskop area ini
+   (view-members, view-orders, #member-manage-panel, #member-detail-panel,
+   #order-detail) — TIDAK ADA aturan global yang diubah, kecuali tidak ada.
+   Nilai pakai tema yang sudah ada: 20px inset panel, 16px, 12px, 6px. */
+#view-members th, #view-orders th, #member-detail-panel th { vertical-align: middle; }
+#view-members td, #view-orders td, #member-detail-panel td { padding: 10px 20px; overflow-wrap: anywhere; }
+#view-members #members-empty { margin-top: 16px; padding: 0 20px 20px; }
+#member-manage-panel > form + form { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line-soft); }
+#member-manage-panel > .form-actions { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--line-soft); }
+#member-detail-panel > h3 { margin: 20px 0 12px; }
+#member-detail-panel > .form-actions { margin-top: 16px; }
+#member-detail-panel .form-actions .tester-audit-note { margin: 0; }
+#member-detail-usage-note { margin-top: 0; }
+.member-adjust-form > * { min-width: 0; }
+.member-adjust-form input[type="text"] { width: auto; flex: 1 1 180px; }
+.member-adjust-form input[type="number"] { flex: none; }
+.member-adjust-form button { flex: none; }
+#member-detail-keys p[data-adjust-result]:empty { margin-top: 0; }
+.member-usage-bar { flex: 1 1 120px; background: var(--line-soft); }
+.member-usage-bar > span { display: block; height: 100%; background: var(--brand); border-radius: 999px; }
+#view-orders #orders-recon { padding: 0 20px; }
+#view-orders #alert-status { margin: 0; padding: 0 20px; }
+#view-orders .data-panel > .form-actions { margin-top: 0; padding: 16px 20px 20px; }
+#view-orders .data-panel > .form-actions .tester-audit-note { margin: 0; }
+   PERAPIAN SPASI — area providers/tester/products/packages/rate-limits/
+   api-keys + modal provider (2026-10-26, HANYA spasi/tata letak).
+   --------------------------------------------------------------------------
+   Semua aturan di blok ini scoped ke view area ini atau ke class yang
+   hanya dipakai area ini (.ep-*, .tester-*, .mapping-panel — yang hanya
+   ada di modal provider — .product-card, .package-card). TIDAK ADA aturan global
+   tanpa scope yang diubah: th/td/.panel/.data-panel global dibiarkan apa
+   adanya, dan penyejajaran header-vs-isi tabel hanya diperbaiki lewat
+   selector #view-* di bawah — jadi koordinator tidak perlu menggabung
+   perubahan global dari worker ini. Nilai yang dipakai hanya nilai tema
+   yang sudah ada (12/16/17/21px → di sini 12/16px; 10px dipertahankan
+   untuk tinggi baris tabel). Tidak ada warna, font, radius, id, teks,
+   data-action, atau perilaku JS yang berubah.
+   ========================================================================== */
+
+/* --- providers: kartu grup endpoint --- */
+.ep-group-meta { display: block; margin-top: 2px; }
+.ep-main { flex-wrap: wrap; }
+.ep-actions { flex-wrap: wrap; }
+.ep-detail-btn { padding: 6px 10px; }
+.ep-detail { padding: 16px; }
+.ep-detail > div { gap: 4px; }
+.ep-sum-chip { min-width: 0; overflow-wrap: anywhere; }
+
+/* --- providers: panel kesehatan rute (data-panel padding:0) --- */
+/* Paragraf catatan + chip produk sebelumnya menempel tepi kiri/kanan
+   panel karena .data-panel hanya memberi padding pada heading/form. */
+#view-providers .data-panel > .tester-audit-note { padding: 0 20px; }
+#view-providers .data-panel > .ep-sum { padding: 0 20px; }
+
+/* --- providers: modal mapping + pratinjau request --- */
+
+/* --- tester: form menempel heading kartu; tab meluber di HP sempit --- */
+.tester-form-card form { margin-top: 16px; }
+.tester-tabs { flex-wrap: wrap; }
+/* --- tester: hasil HTML — label sebelumnya punya hairline sendiri dan
+   nilai hanya berjarak 2px di bawah garis itu (aturan gabungan lama
+   memberi padding+border ke div DAN dt). Kini hairline hanya di div. --- */
+.tester-result-status { margin-bottom: 16px; }
+.tester-result dl > div { padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
+.tester-result dl > div:last-child { border-bottom: 0; }
+.tester-result dt { padding: 0; border-bottom: 0; }
+.tester-result dd { margin: 4px 0 0; }
+
+/* --- products: rute provider panjang memaksa kartu melebar --- */
+.product-details { min-width: 0; }
+.product-detail { min-width: 0; }
+.product-detail code { min-width: 0; overflow-wrap: anywhere; }
+
+/* --- packages: daftar produk panjang tak terputus --- */
+.package-list li { overflow-wrap: anywhere; }
+
+/* --- rate-limits + api-keys: catatan di data-panel menempel tepi --- */
+#view-rate-limits .data-panel > .tester-audit-note { padding: 0 20px; }
+
+/* --- rate-limits + api-keys: sel tabel vs header --- */
+/* th lama 10px 20px, td lama 10px 16px → isi 4px lebih masuk dari header
+   dan dari heading panel (20px). Disamakan ke 20px; token panjang
+   (target, prefix, email pemilik) boleh patah, bukan melebar. */
+#view-providers .data-panel td,
+#view-rate-limits .data-panel td,
+#view-api-keys .data-panel td { padding: 10px 20px; overflow-wrap: anywhere; }
+/* --- rate-limits + api-keys: judul + subjudul sel menempel sebaris --- */
+/* Template merender <span class="table-title"> dan <span
+   class="table-subtitle"> berdampingan tanpa spasi, sehingga tampil
+   menyatu ("NamaDiperbarui…"). Ditumpuk vertikal, tanpa ubah markup. */
+#view-rate-limits td .table-title,
+#view-api-keys td .table-title { display: block; }
+#view-rate-limits td .table-subtitle,
+#view-api-keys td .table-subtitle { display: block; margin-top: 2px; }
+
+/* --- api-keys: banner peringatan menempel panel di bawahnya --- */
+/* .view > .panel + .panel hanya memberi jarak antar panel; banner
+   (bukan panel) sebelumnya berjarak 0px ke panel kunci. */
+#view-api-keys .security-banner { margin-bottom: 20px; }
+
+/* ==========================================================================
+#view-orders #orders-empty { margin-top: 0; padding: 0 20px 20px; }
+.order-field-label, .order-field-value { display: block; }
+.order-field-value { margin-top: 6px; }
+.order-hero-action { min-width: 0; }
+.order-hero-action .order-resolve-msg { overflow-wrap: anywhere; }
+.order-callout { overflow-wrap: anywhere; }
+#order-refunds ul { margin: 10px 0 0; padding-left: 20px; display: grid; gap: 8px; }
+#order-refunds ul li { overflow-wrap: anywhere; }
+#order-refunds form { margin-top: 20px; }
+#order-refunds > .tester-audit-note { margin-top: 20px; }
+
 .order-field-label { color: var(--faint); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
 .order-field-value { margin-top: 2px; font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
 .order-resolve-msg { color: var(--muted); font-size: 12px; }
@@ -1536,6 +1694,44 @@ td.empty-state { display: table-cell; }
 #view-providers .security-banner { margin-top: 0; }
 #view-providers .provider-contract-summary { margin-bottom: 0; }
 #view-providers #provider-grid { gap: 12px; }
+
+/* ------------------------------------------------------------------ kerapian: overview, analitik, riwayat, aktivitas, admin
+   Blok ini HANYA menyentuh view overview/analytics/history/activity/admins
+   (selektor #view-* atau class yang hanya dipakai view-view itu), kecuali
+   aturan sel tabel di atas yang memang global. Alasan tiap aturan:
+   - .data-panel/.activity-feed-panel punya padding 0, jadi anak langsung
+     yang tidak tercakup aturan padding heading/form/tabel/feed (catatan
+     .tester-audit-note, .history-stats, baris pagination .form-actions)
+     sebelumnya menempel tepi panel (0px) — diberi 20px, sama seperti
+     padding .panel dan .card portal member.
+   - Daftar aktivitas overview sebelumnya tanpa margin atas (baris pertama
+     hanya 12px di bawah heading, vs daftar layanan 16px + 12px).
+   - Judul baris layanan/aktivitas tanpa overflow-wrap bisa mendorong
+     kolom latensi/waktu keluar kartu bila satu kata sangat panjang.
+   - Tombol aksi admin berdampingan tanpa celah (tanpa wrapper .row-actions).
+   - Label grafik batang analytics nowrap: pada rentang 30/90 hari label
+     saling tumpuk/melebar keluar panel — dibungkus + kontainer bisa
+     scroll horizontal, bukan memaksa kartu melebar. */
+#view-overview .activity-list { margin-top: 16px; }
+#view-overview .service-info strong, #view-overview .activity-copy strong,
+#view-activity .activity-copy strong { overflow-wrap: anywhere; }
+#view-analytics .data-panel > .tester-audit-note,
+#view-activity .activity-feed-panel > .tester-audit-note,
+#view-admins .data-panel > .tester-audit-note { padding-left: 20px; padding-right: 20px; }
+#view-analytics .data-panel > .tester-audit-note:last-child,
+#view-admins .data-panel > .tester-audit-note:last-child { padding-bottom: 20px; }
+#view-history .data-panel > .history-stats { padding-left: 20px; padding-right: 20px; }
+#view-history .data-panel > .form-actions,
+#view-activity .activity-feed-panel > .form-actions { margin-top: 0; padding: 12px 20px 20px; }
+#view-history .data-panel > .form-actions .tester-audit-note,
+#view-activity .activity-feed-panel > .form-actions .tester-audit-note { margin: 0; }
+#view-admins .panel > .form-grid { margin-top: 16px; }
+#view-admins #admins-table td .table-action + .table-action { margin-left: 6px; }
+.analytics-bars { overflow-x: auto; }
+.analytics-bar { min-width: 24px; }
+.analytics-bar span { white-space: normal; text-align: center; line-height: 1.35; overflow-wrap: anywhere; }
+.history-stat strong { margin-top: 4px; }
+.history-stat-sub { margin-top: 4px; }
 
 /* ------------------------------------------------------------------ responsif */
 .metric-grid > *, .overview-grid > *, .product-grid > *, .package-grid > *,
@@ -1571,6 +1767,10 @@ td.empty-state { display: table-cell; }
   .menu-button { display: none !important; }
 }
 @media (max-width: 640px) {
+  /* Perbaikan responsif settings: padding panel settings mengecil
+     proporsional 20px -> 16px di HP (nilai tema 16px); panel view lain
+     tidak disentuh. */
+  #view-settings .panel { padding: 16px; }
   .topbar { height: auto; min-height: 64px; flex-wrap: wrap; padding-top: 10px; padding-bottom: 10px; }
   .topbar-text { flex: 1 1 200px; }
   .topbar-text .topbar-title, .topbar-text h1, .topbar-text .header-title {

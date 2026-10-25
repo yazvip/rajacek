@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
-    <link rel="stylesheet" href="/styles.css?v=20261026-8" />
+    <link rel="stylesheet" href="/styles.css?v=20261026-9" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -259,7 +259,7 @@
             <div class="table-scroll"><table><thead><tr><th>Member</th><th>Plan</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Login terakhir</th><th></th></tr></thead><tbody id="members-table"></tbody></table></div>
             <p id="members-empty" class="tester-audit-note" hidden>Belum ada member Google. Member muncul di sini setelah pendaftaran pertama lewat tombol Google di portal member.</p></article>
 
-            <article class="panel" id="member-manage-panel" hidden><div class="panel-heading"><div><span class="section-kicker">Kelola member</span><h2 id="member-manage-title">—</h2><p class="tester-audit-note" id="member-manage-sub" style="margin:2px 0 0;"></p></div><button class="button button-secondary" id="member-manage-close" type="button">Tutup</button></div>
+            <article class="panel" id="member-manage-panel" hidden><div class="panel-heading"><div><span class="section-kicker">Kelola member</span><h2 id="member-manage-title">—</h2><p class="tester-audit-note" id="member-manage-sub" style="margin:4px 0 0;"></p></div><button class="button button-secondary" id="member-manage-close" type="button">Tutup</button></div>
             <div class="member-key-row"><span>API key:</span><code id="member-key-masked">—</code><button class="button button-secondary" type="button" id="member-key-eye" title="Lihat kunci"></button><button class="button button-secondary" type="button" id="member-key-copy" hidden>Salin</button></div>
             <p id="member-key-note" class="tester-audit-note" hidden></p>
             <form id="member-assign-form" class="form-grid">
@@ -282,7 +282,7 @@
             <p id="member-new-key" class="tester-audit-note" hidden></p>
             </article>
 
-            <article class="panel" id="member-detail-panel" hidden><div class="panel-heading"><div><span class="section-kicker">Detail member</span><h2 id="member-detail-title">—</h2><p class="tester-audit-note" id="member-detail-sub" style="margin:2px 0 0;"></p></div><button class="button button-secondary" id="member-detail-close" type="button">Tutup</button></div>
+            <article class="panel" id="member-detail-panel" hidden><div class="panel-heading"><div><span class="section-kicker">Detail member</span><h2 id="member-detail-title">—</h2><p class="tester-audit-note" id="member-detail-sub" style="margin:4px 0 0;"></p></div><button class="button button-secondary" id="member-detail-close" type="button">Tutup</button></div>
             <h3>Kunci</h3>
             <div class="table-scroll"><table><thead><tr><th>Kunci</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Gratis invalid hari ini</th><th>Adjust kuota manual</th></tr></thead><tbody id="member-detail-keys"></tbody></table></div>
             <p class="tester-audit-note">Adjust kuota bersifat relatif (sisa ditambah/dikurangi delta, bukan di-set absolut) dan selalu dicatat di Aktivitas beserta alasan. Delta positif yang melampaui total ikut menaikkan total; delta negatif tidak mengubah total.</p>
