@@ -1802,3 +1802,22 @@ td.empty-state { display: table-cell; }
      - bayangan (box-shadow) rgba(15,23,42,.05/.14/.28) pada kartu/modal;
      - warna TEKS --ink #0f172a (bukan latar).
    ========================================================================== */
+
+/* ------------------------------------------------------------------
+   Perbaikan tabel kesehatan rute provider di HP (2026-10-26,
+   dari screenshot user 01:44 WIB).
+   Akar: tabel width:100% di layar HP menjepit kolom RUTE sampai ~60px,
+   lalu `overflow-wrap: anywhere` global menghancurkan kata per huruf
+   ("Cuti/ezy", "HTT/P/Vali/dasi/reke/ning") dan UUID patah sembarang.
+   Perbaikan (CSS saja, scoped ke tabel ini): tabel diberi lebar minimum
+   agar kolom punya ruang baca dan .table-scroll menggeser horizontal;
+   sel rute/produk membungkus normal (patah di spasi/tanda hubung saja);
+   kolom status/aksi tidak membungkus. */
+#view-providers .table-scroll table { min-width: 720px; }
+#provider-health-table td { overflow-wrap: break-word; }
+#provider-health-table td:first-child { min-width: 190px; }
+#provider-health-table td:nth-child(2) { min-width: 120px; }
+#provider-health-table td:nth-child(3),
+#provider-health-table td:nth-child(4),
+#provider-health-table td:nth-child(5),
+#provider-health-table td:nth-child(6) { white-space: nowrap; }
