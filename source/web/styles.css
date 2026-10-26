@@ -1824,3 +1824,15 @@ td.empty-state { display: table-cell; }
 #provider-health-table td:nth-child(4),
 #provider-health-table td:nth-child(5),
 #provider-health-table td:nth-child(6) { white-space: nowrap; }
+
+/* ------------------------------------------------------------------
+   Perbaikan tabel Volume per hari di HP (2026-10-26,
+   dari screenshot user 08:56 WIB).
+   Akar (sama seperti tabel rute provider): tabel width:100% di layar
+   HP menjepit kolom HARI sampai ~50px, lalu `overflow-wrap: anywhere`
+   global menghancurkan tanggal per huruf ("202/6-/09-/27").
+   Perbaikan (CSS saja, scoped ke tabel ini): tabel diberi lebar minimum
+   agar kolom punya ruang baca dan .table-scroll menggeser horizontal;
+   semua sel tidak membungkus (tanggal + angka pendek tidak perlu patah). */
+#view-analytics .table-scroll table { min-width: 560px; }
+#analytics-hits-table td { overflow-wrap: normal; white-space: nowrap; }
