@@ -67,6 +67,16 @@ pub struct AppState {
     pub event_sink: Arc<dyn UsageEventSink>,
     pub oauth_states: Arc<OAuthStateStore>,
     pub session_revocation: Arc<crate::session_revocation::SessionRevocation>,
+    /// Cache secret webhook QRIS yang sudah didekripsi (K24): jalur ack
+    /// webhook TIDAK BOLEH menyentuh DB — verifikasi HMAC harus murni
+    /// in-memory agar ack <= 5 detik terjamin walau DB lambat. Diisi
+    /// saat webhook pertama (cold path) dan dikosongkan setiap kali
+    /// pengaturan QRIS disimpan lewat panel (lihat update_qris_settings);
+    /// restart proses juga mengosongkannya. Bila HMAC gagal dengan
+    /// secret cache, handler memuat ulang sekali dari DB (rotasi secret
+    /// di luar panel) sebelum menolak — verifikasi tetap gerbangnya,
+    /// tidak ada 200 untuk webhook tak terverifikasi.
+    pub webhook_secret_cache: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -1514,7 +1524,7 @@ async fn validate(
     request: ProviderValidationRequest,
     request_started: Instant,
 ) -> Result<Response, AppError> {
-    let request_id = request_id(&headers);
+    let request_id = request_id(&headers)?;
     let raw_api_key = api_key_from_headers(&headers)
         .ok_or_else(|| AppError::unauthorized("Header API key tidak ditemukan"))?;
     let api_key = state
@@ -4409,7 +4419,7 @@ fn insert_header(headers: &mut HeaderMap, name: &str, value: &str) {
 /// (62^10 ≈ 8.4e17 combinations), drawn from the OS RNG with rejection
 /// sampling so every character is uniform. Used in API responses, member
 /// history, and support lookups instead of a 36-character UUID.
-fn short_request_id() -> String {
+pub(crate) fn short_request_id() -> String {
     use rand::RngCore;
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::rngs::OsRng;
@@ -4440,13 +4450,33 @@ impl MakeRequestId for MakeShortRequestId {
     }
 }
 
-fn request_id(headers: &HeaderMap) -> String {
-    headers
-        .get("x-request-id")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty() && value.len() <= 128)
-        .map(str::to_owned)
-        .unwrap_or_else(short_request_id)
+/// Request ID untuk satu validasi API. Server selalu men-generate ID
+/// 10 char `[A-Za-z0-9]` bila header tidak ada/kosong. ID klien yang
+/// dikirim dipakai apa adanya HANYA bila muat di kolom DB (<= 64 char,
+/// lebar `validation_requests.request_id` / `usage_ledger.request_id`):
+/// dulu ID > 64 char dipotong diam-diam oleh `INSERT IGNORE` (B25) —
+/// respons menampilkan ID penuh sementara DB menyimpan 64 char pertama,
+/// sehingga pencarian support berdasarkan ID respons tidak menemukan
+/// barisnya. Kini ID > 64 char DITOLAK 400, bukan dipotong. Header yang
+/// tidak bisa dibaca sebagai string (non-ASCII/non-UTF-8) juga DITOLAK
+/// 400 (K47), bukan diabaikan diam-diam — mengabaikannya membuat klien
+/// mengira ID-nya dipakai padahal server men-generate yang baru.
+fn request_id(headers: &HeaderMap) -> Result<String, AppError> {
+    let Some(raw) = headers.get("x-request-id") else {
+        return Ok(short_request_id());
+    };
+    let value = raw.to_str().map_err(|_| {
+        AppError::bad_request("X-Request-Id tidak valid")
+    })?;
+    if value.is_empty() {
+        return Ok(short_request_id());
+    }
+    if value.len() > 64 {
+        return Err(AppError::bad_request(
+            "X-Request-Id melebihi 64 karakter",
+        ));
+    }
+    Ok(value.to_owned())
 }
 
 fn api_key_from_headers(headers: &HeaderMap) -> Option<&str> {
@@ -4469,11 +4499,27 @@ fn api_key_from_headers(headers: &HeaderMap) -> Option<&str> {
 /// back in the response headers so the client can learn and reuse it). A
 /// key the client DID supply is still validated strictly.
 pub(crate) fn idempotency_key_or_generate(headers: &HeaderMap) -> Result<(String, bool), AppError> {
-    let supplied = headers
-        .get("idempotency-key")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    // K47: header yang ADA tetapi tidak bisa dibaca sebagai string
+    // (non-ASCII/non-UTF-8) DITOLAK 400 dengan pesan generik yang sudah
+    // ada — dulu ia jatuh ke cabang None dan server men-generate kunci
+    // baru, sehingga retry klien TIDAK me-replay (kunci berbeda) tanpa
+    // klien mengetahuinya. Header kosong/tidak ada tetap generate.
+    let supplied = match headers.get("idempotency-key") {
+        None => None,
+        Some(raw) => {
+            let value = raw.to_str().map_err(|_| {
+                AppError::bad_request(
+                    "Idempotency-Key harus 8-200 karakter ASCII tanpa spasi",
+                )
+            })?;
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        }
+    };
     match supplied {
         Some(key) => {
             if !(8..=200).contains(&key.len())
@@ -4743,6 +4789,12 @@ async fn update_qris_settings(
         ));
     }
     let view = crate::qris::save_qris_settings(&pool, input, &cipher).await?;
+    // K24: pengaturan QRIS berubah -> secret webhook cache basi. Kosongkan
+    // agar webhook berikutnya memuat ulang dari DB (cold path sekali),
+    // bukan memverifikasi dengan secret lama selamanya.
+    if let Ok(mut guard) = state.webhook_secret_cache.write() {
+        *guard = None;
+    }
     record_admin_activity(
         &state,
         &principal,
@@ -6247,23 +6299,64 @@ async fn qris_webhook(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<QrisWebhookAck>, AppError> {
-    let pool = qris_pool(&state).await?;
-    let settings = crate::qris::load_qris_settings(&pool).await?;
-    let cipher = crate::provider_config::CredentialCipher::new(
-        state.config.api_key_encryption_key.as_deref(),
-    );
-    let secret = settings
-        .webhook_secret_ciphertext
-        .as_deref()
-        .and_then(|ciphertext| cipher.decrypt(ciphertext).ok())
-        .ok_or_else(|| AppError::service_unavailable("Webhook QRIS belum dikonfigurasi."))?;
+    // K24: ack <= 5 detik DIJAMIN di jalur panas — verifikasi HMAC dulu
+    // (cepat, in-memory), balas 200, lalu proses di background (sweep
+    // di bawah, spawn tanpa ditunggu). TIDAK ADA pekerjaan DB di jalur
+    // ack bila secret sudah ter-cache: dulu handler memuat settings +
+    // mendekripsi secret dari DB SEBELUM membalas, sehingga DB lambat
+    // membuat ack melebihi 5 detik. HMAC gagal tetap 401 — tidak ada
+    // 200 untuk webhook tak terverifikasi — dan pemrosesan background
+    // tetap lewat sweep + verify idempoten yang sudah ada, jadi tidak
+    // ada grant ganda dari pemrosesan background ini.
     let signature = headers
         .get("x-cutiezy-signature")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| AppError::unauthorized("Signature webhook tidak ada"))?;
+    let load_secret_from_db = || async {
+        let pool = qris_pool(&state).await?;
+        let settings = crate::qris::load_qris_settings(&pool).await?;
+        let cipher = crate::provider_config::CredentialCipher::new(
+            state.config.api_key_encryption_key.as_deref(),
+        );
+        settings
+            .webhook_secret_ciphertext
+            .as_deref()
+            .and_then(|ciphertext| cipher.decrypt(ciphertext).ok())
+            .ok_or_else(|| AppError::service_unavailable("Webhook QRIS belum dikonfigurasi."))
+    };
+    let cached = state
+        .webhook_secret_cache
+        .read()
+        .ok()
+        .and_then(|guard| guard.clone());
+    let secret = match cached {
+        Some(secret) => secret,
+        None => {
+            let secret = load_secret_from_db().await?;
+            if let Ok(mut guard) = state.webhook_secret_cache.write() {
+                *guard = Some(secret.clone());
+            }
+            secret
+        }
+    };
     if !crate::qris::verify_webhook_signature(&secret, &body, signature) {
-        tracing::warn!("Signature webhook QRIS tidak valid");
-        return Err(AppError::unauthorized("Signature webhook tidak valid"));
+        // Secret mungkin dirotasi di luar panel (cache basi): muat ulang
+        // sekali dari DB dan verifikasi ulang sebelum menolak. Bila
+        // tetap gagal, tolak — tidak ada ack untuk signature tak valid.
+        let fresh = load_secret_from_db().await.ok();
+        let verified = match fresh {
+            Some(fresh) => {
+                if let Ok(mut guard) = state.webhook_secret_cache.write() {
+                    *guard = Some(fresh.clone());
+                }
+                crate::qris::verify_webhook_signature(&fresh, &body, signature)
+            }
+            None => false,
+        };
+        if !verified {
+            tracing::warn!("Signature webhook QRIS tidak valid");
+            return Err(AppError::unauthorized("Signature webhook tidak valid"));
+        }
     }
     let payload: QrisWebhookPayload = serde_json::from_slice(&body).unwrap_or(QrisWebhookPayload {
         event: None,
@@ -6975,6 +7068,7 @@ mod site_status_tests {
             .await
             .expect("event sink lokal"),
             oauth_states: Arc::new(crate::auth::OAuthStateStore::new()),
+            webhook_secret_cache: Arc::new(std::sync::RwLock::new(None)),
             session_revocation: Arc::new(
                 crate::session_revocation::SessionRevocation::new(None).await,
             ),

@@ -104,6 +104,7 @@ async fn main() -> Result<()> {
             Some(provider_guard)
         },
         oauth_states: Arc::new(OAuthStateStore::new()),
+        webhook_secret_cache: Arc::new(std::sync::RwLock::new(None)),
         session_revocation: Arc::new(
             rajacek_api::session_revocation::SessionRevocation::new(
                 config.redis_url.as_deref(),

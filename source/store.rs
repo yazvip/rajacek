@@ -1166,17 +1166,28 @@ impl AdminStore {
             };
             match tx.try_send(write) {
                 Ok(()) => return,
-                Err(tokio::sync::mpsc::error::TrySendError::Full(write)) => {
-                    // Backpressure, NOT a direct write (audit 2026-10-25,
-                    // B6): writing the newest snapshot directly and then
-                    // letting the writer drain older ones over it regressed
-                    // the database to a stale value. Waiting preserves FIFO
-                    // order; callers already hold the data lock here, so a
-                    // stalled database stalls (rather than corrupts) quota
-                    // accounting.
-                    if tx.send(write).await.is_ok() {
-                        return;
-                    }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_write)) => {
+                    // K17: channel penuh = DROP dengan warning, BUKAN
+                    // menunggu. Dulu cabang ini memakai `tx.send().await`
+                    // SAMBIL pemanggil memegang data lock, sehingga
+                    // sekali antrean 8192 terisi (DB mati cukup lama),
+                    // SEMUA validasi/operasi kuota stall bersamaan.
+                    // Snapshot yang di-drop bersifat absolut dan
+                    // self-healing pada gerakan berikutnya (komentar di
+                    // atas), jadi drop di sini kehilangan paling banyak
+                    // satu snapshot antara, bukan korupsi. Pengiriman
+                    // TIDAK dipindah ke direct write: direct write lalu
+                    // writer menguras snapshot lama di atasnya adalah
+                    // persis regresi snapshot basi B6 — dan urutan
+                    // `sync_aggregates_from_buckets` sebelum snapshot
+                    // (di semua pemanggil di bawah data lock) TIDAK
+                    // diubah, jadi snapshot yang terkirim tetap memuat
+                    // agregat terbaru.
+                    tracing::warn!(
+                        prefix = %prefix,
+                        "Antrean writer kuota penuh (8192); snapshot dibuang, bukan menunggu — snapshot berikutnya akan self-healing"
+                    );
+                    return;
                 }
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
             }
@@ -1184,6 +1195,33 @@ impl AdminStore {
         self.persist_key_quota_direct(prefix, remaining_quota, Utc::now(), bucket)
             .await;
     }
+
+/// Prune retensi target mentah (K48, keputusan D5): NULL-kan
+/// `target_raw` + `account_name` pada baris `validation_requests` yang
+/// lebih tua dari 90 hari. BARIS DIPERTAHANKAN — hanya kolom personal
+/// yang dihapus; produk/outcome/latensi/request_id tetap untuk riwayat
+/// dan analitik. Idempotent (baris yang sudah NULL tidak terhitung
+/// lagi) dan berbatas (satu batch `LIMIT`, dipanggil berulang oleh
+/// worker sampai satu batch mengembalikan < limit). Salinan Redis
+/// stream + DLQ TIDAK ikut prune ini — keduanya mengandalkan cap yang
+/// sudah ada (stream MAXLEN ~100.000, DLQ cap lokal 10.000); lihat
+/// FLOW.md.
+pub async fn prune_old_raw_targets(
+    pool: &sqlx::MySqlPool,
+    batch_limit: u64,
+) -> Result<u64, AppError> {
+    let result = sqlx::query(
+        "UPDATE validation_requests SET target_raw = NULL, account_name = NULL \
+         WHERE (target_raw IS NOT NULL OR account_name IS NOT NULL) \
+         AND created_at < UTC_TIMESTAMP(6) - INTERVAL 90 DAY \
+         ORDER BY created_at ASC LIMIT ?",
+    )
+    .bind(batch_limit)
+    .execute(pool)
+    .await
+    .map_err(|_| AppError::internal("Prune target mentah gagal"))?;
+    Ok(result.rows_affected())
+}
 
     async fn persist_key_quota_direct(
         &self,
@@ -6296,5 +6334,78 @@ mod quota_bucket_tests {
             .await
             .expect("reserve kunci baru lolos");
         assert_eq!(remaining, 148);
+    }
+}
+
+#[cfg(test)]
+mod quota_writer_backpressure_tests {
+    use super::*;
+
+    fn install_channel(store: &AdminStore, capacity: usize) -> tokio::sync::mpsc::Receiver<QuotaWrite> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<QuotaWrite>(capacity);
+        *store
+            .quota_tx
+            .write()
+            .expect("quota writer lock") = Some(tx);
+        rx
+    }
+
+    fn dummy_write(remaining: u64) -> QuotaWrite {
+        QuotaWrite {
+            prefix: "rv_live_test".to_owned(),
+            remaining,
+            at: Utc::now(),
+            bucket: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn full_channel_drops_instead_of_blocking() {
+        // K17: antrean 8192 penuh -> persist kembali seketika (drop +
+        // warning), bukan menunggu slot sambil memegang data lock.
+        // Dulu cabang ini `tx.send().await` tanpa batas waktu.
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let mut rx = install_channel(&store, 8192);
+        {
+            let tx = store
+                .quota_tx
+                .read()
+                .expect("quota writer lock")
+                .clone()
+                .expect("channel terpasang");
+            for _ in 0..8192 {
+                tx.try_send(dummy_write(1)).expect("isi antrean");
+            }
+            assert!(tx.try_send(dummy_write(1)).is_err(), "antrean penuh");
+        }
+        let finished = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            store.persist_key_quota("rv_live_test", 42),
+        )
+        .await;
+        assert!(
+            finished.is_ok(),
+            "persist dengan channel penuh harus kembali seketika, bukan stall"
+        );
+        // Snapshot yang di-drop tidak masuk antrean: penerima masih
+        // melihat 8192 entri lama, bukan 8193.
+        let mut count = 0;
+        while rx.try_recv().is_ok() {
+            count += 1;
+        }
+        assert_eq!(count, 8192);
+    }
+
+    #[tokio::test]
+    async fn queued_snapshot_carries_the_latest_aggregate() {
+        // K17 (syarat keras): snapshot yang TERKIRIM memuat agregat
+        // terbaru — nilai yang dihitung pemanggil SETELAH
+        // sync_aggregates_from_buckets harus tiba utuh di writer.
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let mut rx = install_channel(&store, 8192);
+        store.persist_key_quota("rv_live_test", 777).await;
+        let write = rx.recv().await.expect("snapshot terkirim");
+        assert_eq!(write.prefix, "rv_live_test");
+        assert_eq!(write.remaining, 777);
     }
 }

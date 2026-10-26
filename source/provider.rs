@@ -320,6 +320,15 @@ impl HttpProvider {
     /// admitted server has failed does the request fail, so the member
     /// always waits for a real answer.
     ///
+    /// K12 (accepted cost, documented — NOT changed): this race fans
+    /// out to EVERY active server for the product at once, so one
+    /// member check costs N upstream hits (N = active servers), plus
+    /// each leg's own retries. Member quota is still 1 hit; the
+    /// multiplier lands on Rajacek's upstream bill. Today N = 1 per
+    /// product, so the cost is zero — but before activating a second
+    /// server for redundancy, weigh a sequential-fallback mode
+    /// (primary first, fallback only on failure) against this fan-out.
+    ///
     /// Fallback ranking (audit 2026-10-25, B1/K4 — ONE ranking, shared by
     /// the whole race; there is no second ranking anywhere): when no leg
     /// returns Valid, the best fallback wins, NOT the first finisher:
@@ -342,16 +351,55 @@ impl HttpProvider {
         }
         let mut admitted = Vec::new();
         let mut first_block: Option<AppError> = None;
-        for endpoint in endpoints {
+        // K46 (fail-fast admission): pass 1 tries every endpoint WITHOUT
+        // waiting, so a queue-full server is skipped instantly instead
+        // of delaying the attempt at a healthy server by up to
+        // `queue_wait_ms` (default 2 s) per stuck server. Only when NO
+        // endpoint admits instantly do we fall back to the old
+        // sequential wait — a lone queue-full server keeps its exact
+        // old behavior (wait, then 429), and failover to a healthy
+        // server is unchanged, just no longer delayed by the queue.
+        for endpoint in &endpoints {
             match self
                 .guard
-                .acquire(request.product, &endpoint.id.to_string())
+                .try_acquire(request.product, &endpoint.id.to_string())
                 .await
             {
-                Ok(ticket) => admitted.push((endpoint, ticket)),
+                Ok(Some(ticket)) => admitted.push((endpoint.clone(), ticket)),
+                Ok(None) => {
+                    if first_block.is_none() {
+                        first_block = Some(AppError::too_many_requests(
+                            format!(
+                                "Antrean provider untuk {} penuh. Silakan coba kembali sesaat lagi.",
+                                request.product.label_id()
+                            ),
+                            2,
+                        ));
+                    }
+                }
                 Err(error) => {
                     if first_block.is_none() {
                         first_block = Some(error);
+                    }
+                }
+            }
+        }
+        if admitted.is_empty() {
+            // Pass-1 errors were provisional (queue-full skips); the
+            // fallback's own errors decide the final error, exactly as
+            // the old sequential loop reported them.
+            first_block = None;
+            for endpoint in endpoints {
+                match self
+                    .guard
+                    .acquire(request.product, &endpoint.id.to_string())
+                    .await
+                {
+                    Ok(ticket) => admitted.push((endpoint, ticket)),
+                    Err(error) => {
+                        if first_block.is_none() {
+                            first_block = Some(error);
+                        }
                     }
                 }
             }

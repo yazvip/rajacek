@@ -69,6 +69,48 @@ async fn main() -> Result<()> {
         "Worker ledger Rajacek dimulai"
     );
 
+    // K48 (retensi target mentah 90 hari, D5): prune periodik — sekali
+    // saat startup, lalu tiap 24 jam. Tiap tick mem-NULL-kan target_raw
+    // + account_name baris > 90 hari dalam batch 1.000 (maks 10 batch
+    // per tick agar satu tick tidak menahan transaksi lama); baris
+    // riwayat TIDAK dihapus. Salinan Redis stream + DLQ mengandalkan
+    // cap yang sudah ada (bukan prune ini).
+    let prune_pool = database.pool().clone();
+    tokio::spawn(async move {
+        loop {
+            // Log tiap tick TERMASUK 0 baris: tanpa ini, tick yang
+            // berjalan normal tidak bisa dibedakan dari task prune
+            // yang tidak pernah jalan (verifikasi K48 mengandalkan
+            // baris log ini + query COUNT sisa baris mentah > 90 hari).
+            let mut tick_pruned = 0u64;
+            for _ in 0..10 {
+                match rajacek_api::store::AdminStore::prune_old_raw_targets(&prune_pool, 1_000)
+                    .await
+                {
+                    Ok(0) => break,
+                    Ok(pruned) => {
+                        tick_pruned += pruned;
+                        if pruned < 1_000 {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            "Prune retensi target mentah K48 gagal; dicoba lagi pada tick berikutnya"
+                        );
+                        break;
+                    }
+                }
+            }
+            tracing::info!(
+                pruned = tick_pruned,
+                "Prune retensi target mentah K48 selesai (tick 24 jam)"
+            );
+            sleep(Duration::from_secs(24 * 3_600)).await;
+        }
+    });
+
     // Penghitung percobaan persist B15: sengaja di luar loop sesi agar
     // tidak me-reset tiap sesi worker gagal dan dimulai ulang.
     let mut persist_attempts = PersistAttempts::new();

@@ -1578,6 +1578,13 @@
       let buyPollTimer = null;
       let buyCountdownTimer = null;
       let buyCurrentOrderId = null;
+      let buyCountdownExpired = false;
+      // K27: true bila countdown sudah habis — buyApplyOrder tidak
+      // boleh me-restart polling lagi dari keadaan ini (dulu: countdown
+      // 0 -> refresh -> waiting -> buyShowWaiting lagi, berputar tiap
+      // detik selamanya sampai sweep menandai expired). Tombol manual
+      // ("Saya sudah bayar"/"Batalkan") tetap jalan karena
+      // buyCurrentOrderId dipertahankan.
       let buyPendingPackageId = null;
 
       async function buyApi(path, options) {
@@ -1597,6 +1604,7 @@
       }
       function buyShowWaiting(order) {
         buyStopTimers();
+        buyCountdownExpired = false;
         buyCurrentOrderId = order.id;
         $('buyWaiting').classList.remove('hidden');
         $('buyWaitingPkg').textContent = order.package_name;
@@ -1609,7 +1617,15 @@
         buyCountdownTimer = setInterval(() => {
           left -= 1;
           if (left <= 0) {
-            clearInterval(buyCountdownTimer); buyCountdownTimer = null;
+            // K27: countdown habis -> BERHENTI. Hentikan semua timer,
+            // tampilkan status akhir, lalu SATU refresh final. Bila
+            // order masih waiting (sweep belum menandai expired),
+            // buyApplyOrder menampilkan status akhir TANPA me-restart
+            // countdown/polling — tidak ada lagi request berulang.
+            buyCountdownExpired = true;
+            buyStopTimers();
+            $('buyCountdown').textContent = buyFmtCountdown(0);
+            $('buyOrderStatus').textContent = 'Waktu pembayaran habis — menunggu konfirmasi kedaluwarsa dari server.';
             buyRefreshDetail();
             return;
           }
@@ -1625,7 +1641,20 @@
         } catch (_) { /* polling berikutnya mencoba lagi */ }
       }
       function buyApplyOrder(order) {
-        if (order.status === 'waiting_payment') { buyShowWaiting(order); return; }
+        if (order.status === 'waiting_payment') {
+          if (buyCountdownExpired) {
+            // K27: status akhir setelah countdown habis — semua timer
+            // sudah berhenti; jangan restart polling. buyCurrentOrderId
+            // dipertahankan agar tombol manual tetap bisa memeriksa /
+            // membatalkan, dan pemeriksaan manual yang masih waiting
+            // kembali ke status akhir ini (bukan ke loop polling).
+            buyStopTimers();
+            $('buyCountdown').textContent = buyFmtCountdown(0);
+            $('buyOrderStatus').textContent = 'Waktu pembayaran habis — menunggu konfirmasi kedaluwarsa dari server. Bila Anda sudah membayar, tekan "Saya sudah bayar" untuk memeriksa.';
+            return;
+          }
+          buyShowWaiting(order); return;
+        }
         buyStopTimers();
         buyCurrentOrderId = null;
         $('buyWaiting').classList.add('hidden');

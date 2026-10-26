@@ -11,30 +11,52 @@ use tokio::sync::Mutex;
 use crate::{error::AppError, models::RateLimitAdmission};
 
 const WINDOW: Duration = Duration::from_secs(60);
+/// Sliding-window limiter (K7, menggantikan fixed-window menit kalender).
+/// Dulu kunci memakai bucket menit kalender (`timestamp/60`) dengan
+/// `INCR` sebelum cek batas, sehingga burst di perbatasan menit bisa
+/// mencapai ~2x limit dalam jendela geser 60 detik, dan request yang
+/// ditolak satu bucket tetap membakar bucket lain. Kini tiap kunci
+/// menyimpan log timestamp (sorted set) 60 detik terakhir: hitung dulu
+/// SEMUA bucket, dan catat timestamp baru HANYA bila semua bucket
+/// mengizinkan — request yang ditolak tidak mengonsumsi apa pun, dan
+/// jendela berjalan mengikuti waktu nyata, bukan batas menit kalender.
+/// Limit per menit, penolakan di atas limit, dan bentuk hasil
+/// (`allowed`/`remaining`/`retry_after`) tidak berubah.
 const RATE_LIMIT_LUA: &str = r#"
 local window_ms = tonumber(ARGV[1])
+local now_ms = tonumber(ARGV[2])
+local member = ARGV[3]
+local cutoff = now_ms - window_ms
 local allowed = 1
 local primary_remaining = 0
 local retry_after_ms = 0
+local counts = {}
 
 for index, key in ipairs(KEYS) do
-  local limit = tonumber(ARGV[index + 1])
-  local current = redis.call('INCR', key)
-  if current == 1 then
-    redis.call('PEXPIRE', key, window_ms)
-  end
-
-  if current > limit then
+  redis.call('ZREMRANGEBYSCORE', key, 0, cutoff)
+  local count = redis.call('ZCARD', key)
+  counts[index] = count
+  local limit = tonumber(ARGV[index + 3])
+  if count >= limit then
     allowed = 0
-    local ttl = redis.call('PTTL', key)
-    if ttl > retry_after_ms then
-      retry_after_ms = ttl
+    local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+    if #oldest >= 2 then
+      local wait = tonumber(oldest[2]) + window_ms - now_ms
+      if wait > retry_after_ms then
+        retry_after_ms = wait
+      end
     end
   end
+end
 
-  if index == 1 then
-    primary_remaining = math.max(0, limit - current)
+if allowed == 1 then
+  for index, key in ipairs(KEYS) do
+    redis.call('ZADD', key, now_ms, member)
+    redis.call('PEXPIRE', key, window_ms)
   end
+  primary_remaining = math.max(0, tonumber(ARGV[4]) - counts[1] - 1)
+else
+  primary_remaining = math.max(0, tonumber(ARGV[4]) - counts[1])
 end
 
 return {allowed, primary_remaining, retry_after_ms}
@@ -122,16 +144,25 @@ impl RateLimiter for RedisRateLimiter {
         let default_limit = self.default_limit_per_minute();
         let ip_limit = default_limit.saturating_mul(3).max(api_key_limit);
         let global_limit = default_limit.saturating_mul(100).max(1_000);
-        let minute_bucket = UtcMinuteBucket::current();
         let safe_ip = sanitize_segment(client_ip);
+        // Timestamp + ID unik per percobaan: anggota sorted set harus
+        // unik agar dua admit dalam milidetik yang sama tidak saling
+        // menimpa (ZADD dengan anggota sama hanya memperbarui skor).
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_millis() as i64)
+            .unwrap_or(0);
+        let member = format!("{now_ms}:{}", uuid::Uuid::now_v7());
 
         let mut connection = self.connection.clone();
         let values: Vec<i64> = self
             .script
-            .key(format!("rl:api_key:{minute_bucket}:{api_key_prefix}"))
-            .key(format!("rl:ip:{minute_bucket}:{safe_ip}"))
-            .key(format!("rl:global:{minute_bucket}"))
+            .key(format!("rl:sw:api_key:{api_key_prefix}"))
+            .key(format!("rl:sw:ip:{safe_ip}"))
+            .key(format!("rl:sw:global"))
             .arg(WINDOW.as_millis() as i64)
+            .arg(now_ms)
+            .arg(member)
             .arg(api_key_limit as i64)
             .arg(ip_limit as i64)
             .arg(global_limit as i64)
@@ -162,15 +193,13 @@ impl RateLimiter for RedisRateLimiter {
     }
 }
 
-struct LocalWindow {
-    started_at: Instant,
-    count: u32,
-}
-
 /// Local limiter is intentionally limited to development/test mode. Production requires Redis
 /// to coordinate enforcement across horizontally scaled API replicas.
+/// Cerminan lokal skrip Lua sliding-window di atas: tiap kunci menyimpan
+/// deque timestamp 60 detik terakhir; entri basi di-prune tiap admit,
+/// dan timestamp baru dicatat HANYA bila semua bucket mengizinkan.
 pub struct LocalRateLimiter {
-    windows: Mutex<HashMap<String, LocalWindow>>,
+    windows: Mutex<HashMap<String, std::collections::VecDeque<Instant>>>,
     default_limit_per_minute: std::sync::atomic::AtomicU32,
 }
 
@@ -182,27 +211,6 @@ impl LocalRateLimiter {
                 default_limit_per_minute.max(1),
             ),
         }
-    }
-
-    async fn consume(&self, key: String, limit: u32) -> (bool, u32, u64) {
-        let now = Instant::now();
-        let mut windows = self.windows.lock().await;
-        let entry = windows.entry(key).or_insert(LocalWindow {
-            started_at: now,
-            count: 0,
-        });
-        if now.duration_since(entry.started_at) >= WINDOW {
-            entry.started_at = now;
-            entry.count = 0;
-        }
-        entry.count = entry.count.saturating_add(1);
-        let allowed = entry.count <= limit;
-        let remaining = limit.saturating_sub(entry.count);
-        let retry_after_seconds = WINDOW
-            .saturating_sub(now.duration_since(entry.started_at))
-            .as_secs()
-            .saturating_add(1);
-        (allowed, remaining, retry_after_seconds)
     }
 }
 
@@ -224,45 +232,61 @@ impl RateLimiter for LocalRateLimiter {
         client_ip: &str,
         api_key_limit_per_minute: u32,
     ) -> Result<RateLimitAdmission, AppError> {
-        let minute = UtcMinuteBucket::current();
-        let (api_key_allowed, remaining, api_key_retry_after_seconds) = self
-            .consume(
-                format!("api_key:{minute}:{api_key_prefix}"),
-                api_key_limit_per_minute.max(1),
-            )
-            .await;
-        let (ip_allowed, _, ip_retry_after_seconds) = self
-            .consume(
-                format!("ip:{minute}:{}", sanitize_segment(client_ip)),
-                self.default_limit_per_minute()
-                    .saturating_mul(3)
-                    .max(api_key_limit_per_minute),
-            )
-            .await;
-        let (global_allowed, _, global_retry_after_seconds) = self
-            .consume(
-                format!("global:{minute}"),
-                self.default_limit_per_minute()
-                    .saturating_mul(100)
-                    .max(1_000),
-            )
-            .await;
-
+        let api_key_limit = api_key_limit_per_minute.max(1);
+        let ip_limit = self
+            .default_limit_per_minute()
+            .saturating_mul(3)
+            .max(api_key_limit);
+        let global_limit = self
+            .default_limit_per_minute()
+            .saturating_mul(100)
+            .max(1_000);
+        let keys = [
+            (format!("api_key:{api_key_prefix}"), api_key_limit),
+            (format!("ip:{}", sanitize_segment(client_ip)), ip_limit),
+            ("global".to_owned(), global_limit),
+        ];
+        let now = Instant::now();
+        let mut windows = self.windows.lock().await;
+        // Fase 1: prune + hitung semua bucket (jendela geser 60 detik).
+        let mut counts = Vec::with_capacity(keys.len());
+        let mut allowed = true;
+        let mut retry_after_seconds = 0u64;
+        for (key, limit) in &keys {
+            let deque = windows.entry(key.clone()).or_default();
+            while let Some(oldest) = deque.front() {
+                if now.duration_since(*oldest) >= WINDOW {
+                    deque.pop_front();
+                } else {
+                    break;
+                }
+            }
+            let count = deque.len() as u32;
+            counts.push(count);
+            if count >= *limit {
+                allowed = false;
+                if let Some(oldest) = deque.front() {
+                    let wait = WINDOW
+                        .saturating_sub(now.duration_since(*oldest))
+                        .as_secs()
+                        .saturating_add(1);
+                    retry_after_seconds = retry_after_seconds.max(wait);
+                }
+            }
+        }
+        // Fase 2: catat HANYA bila semua bucket mengizinkan — request
+        // yang ditolak tidak mengonsumsi bucket mana pun.
+        if allowed {
+            for (key, _) in &keys {
+                windows.entry(key.clone()).or_default().push_back(now);
+            }
+        }
+        let remaining = api_key_limit.saturating_sub(counts[0] + u32::from(allowed));
         Ok(RateLimitAdmission {
-            allowed: api_key_allowed && ip_allowed && global_allowed,
+            allowed,
             remaining,
-            retry_after_seconds: api_key_retry_after_seconds
-                .max(ip_retry_after_seconds)
-                .max(global_retry_after_seconds),
+            retry_after_seconds,
         })
-    }
-}
-
-struct UtcMinuteBucket;
-
-impl UtcMinuteBucket {
-    fn current() -> i64 {
-        chrono::Utc::now().timestamp().div_euclid(60)
     }
 }
 
@@ -312,5 +336,57 @@ mod tests {
             .await
             .expect("admission evaluates");
         assert!(other_ip.allowed);
+    }
+
+    #[tokio::test]
+    async fn sliding_window_denied_requests_consume_nothing() {
+        // K7: request yang ditolak tidak boleh menggerus bucket — deque
+        // harus berhenti di limit, bukan terus membengkak tiap deny.
+        let limiter = LocalRateLimiter::new(60);
+        for _ in 0..2 {
+            let admission = limiter
+                .admit("key-x", "203.0.113.20", 2)
+                .await
+                .expect("admission evaluates");
+            assert!(admission.allowed);
+        }
+        for _ in 0..5 {
+            let admission = limiter
+                .admit("key-x", "203.0.113.20", 2)
+                .await
+                .expect("admission evaluates");
+            assert!(!admission.allowed);
+            assert_eq!(admission.remaining, 0);
+            assert!(admission.retry_after_seconds > 0);
+        }
+        let windows = limiter.windows.lock().await;
+        assert_eq!(
+            windows
+                .get("api_key:key-x")
+                .map(std::collections::VecDeque::len),
+            Some(2),
+            "denied requests must not append to the window log"
+        );
+    }
+
+    #[tokio::test]
+    async fn sliding_window_prunes_entries_older_than_window() {
+        // K7: entri lebih tua dari 60 detik tidak lagi menghitung —
+        // jendela berjalan, bukan bucket menit kalender.
+        use super::{Instant, WINDOW};
+        let limiter = LocalRateLimiter::new(60);
+        {
+            let mut windows = limiter.windows.lock().await;
+            let mut deque = std::collections::VecDeque::new();
+            deque.push_back(Instant::now() - WINDOW - std::time::Duration::from_secs(1));
+            deque.push_back(Instant::now() - WINDOW - std::time::Duration::from_secs(1));
+            windows.insert("api_key:key-tua".to_owned(), deque);
+        }
+        let admission = limiter
+            .admit("key-tua", "203.0.113.21", 2)
+            .await
+            .expect("admission evaluates");
+        assert!(admission.allowed, "stale entries must be pruned first");
+        assert_eq!(admission.remaining, 1);
     }
 }

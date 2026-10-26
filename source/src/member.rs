@@ -1408,7 +1408,10 @@ pub async fn sandbox_check(
         sandbox_key.clone(),
         request,
         request_started,
-        uuid::Uuid::now_v7().to_string(),
+        // B25: sandbox memakai generator 10 char yang sama dengan jalur
+        // API (dulu UUID 36 char dengan strip, melanggar kontrak
+        // "selalu 10 char" di riwayat member/support).
+        crate::api::short_request_id(),
         "portal",
     )
     .await?;
@@ -2115,6 +2118,7 @@ mod resolve_session_and_reveal_audit_tests {
             .await
             .expect("event sink lokal"),
             oauth_states: std::sync::Arc::new(crate::auth::OAuthStateStore::new()),
+            webhook_secret_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
             session_revocation: std::sync::Arc::new(
                 crate::session_revocation::SessionRevocation::new(None).await,
             ),

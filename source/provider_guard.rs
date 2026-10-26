@@ -212,6 +212,22 @@ impl DynSemaphore {
         self.notify.notify_waiters();
     }
 
+    /// Non-blocking admission probe (K46): succeeds only if a slot is
+    /// free RIGHT NOW. Used by the race's fail-fast first pass so a
+    /// queue-full server is skipped instantly instead of holding up the
+    /// attempt at a healthy server for the full `queue_wait_ms`.
+    fn try_acquire(self: &Arc<Self>) -> Option<DynPermit> {
+        let mut state = self.state.lock().expect("semaphore state lock");
+        if state.in_flight < state.max {
+            state.in_flight += 1;
+            Some(DynPermit {
+                semaphore: self.clone(),
+            })
+        } else {
+            None
+        }
+    }
+
     async fn acquire(self: &Arc<Self>, wait: Duration) -> Option<DynPermit> {
         let deadline = Instant::now() + wait;
         loop {
@@ -444,6 +460,75 @@ impl ProviderGuard {
             .collect()
     }
 
+    /// Circuit-breaker check shared by `acquire` and `try_acquire`:
+    /// open -> 503, half-open probe already active -> 503, otherwise
+    /// Normal (or Probe, which reserves the half-open probe lease).
+    async fn check_breaker(
+        &self,
+        product: ValidationProduct,
+        endpoint_id: &str,
+    ) -> Result<Admission, AppError> {
+        let mut breakers = self.endpoint_breakers.lock().await;
+        let entry = breakers
+            .entry(endpoint_id.to_owned())
+            .or_insert_with(|| EndpointBreaker {
+                product,
+                state: BreakerState::default(),
+            });
+        let breaker = &mut entry.state;
+        match breaker.open_until {
+            Some(until) if until > Instant::now() => Err(AppError::service_unavailable(format!(
+                "Provider untuk {product} sedang tidak tersedia (circuit breaker terbuka). Silakan coba kembali sesaat lagi.",
+                product = product.label_id()
+            ))),
+            Some(_) => {
+                if breaker.probe_active(Instant::now()) {
+                    return Err(AppError::service_unavailable(format!(
+                        "Provider untuk {product} sedang diuji kembali (circuit breaker setengah terbuka). Silakan coba kembali sesaat lagi.",
+                        product = product.label_id()
+                    )));
+                }
+                breaker.probe_since = Some(Instant::now());
+                Ok(Admission::Probe)
+            }
+            None => Ok(Admission::Normal),
+        }
+    }
+
+    /// Fail-fast admission (K46): same breaker check as `acquire`, but
+    /// the concurrency slot is taken ONLY if free right now — a
+    /// queue-full endpoint returns 429 instantly instead of holding
+    /// the race for the full `queue_wait_ms`. Returns `Ok(None)` for
+    /// the queue-full case (distinct from breaker 503s) so the race
+    /// can skip that endpoint and try the next candidate immediately.
+    /// A failed probe attempt clears the probe lease, mirroring
+    /// `acquire`'s timeout path.
+    pub async fn try_acquire(
+        &self,
+        product: ValidationProduct,
+        endpoint_id: &str,
+    ) -> Result<Option<GuardTicket>, AppError> {
+        let index = product_index(product);
+        let admission = self.check_breaker(product, endpoint_id).await?;
+        match self.semaphores[index].try_acquire() {
+            Some(permit) => Ok(Some(GuardTicket {
+                _permit: permit,
+                admission,
+                endpoint_id: endpoint_id.to_owned(),
+                product,
+            })),
+            None => {
+                if admission == Admission::Probe {
+                    let mut breakers = self.endpoint_breakers.lock().await;
+                    if let Some(entry) = breakers.get_mut(endpoint_id) {
+                        entry.state.probe_since = None;
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
     /// Checks the circuit OF THIS ENDPOINT, then waits (bounded) for a
     /// product concurrency slot. Each in-flight upstream attempt holds its
     /// own slot, so a race over two servers takes two permits.
@@ -453,35 +538,7 @@ impl ProviderGuard {
         endpoint_id: &str,
     ) -> Result<GuardTicket, AppError> {
         let index = product_index(product);
-        let admission = {
-            let mut breakers = self.endpoint_breakers.lock().await;
-            let entry = breakers
-                .entry(endpoint_id.to_owned())
-                .or_insert_with(|| EndpointBreaker {
-                    product,
-                    state: BreakerState::default(),
-                });
-            let breaker = &mut entry.state;
-            match breaker.open_until {
-                Some(until) if until > Instant::now() => {
-                    return Err(AppError::service_unavailable(format!(
-                        "Provider untuk {product} sedang tidak tersedia (circuit breaker terbuka). Silakan coba kembali sesaat lagi.",
-                        product = product.label_id()
-                    )));
-                }
-                Some(_) => {
-                    if breaker.probe_active(Instant::now()) {
-                        return Err(AppError::service_unavailable(format!(
-                            "Provider untuk {product} sedang diuji kembali (circuit breaker setengah terbuka). Silakan coba kembali sesaat lagi.",
-                            product = product.label_id()
-                        )));
-                    }
-                    breaker.probe_since = Some(Instant::now());
-                    Admission::Probe
-                }
-                None => Admission::Normal,
-            }
-        };
+        let admission = self.check_breaker(product, endpoint_id).await?;
 
         let queue_wait_ms = self.config().queue_wait_ms;
         match self.semaphores[index]
@@ -678,6 +735,37 @@ mod tests {
             pace_max_wait_ms: max_wait_ms,
             ..ProviderGuardConfig::default()
         })
+    }
+
+    #[tokio::test]
+    async fn try_acquire_skips_full_queue_without_waiting() {
+        // K46: dengan concurrency 1 dan satu slot terpegang, try_acquire
+        // kedua harus kembali SEKETIKA sebagai None (bukan menunggu
+        // queue_wait_ms) — inilah yang membuat race melewati server
+        // antre-penuh tanpa menunda server sehat.
+        let guard = guard(5, 30, 1);
+        let product = ValidationProduct::BankAccount;
+        let held = guard
+            .acquire(product, "ep-penuh")
+            .await
+            .expect("first acquire takes the only slot");
+        let started = std::time::Instant::now();
+        let skipped = guard
+            .try_acquire(product, "ep-penuh")
+            .await
+            .expect("try_acquire evaluates");
+        assert!(skipped.is_none(), "full queue must skip, not wait");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(50),
+            "fail-fast skip must not wait queue_wait_ms, took {:?}",
+            started.elapsed()
+        );
+        drop(held);
+        let admitted = guard
+            .try_acquire(product, "ep-penuh")
+            .await
+            .expect("try_acquire evaluates");
+        assert!(admitted.is_some(), "slot freed -> try_acquire admits");
     }
 
     #[tokio::test]

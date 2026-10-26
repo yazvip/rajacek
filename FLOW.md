@@ -35,7 +35,10 @@ Request
     expired tetap boleh beli paket untuk perpanjangan)
   → Idempotency-Key (opsional; kosong → server generate UUID v7 + echo header;
     kiriman klien divalidasi 8–200 karakter; replay TIDAK potong kuota 2x)
-  → Rate limit kunci (default 60/menit, bisa override per member)
+  → Rate limit kunci (default 60/menit, bisa override per member;
+    sliding-window 60 detik sejak Fase 4, K7 — bukan bucket menit kalender)
+  → X-Request-Id (opsional; kosong → server generate 10 char [A-Za-z0-9];
+    kiriman klien > 64 char DITOLAK 400, bukan dipotong diam-diam — Fase 4, B25)
   → Reserve 1 hit (kuota 0 → 402 sebelum validasi jalan)
   → Balapan provider (lihat bawah)
   → Mapping hasil member-safe (lihat bawah)
@@ -59,6 +62,20 @@ Request
   Leg `not_kyc` tidak pernah menang atas Valid. Leg yang dibatalkan tidak
   `record_outcome` (keterbatasan yang didokumentasikan, ditanggung lease).
 - Satu validasi = maksimal 1 hit, berapa pun provider yang dicoba.
+- Biaya fan-out (Fase 4, K12 — DOKUMENTASI, tanpa perubahan kode): balapan
+  memanggil SEMUA server aktif produk itu sekaligus, jadi satu cek member
+  menghabiskan N hit upstream (N = jumlah server aktif) + retry tiap leg.
+  Kuota member tetap 1 hit; pengalinya menimpa tagihan upstream Rajacek.
+  Hari ini N = 1 per produk sehingga biayanya nol — SEBELUM mengaktifkan
+  server kedua untuk redundansi, pertimbangkan mode sequential-fallback
+  (server utama dulu, fallback hanya bila gagal) agar biaya tidak berlipat
+  tanpa peringatan di panel.
+- Admission fail-fast (Fase 4, K46): balapan mencoba semua endpoint TANPA
+  menunggu dulu; server yang antreannya penuh di-skip seketika (bukan
+  menahan percobaan ke server sehat sampai 2 detik per server). Hanya
+  bila TIDAK ADA endpoint yang langsung lolos, balapan kembali menunggu
+  berurutan seperti dulu — server tunggal yang antre-penuh berperilaku
+  persis sama (tunggu, lalu 429).
 
 ### Mapping hasil (member-safe — ATURAN STRUKTURAL)
 
@@ -100,7 +117,25 @@ Request
 - Kunci bersaldo 0 tetap 402 sebelum validasi (reserve gagal) — jatah gratis
   hanya terpakai selama saldo > 0.
 - Kuota ditulis background writer FIFO (channel mpsc 8192); mutasi + snapshot
-  HARUS di bawah data lock yang sama (invarian kritis).
+  HARUS di bawah data lock yang sama (invarian kritis). Channel penuh =
+  DROP dengan warning, bukan stall (Fase 4, K17): dulu writer yang penuh
+  membuat pengirim menunggu sambil memegang data lock sehingga SEMUA
+  validasi stall; snapshot yang di-drop bersifat absolut dan self-healing
+  pada gerakan berikutnya. Urutan sync agregat dari bucket SEBELUM snapshot
+  tidak diubah — snapshot yang terkirim selalu memuat agregat terbaru.
+- Rate limit sliding-window (Fase 4, K7): jendela berjalan 60 detik (log
+  timestamp per kunci/IP/global di Redis sorted set), bukan bucket menit
+  kalender — burst 2x di perbatasan menit tidak lagi mungkin. Request yang
+  ditolak tidak mengonsumsi bucket mana pun. Limit per menit, penolakan di
+  atas limit, dan bentuk respons tidak berubah.
+- Request ID (Fase 4, B25/K47): ID server selalu 10 char `[A-Za-z0-9]`
+  (juga untuk sandbox portal — dulu UUID 36 char). ID klien > 64 char
+  DITOLAK 400 karena kolom DB hanya 64 char (dulu dipotong diam-diam
+  lewat `INSERT IGNORE`: respons menampilkan ID penuh, DB menyimpan 64
+  char pertama, pencarian support gagal). Header `X-Request-Id` /
+  `Idempotency-Key` non-ASCII (bukan UTF-8 valid) DITOLAK 400 dengan
+  pesan generik yang sudah ada — dulu diabaikan diam-diam sehingga retry
+  klien tidak me-replay tanpa klien tahu.
 
 ---
 
@@ -114,6 +149,11 @@ Request
 - Login Google admin → callback `/admin` (gerbang login menyembunyikan shell
   panel sampai sesi valid).
 - Trial: 10 hit / 7 hari, kunci tampil sekali saat dibuat.
+- Satu orang dua akun Google = dua trial (Fase 4, K31 — DITERIMA sebagai
+  keterbatasan, tanpa perubahan kode, keputusan D4): email member tidak
+  unik (hanya `google_sub` yang UNIQUE), jadi tidak ada dedup manusia
+  lintas akun Google. Diterima sebagai biaya akuisisi; jangan "memperbaiki"
+  diam-diam tanpa keputusan baru.
 - Login dengan API key juga bisa (sesi `source = "api_key"`).
 
 ### Kunci API
@@ -207,6 +247,26 @@ Portal member: pilih paket → preview (harga diskon dikunci saat order dibuat)
   (string `paid_at` Cutiezy gagal diparse) tetap bisa dicatat refund-nya
   bila statusnya `paid`/`granted` (Fase 1, K23) — bukti alternatifnya
   check-status Paid + nominal cocok.
+- Guard database satu waiting (Fase 4, K22, migrasi 0031): kolom generated
+  `package_orders.waiting_guard` (= member_id hanya saat status
+  `waiting_payment`, NULL untuk status lain) + unique index — maksimal
+  satu order waiting per member walau deployment direplikasi (dulu hanya
+  mutex dalam proses + cek SELECT). Perilaku tidak berubah: paket sama →
+  order waiting itu dikembalikan; paket beda → 409 dengan pesan yang sudah
+  ada. Bila balapan antar replika kalah di INSERT, QR pemenang-dingin
+  dibatalkan best-effort lalu hasil re-read yang dipakai.
+- Halaman beli berhenti polling saat countdown habis (Fase 4, K27):
+  countdown 0 → satu refresh final → bila masih waiting, tampilkan status
+  akhir "menunggu konfirmasi kedaluwarsa" dan SEMUA timer berhenti (dulu
+  polling berputar tiap detik selamanya sampai sweep menandai expired).
+  Tombol manual "Saya sudah bayar"/"Batalkan" tetap jalan.
+- Webhook ack ≤ 5 detik dijamin (Fase 4, K24): secret webhook terdekripsi
+  di-cache di memori proses API; jalur ack hanya verifikasi HMAC (in-memory)
+  → balas 200 → sweep di background (spawn, tidak ditunggu). DB hanya
+  disentuh pada cold path (cache kosong / rotasi secret di luar panel).
+  HMAC gagal tetap 401; pemrosesan background tetap lewat sweep + verify
+  idempoten sehingga tidak ada grant ganda. Cache dikosongkan setiap kali
+  pengaturan QRIS disimpan lewat panel.
 - Kill switch off (Fase 3, B15/D3) → tombol beli hilang DAN semua order
   waiting yang BELUM dibayar DIBATALKAN saat itu juga (cancel massal
   saat toggle dimatikan + gerbang di `verify_and_grant` untuk yang
@@ -340,6 +400,20 @@ dengan batas adjust).
 - Migrasi: backend worker AUTO-APPLY file `migrations/` saat start (tracking
   `_sqlx_migrations`, versi = integer prefix). JANGAN jalankan ALTER manual
   untuk migrasi yang sudah ada sebagai file.
+- Retensi target mentah 90 hari (Fase 4, K48, keputusan D5): worker
+  menjalankan prune sekali saat startup lalu tiap 24 jam — per tick maks
+  10 batch × 1.000 baris, `UPDATE validation_requests SET target_raw =
+  NULL, account_name = NULL WHERE ... AND created_at < UTC_TIMESTAMP(6)
+  - INTERVAL 90 DAY`. BARIS DIPERTAHANKAN (produk/outcome/latensi/
+  request_id tetap); hanya kolom personal yang dihapus. Prune idempotent
+  (baris yang sudah NULL tidak terhitung lagi). Salinan Redis stream +
+  DLQ TIDAK ikut prune — keduanya mengandalkan cap yang sudah ada
+  (stream MAXLEN ~100.000, DLQ cap lokal 10.000). Verifikasi: `SELECT
+  COUNT(*) FROM validation_requests WHERE (target_raw IS NOT NULL OR
+  account_name IS NOT NULL) AND created_at < UTC_TIMESTAMP(6) - INTERVAL
+  90 DAY;` harus 0 setelah satu tick prune (kecuali backlog > 10.000
+  baris, yang terkikis satu tick per hari); log worker memuat baris
+  "Prune retensi target mentah K48" per batch.
 
 ## 6. MODEL DATA (tabel inti)
 
@@ -429,7 +503,13 @@ Restore dari ZIP ini:
 - `meta.expires_at` pada respons validasi member (2026-10-26): masa aktif
   agregat live, definisi sama persis dengan overview member (live_view →
   bucket_aggregate: expiry bucket aktif terdekat; null = tidak pernah
-  kedaluwarsa). Replay idempotensi menyegarkan tanggal dari agregat live,
+  kedaluwarsa). SEJAK Fase 4 (K14, keputusan D6): bila TIDAK ADA bucket
+  aktif bersisa (saldo habis / semua lewat expiry), expiry = NULL — bukan
+  tanggal bucket pertama (dulu MIN semua bucket, menyesatkan: member
+  membaca "sudah kedaluwarsa" padahal masalahnya saldo habis; sinyal
+  saldo habis sudah ada di `remaining_quota = 0`). Kasus normal tidak
+  berubah (bucket aktif terdekat tetap dipakai bila ada yang bersisa;
+  bucket tanpa tanggal tetap null). Replay idempotensi menyegarkan tanggal dari agregat live,
   bukan tanggal basi tersimpan. Semantik beli ulang: pembelian = bucket
   baru (expiry = beli + valid_days), bucket lama tidak diperpanjang;
   agregat bisa maju lebih awal bila paket baru lebih cepat kedaluwarsa

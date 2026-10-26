@@ -1047,10 +1047,12 @@ fn fifo_indices(buckets: &[QuotaBucket]) -> Vec<usize> {
 ///   kedaluwarsa sudah mati dan tidak dihitung);
 /// - expiry agregat = expiry bucket aktif terdekat yang masih bersisa;
 ///   NULL bila yang bersisa hanya bucket tanpa expiry. Bila TIDAK ADA
-///   bucket aktif bersisa sama sekali (semua habis/kedaluwarsa), jatuh ke
-///   expiry terdekat dari bucket yang ada (atau NULL bila semua tanpa
-///   expiry) agar tampilan tetap menyebut masa aktif terakhir, bukan
-///   "tidak pernah kedaluwarsa" yang menyesatkan.
+///   bucket aktif bersisa sama sekali (semua habis/kedaluwarsa), expiry
+///   = NULL (keputusan D6 audit 2026-10-26, K14): saldo habis BUKAN
+///   kedaluwarsa — menampilkan tanggal bucket pertama dulu menyesatkan
+///   (member membaca "sudah kedaluwarsa" padahal masalahnya saldo 0).
+///   Sinyal saldo habis sudah ada di remaining_quota = 0, dan kunci
+///   legacy tanpa bucket tidak berubah (tetap memakai nilai tersimpan).
 pub fn bucket_aggregate(
     buckets: &[QuotaBucket],
     now: DateTime<Utc>,
@@ -1083,7 +1085,12 @@ pub fn bucket_aggregate(
     } else if has_active_undated_with_remaining {
         None
     } else {
-        buckets.iter().filter_map(|bucket| bucket.expires_at).min()
+        // D6/K14: tidak ada bucket aktif bersisa -> NULL, bukan tanggal
+        // bucket pertama. Fallback MIN lama menampilkan tanggal lampau
+        // (atau tanggal bucket pertama) saat saldo habis, padahal kunci
+        // belum tentu kedaluwarsa. Cabang ini juga mencakup "semua bucket
+        // lewat expiry" dan "tidak ada bucket sama sekali".
+        None
     };
     (total, active_remaining, expiry)
 }
@@ -1490,6 +1497,30 @@ mod tests {
         assert_eq!(expiry, Some(dt("2026-12-01T00:00:00Z")));
         let (_, _, expiry) = bucket_aggregate(&[undated], now);
         assert_eq!(expiry, None);
+    }
+
+    #[test]
+    fn aggregate_expired_balance_is_null_not_first_bucket_date() {
+        // K14/D6: saldo habis -> meta.expires_at = null, bukan tanggal
+        // bucket pertama (dulu MIN semua bucket).
+        let now = dt("2026-10-25T00:00:00Z");
+        // Bucket aktif bersisa -> tanggal terdekat tetap dipakai.
+        let active = bucket(100, 40, Some(dt("2026-12-01T00:00:00Z")), now);
+        let (_, remaining, expiry) = bucket_aggregate(&[active], now);
+        assert_eq!((remaining, expiry), (40, Some(dt("2026-12-01T00:00:00Z"))));
+        // Hanya bucket tanpa tanggal bersisa -> null (tidak berubah).
+        let undated = bucket(50, 50, None, now);
+        let (_, _, expiry) = bucket_aggregate(&[undated], now);
+        assert_eq!(expiry, None);
+        // Semua bucket habis/lewat -> null (dulu tanggal bucket pertama).
+        let spent = bucket(100, 0, Some(dt("2026-12-01T00:00:00Z")), now);
+        let expired = bucket(100, 9, Some(dt("2026-10-01T00:00:00Z")), now);
+        let (_, remaining, expiry) = bucket_aggregate(&[spent, expired], now);
+        assert_eq!(remaining, 0);
+        assert_eq!(expiry, None);
+        // Kunci legacy tanpa bucket tidak berubah: (0, 0, None).
+        let (total, remaining, expiry) = bucket_aggregate(&[], now);
+        assert_eq!((total, remaining, expiry), (0, 0, None));
     }
 
     #[test]

@@ -2250,6 +2250,7 @@ pub async fn create_member_order(
     // Retry the insert (audit 2026-10-25, K7): a transient database blip
     // used to orphan an already-issued (payable) QR with no order row.
     let mut insert_error = None;
+    let mut guard_conflict = false;
     for attempt in 0..3 {
         match sqlx::query(
             "INSERT INTO package_orders (id, member_id, package_id, package_name, \
@@ -2279,6 +2280,16 @@ pub async fn create_member_order(
                 break;
             }
             Err(error) => {
+                // K22: duplicate-key di sini berarti guard
+                // `uq_package_orders_waiting_guard` dimenangkan replika
+                // lain (id order adalah UUIDv7 baru, jadi tabrakan PK
+                // praktis mustahil). Jangan retry — retry insert yang
+                // sama akan gagal lagi; tangani di bawah dari re-read.
+                if crate::store::is_duplicate_key_error(&error) {
+                    guard_conflict = true;
+                    insert_error = Some(error);
+                    break;
+                }
                 insert_error = Some(error);
                 if attempt < 2 {
                     tokio::time::sleep(std::time::Duration::from_millis(
@@ -2288,6 +2299,29 @@ pub async fn create_member_order(
                 }
             }
         }
+    }
+    if guard_conflict {
+        // Balapan antar replika dimenangkan order lain: QR kita
+        // dibatalkan best-effort dulu (agar tidak jadi QR yatim
+        // berbayar), lalu perilaku yang sudah ada dijalankan dari
+        // re-read — paket sama -> order waiting itu dikembalikan
+        // (tanpa create baru); paket beda -> 409 dengan pesan yang
+        // sudah ada. Bila re-read tidak menemukan waiting (pemenang
+        // keburu keluar dari waiting), gagal aman dan user bisa retry.
+        if let Err(cancel_error) = client.cancel(&api_key, &invoice.token).await {
+            tracing::error!(?cancel_error, member_id = %member_id, token_ref = %token_log_ref(&invoice.token), amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
+            record_orphan_qr(&pool, &member_id, &invoice.token, effective).await;
+        }
+        if let Some(existing) = waiting_order_for_member(&pool, &member_id).await? {
+            if existing.package_id == package.id.to_string() {
+                return Ok((existing.member_view(), false));
+            }
+            return Err(AppError::conflict(format!(
+                "Masih ada order menunggu untuk paket {} — selesaikan atau batalkan order itu dulu sebelum membeli paket {}",
+                existing.package_name, package.name,
+            )));
+        }
+        return Err(AppError::internal("Order tidak dapat dibuat. Coba lagi."));
     }
     if let Some(error) = insert_error {
         // QR sudah terbit di Cutiezy tapi order gagal tersimpan: batalkan
