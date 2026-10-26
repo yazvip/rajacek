@@ -2709,6 +2709,21 @@
       state.analyticsDays = Number($("#analytics-days").value) || 30;
       loadAnalytics().catch(handleApiError);
     });
+    // Tab Analitik: hanya show/hide seksi (tanpa reload data, tanpa hash).
+    // Semua seksi tetap dirender saat load; grafik batang memakai tinggi %
+    // sehingga aman dirender dalam panel hidden.
+    document.querySelectorAll("[data-analytics-tab]").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll("[data-analytics-tab]").forEach((other) => {
+          const active = other === button;
+          other.classList.toggle("is-active", active);
+          other.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        document.querySelectorAll(".analytics-tabpanel").forEach((panel) => {
+          panel.hidden = panel.id !== button.getAttribute("aria-controls");
+        });
+      });
+    });
     $("#refresh-provider-health")?.addEventListener("click", async () => {
       try {
         await loadProviderHealth();

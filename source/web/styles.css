@@ -1836,3 +1836,62 @@ td.empty-state { display: table-cell; }
    semua sel tidak membungkus (tanggal + angka pendek tidak perlu patah). */
 #view-analytics .table-scroll table { min-width: 560px; }
 #analytics-hits-table td { overflow-wrap: normal; white-space: nowrap; }
+
+/* ------------------------------------------------------------------
+   Perapian jarak + tab Analitik (2026-10-26, dari screenshot desktop
+   user: kartu KPI Analitik terlihat menempel + halaman Analitik
+   terlalu panjang ke bawah).
+   ------------------------------------------------------------------
+   Diagnosis (audit CSS + markup, bukan tebakan): gap horizontal KPI
+   sebenarnya sudah 16px; yang 0px adalah sambungan panel Periode →
+   baris KPI (aturan `.view>.panel+.panel` tidak berlaku karena
+   berikut panel adalah `div.metric-grid`, bukan panel) dan beberapa
+   sambungan panel→konten lain. Perbaikan di bawah HANYA spasi/tata
+   letak (nilai tema 12/16/20px); warna/border/shadow kartu TIDAK
+   diubah — kesan "menyatu" yang tersisa berasal dari border/shadow
+   yang samar, dan itu di luar mandat spasi (dilaporkan sebagai sisa).
+   Aturan lama yang dipertahankan (verifikasi grep): .row-actions,
+   min-width 720px tabel rute provider, min-width 560px + nowrap tabel
+   Volume per hari. Pengecualian: klaim audit "catatan→grid recon
+   Orders 0px" TERBANTAH saat implementasi — catatan itu berada DI
+   DALAM form (padding-bottom form 20px), jadi jaraknya sudah 20px
+   dan tidak diubah. */
+
+/* --- Tab Analitik (filter Periode tetap di atas tab, berlaku semua) --- */
+.analytics-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 20px; border-bottom: 1px solid var(--line); }
+.analytics-tab { padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; }
+.analytics-tab:hover { color: var(--brand-700); }
+.analytics-tab.is-active { color: var(--brand-700); border-bottom-color: var(--brand); }
+.analytics-tabpanel[hidden] { display: none; }
+.analytics-tabpanel > :first-child { margin-top: 20px; }
+
+/* --- Analitik: KPI tidak lagi menempel panel Periode; 3 kolom desktop --- */
+#view-analytics .metric-grid { gap: 20px; }
+@media (min-width: 1024px) {
+  #view-analytics .metric-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* --- Titik nempel 0px: panel → konten di bawahnya --- */
+.chart-panel > .table-scroll { margin-top: 16px; }
+#view-history .data-panel > .history-stats { margin-top: 20px; }
+#member-manage-panel #member-assign-form { margin-top: 16px; }
+#trial-form { margin-top: 16px; }
+#guard-products { margin-top: 16px; }
+
+/* --- Grid di bawah syarat 16px --- */
+.history-stats { gap: 16px; }
+.latency-grid { gap: 16px; }
+#view-providers #provider-grid { gap: 16px; }
+
+/* --- Stacking Providers: gap flex 12 + margin panel 20 dijumlahkan
+   (32px/12px tidak konsisten) → satu sumber jarak: flex gap 20px,
+   margin-top anak panel/article di-nol-kan (scope providers saja,
+   aturan global baris 531 tidak diubah). --- */
+#view-providers.is-visible { gap: 20px; }
+#view-providers > .panel, #view-providers > article { margin-top: 0; }
+
+/* --- Penyeragaman kecil (nilai tema, tanpa ubah layout) --- */
+.form-grid { gap: 16px; }
+.row-actions { gap: 12px; }
+#view-history td, #view-admins td { padding: 10px 20px; }
+.chart-wrap { margin-top: 16px; }

@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
-    <link rel="stylesheet" href="/styles.css?v=20261026-12" />
+    <link rel="stylesheet" href="/styles.css?v=20261026-13" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -181,14 +181,28 @@
           <section class="view" id="view-analytics" aria-labelledby="analytics-heading">
             <div class="page-heading heading-row"><div><div class="eyebrow">Pendapatan &amp; penggunaan</div><h1 id="analytics-heading">Analitik</h1><p>Tinjau tren pendapatan, volume validasi, keberhasilan, dan latensi berdasarkan periode.</p></div><button class="button button-secondary" id="refresh-analytics" type="button">Muat ulang</button></div>
             <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Rentang</span><h2>Periode analitik</h2></div><span class="count-chip" id="analytics-meta">Memuat...</span></div><form id="analytics-range-form" class="form-grid"><label>Rentang<select id="analytics-days"><option value="7">7 hari terakhir</option><option value="30" selected>30 hari terakhir</option><option value="90">90 hari terakhir</option></select></label><div class="form-actions"><button class="button button-primary" type="submit">Tampilkan</button></div></form><p class="tester-audit-note" id="analytics-note"></p></article>
+            <div class="analytics-tabs" role="tablist" aria-label="Bagian analitik">
+              <button type="button" class="analytics-tab is-active" role="tab" aria-selected="true" aria-controls="analytics-tab-summary" id="analytics-tab-btn-summary" data-analytics-tab="summary">Ringkasan</button>
+              <button type="button" class="analytics-tab" role="tab" aria-selected="false" aria-controls="analytics-tab-revenue" id="analytics-tab-btn-revenue" data-analytics-tab="revenue">Pendapatan</button>
+              <button type="button" class="analytics-tab" role="tab" aria-selected="false" aria-controls="analytics-tab-products" id="analytics-tab-btn-products" data-analytics-tab="products">Per produk</button>
+              <button type="button" class="analytics-tab" role="tab" aria-selected="false" aria-controls="analytics-tab-daily" id="analytics-tab-btn-daily" data-analytics-tab="daily">Volume harian</button>
+            </div>
+            <div class="analytics-tabpanel" id="analytics-tab-summary" role="tabpanel" aria-labelledby="analytics-tab-btn-summary">
             <div class="metric-grid" id="analytics-metrics">
               <article class="metric-card metric-card-primary"><div><span>Pendapatan (rentang)</span><strong id="analytics-revenue-total">—</strong><small id="analytics-revenue-orders">—</small></div></article>
               <article class="metric-card"><div><span>Total hit (rentang)</span><strong id="analytics-hits-total">—</strong><small>semua hasil validasi</small></div></article>
               <article class="metric-card"><div><span>Rata-rata harian</span><strong id="analytics-revenue-daily">—</strong><small>pendapatan per hari</small></div></article>
             </div>
+            </div>
+            <div class="analytics-tabpanel" id="analytics-tab-revenue" role="tabpanel" aria-labelledby="analytics-tab-btn-revenue" hidden>
             <article class="panel chart-panel"><div class="panel-heading"><div><span class="section-kicker">Pendapatan harian</span><h2>Grafik batang per hari</h2></div></div><div class="analytics-bars" id="analytics-revenue-chart" aria-label="Grafik batang pendapatan harian"></div><div class="table-scroll"><table><thead><tr><th>Hari</th><th>Pendapatan</th><th>Order lunas</th></tr></thead><tbody id="analytics-revenue-table"></tbody></table></div></article>
+            </div>
+            <div class="analytics-tabpanel" id="analytics-tab-products" role="tabpanel" aria-labelledby="analytics-tab-btn-products" hidden>
             <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Per produk</span><h2>Hit &amp; success rate</h2></div></div><div class="table-scroll"><table><thead><tr><th>Produk</th><th>Total hit</th><th>Hasil final</th><th>Sukses (valid + belum KYC)</th><th>Success rate</th><th>Rata-rata latensi</th></tr></thead><tbody id="analytics-product-table"></tbody></table></div></article>
+            </div>
+            <div class="analytics-tabpanel" id="analytics-tab-daily" role="tabpanel" aria-labelledby="analytics-tab-btn-daily" hidden>
             <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Hit harian per produk</span><h2>Volume per hari</h2></div></div><div class="table-scroll"><table><thead><tr><th>Hari</th><th>Rekening</th><th>E-wallet</th><th>WhatsApp</th><th>Total</th></tr></thead><tbody id="analytics-hits-table"></tbody></table></div></article>
+            </div>
           </section>
           <section class="view" id="view-providers" aria-labelledby="providers-heading">
             <div class="page-heading heading-row"><div><div class="eyebrow">Integrasi pihak ketiga</div><h1 id="providers-heading">Endpoint provider</h1><p>Kelola rute untuk setiap layanan. Endpoint aktif dijalankan bersamaan dan hasil valid tercepat digunakan.</p></div><button class="button button-secondary" id="refresh-providers" type="button">Muat ulang</button></div>
@@ -379,6 +393,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261026-7" defer></script>
+    <script src="/app.js?v=20261026-8" defer></script>
   </body>
 </html>
