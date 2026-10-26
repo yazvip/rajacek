@@ -2511,8 +2511,9 @@ async fn update_provider_guard(
         &principal,
         "Pengaturan provider guard diperbarui",
         format!(
-            "Konkurensi {}/produk, tunggu {} ms, ambang {}, cooldown {} dtk{}",
+            "Konkurensi {}/produk (PLN {}), tunggu {} ms, ambang {}, cooldown {} dtk{}",
             input.max_concurrency_per_product,
+            input.max_concurrency_pln,
             input.queue_wait_ms,
             input.failure_threshold,
             input.cooldown_seconds,

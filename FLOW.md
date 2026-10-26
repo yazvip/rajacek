@@ -49,7 +49,12 @@ Request
   Cutiezy; WhatsApp = Tukangcek. Allowlist host: tukangcek.id, api.cutiezy.id.
 - Guard per server: circuit breaker (threshold 5 gagal, cooldown 30 detik,
   max_attempts 2), semaphore 16/produk, pacer 334 ms per-host (semua provider,
-  termasuk Cutiezy).
+  termasuk Cutiezy). Pengecualian: PLN memakai cap semaphore sendiri
+  (Fase 2, B24) — `max_concurrency_pln`, default 3, kolom terpisah di
+  panel provider-guard, tersimpan sebagai
+  `runtime_settings.provider_guard.max_concurrency_pln`; baris guard lama
+  yang belum punya kunci itu memakai default 3. Nilai per produk yang
+  berlaku terlihat di status guard panel (maks per produk).
 - Peringkat agregat: `Valid > not_kyc > Invalid > NotFound > Pending`.
   Leg `not_kyc` tidak pernah menang atas Valid. Leg yang dibatalkan tidak
   `record_outcome` (keterbatasan yang didokumentasikan, ditanggung lease).
@@ -333,6 +338,19 @@ Restore dari ZIP ini:
 - Provider: upstream Chikamm (pengetahuan admin saja). Respons upstream
   berbentuk datar: status + success + request_id + nama; tidak ada
   field tarif/daya terpisah.
+- Konfigurasi endpoint Generic PLN (Fase 2): header auth boleh kosong —
+  header kosong berarti TIDAK ADA header auth yang dikirim sama sekali
+  (B5; panel menampilkan "tanpa header auth", pratinjau request ikut
+  menandainya). Endpoint yang sudah ada tidak diubah otomatis; admin
+  yang mengosongkan header PLN lewat Kelola bila diinginkan.
+- Validasi save-time kontrak Chikamm (Fase 2, K6): menyimpan endpoint
+  PLN mode Generic ditolak bila metode bukan GET, nama param nomor
+  bukan `target`, atau nama param kunci bukan `api_key` — produk tidak
+  boleh tampak aktif sementara setiap cek gagal diam-diam. Validasi ini
+  hanya untuk PLN Generic dan tidak menghalangi pengosongan header (B5).
+- Generic GET tidak menduplikasi param (Fase 2, K5): bila base URL sudah
+  memuat nama param yang akan ditambahkan (target/api_key/dll.), nilai
+  base URL dipertahankan dan param tambahan itu dilewati.
 - Mapping hasil: `success` true → `valid`; selain itu → `invalid`
   (defensif — bentuk gagal untuk ID tidak valid belum teramati saat
   probe, disempurnakan setelah probe ID invalid bila perlu).

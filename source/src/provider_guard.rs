@@ -12,7 +12,8 @@
 //! Two further mechanisms are keyed per validation product:
 //!
 //! 1. **Semaphore** — at most `max_concurrency_per_product` calls per product may be
-//!    in flight at once. Additional callers wait up to `queue_wait_ms` for a slot;
+//!    in flight at once (PLN excepted: it has its own cap
+//!    `max_concurrency_pln`, default 3). Additional callers wait up to `queue_wait_ms` for a slot;
 //!    after that they are rejected with 429 instead of piling onto the provider.
 //! 2. **Circuit breaker (per server)** — after `failure_threshold` consecutive
 //!    provider failures (transport errors, HTTP 429, or HTTP 5xx) the circuit for
@@ -43,6 +44,13 @@ use crate::{error::AppError, models::ValidationProduct};
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ProviderGuardConfig {
     pub max_concurrency_per_product: u32,
+    /// Dedicated concurrency cap for PLN (B24): the four products have
+    /// separate semaphores, but they used to share this single value, so
+    /// there was no PLN-specific limit at all. PLN keeps its own slot
+    /// count (default 3, conservative for the Chikamm upstream); the
+    /// other three products keep sharing max_concurrency_per_product.
+    #[serde(default = "default_max_concurrency_pln")]
+    pub max_concurrency_pln: u32,
     pub queue_wait_ms: u64,
     pub failure_threshold: u32,
     pub cooldown_seconds: u64,
@@ -66,6 +74,10 @@ fn default_max_attempts() -> u32 {
     2
 }
 
+fn default_max_concurrency_pln() -> u32 {
+    3
+}
+
 fn default_pace_interval_ms() -> u64 {
     334
 }
@@ -78,6 +90,7 @@ impl Default for ProviderGuardConfig {
     fn default() -> Self {
         Self {
             max_concurrency_per_product: 16,
+            max_concurrency_pln: default_max_concurrency_pln(),
             queue_wait_ms: 2_000,
             failure_threshold: 5,
             cooldown_seconds: 30,
@@ -95,6 +108,11 @@ impl ProviderGuardConfig {
         if !(1..=128).contains(&self.max_concurrency_per_product) {
             return Err(AppError::bad_request(
                 "Konkurensi maks per produk harus antara 1 dan 128",
+            ));
+        }
+        if !(1..=128).contains(&self.max_concurrency_pln) {
+            return Err(AppError::bad_request(
+                "Konkurensi maks PLN harus antara 1 dan 128",
             ));
         }
         if self.queue_wait_ms > 10_000 {
@@ -306,13 +324,25 @@ const PRODUCTS: [ValidationProduct; 4] = [
 ];
 
 impl ProviderGuard {
+    /// Effective semaphore capacity for one product (B24): PLN has its
+    /// own cap; every other product shares the global per-product cap.
+    /// This is the single place the admission path reads a capacity
+    /// from, so the per-product split cannot silently collapse back
+    /// to one shared value.
+    fn concurrency_for(config: &ProviderGuardConfig, product: ValidationProduct) -> u32 {
+        match product {
+            ValidationProduct::Pln => config.max_concurrency_pln,
+            _ => config.max_concurrency_per_product,
+        }
+    }
+
     pub fn new(config: ProviderGuardConfig) -> Self {
         Self {
             semaphores: [
                 DynSemaphore::new(config.max_concurrency_per_product),
                 DynSemaphore::new(config.max_concurrency_per_product),
                 DynSemaphore::new(config.max_concurrency_per_product),
-                DynSemaphore::new(config.max_concurrency_per_product),
+                DynSemaphore::new(config.max_concurrency_pln),
             ],
             endpoint_breakers: Mutex::new(HashMap::new()),
             pace_slots: StdMutex::new(HashMap::new()),
@@ -332,11 +362,12 @@ impl ProviderGuard {
             let mut stored = self.config.write().expect("guard config lock");
             *stored = config;
         }
-        for semaphore in &self.semaphores {
-            semaphore.set_max(config.max_concurrency_per_product);
+        for (index, product) in PRODUCTS.iter().enumerate() {
+            self.semaphores[index].set_max(Self::concurrency_for(&config, *product));
         }
         tracing::info!(
             max_concurrency = config.max_concurrency_per_product,
+            max_concurrency_pln = config.max_concurrency_pln,
             queue_wait_ms = config.queue_wait_ms,
             failure_threshold = config.failure_threshold,
             cooldown_seconds = config.cooldown_seconds,
@@ -625,12 +656,13 @@ impl ProviderGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProviderGuard, ProviderGuardConfig};
+    use super::{default_max_concurrency_pln, ProviderGuard, ProviderGuardConfig};
     use crate::models::ValidationProduct;
 
     fn guard(threshold: u32, cooldown_seconds: u64, concurrency: u32) -> ProviderGuard {
         ProviderGuard::new(ProviderGuardConfig {
             max_concurrency_per_product: concurrency,
+            max_concurrency_pln: default_max_concurrency_pln(),
             queue_wait_ms: 50,
             failure_threshold: threshold,
             cooldown_seconds,
@@ -945,6 +977,66 @@ mod tests {
         assert!(guard.is_open("srv-bank").await);
     }
 
+    #[tokio::test]
+    async fn pln_has_its_own_concurrency_cap_enforced_on_admission() {
+        // B24 trigger: the PLN semaphore used to share the global cap, so
+        // 16 concurrent PLN calls could reach one upstream host. With a
+        // global cap of 16 and a PLN cap of 3, admission must stop at 3
+        // PLN tickets while other products still admit up to 16 — and
+        // the status endpoint must report the split.
+        let guard = ProviderGuard::new(ProviderGuardConfig {
+            max_concurrency_per_product: 16,
+            max_concurrency_pln: 3,
+            ..ProviderGuardConfig::default()
+        });
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            held.push(
+                guard
+                    .acquire(ValidationProduct::Pln, "srv-pln")
+                    .await
+                    .expect("PLN admits up to its own cap"),
+            );
+        }
+        assert!(
+            guard
+                .acquire(ValidationProduct::Pln, "srv-pln")
+                .await
+                .is_err(),
+            "a 4th concurrent PLN call must be shed at the PLN cap, not the global cap"
+        );
+        let statuses = guard.status().await;
+        let pln = statuses
+            .iter()
+            .find(|item| item.product == ValidationProduct::Pln)
+            .expect("PLN status row");
+        assert_eq!(pln.max_concurrency, 3);
+        assert_eq!(pln.in_flight, 3);
+        let bank = statuses
+            .iter()
+            .find(|item| item.product == ValidationProduct::BankAccount)
+            .expect("bank status row");
+        assert_eq!(bank.max_concurrency, 16);
+        // Raising only the PLN cap admits another PLN caller without
+        // touching the other products' caps.
+        let mut config = guard.config();
+        config.max_concurrency_pln = 4;
+        guard.update_config(config);
+        assert!(guard
+            .acquire(ValidationProduct::Pln, "srv-pln")
+            .await
+            .is_ok());
+        let statuses = guard.status().await;
+        assert_eq!(
+            statuses
+                .iter()
+                .find(|item| item.product == ValidationProduct::BankAccount)
+                .expect("bank status row")
+                .max_concurrency,
+            16
+        );
+    }
+
     #[test]
     fn admin_validation_rejects_out_of_range_values() {
         let mut config = ProviderGuardConfig::default();
@@ -957,5 +1049,12 @@ mod tests {
         config.cooldown_seconds = 30;
         config.queue_wait_ms = 99_999;
         assert!(config.validate_for_admin().is_err());
+        config.queue_wait_ms = 2_000;
+        config.max_concurrency_pln = 0;
+        assert!(config.validate_for_admin().is_err());
+        config.max_concurrency_pln = 129;
+        assert!(config.validate_for_admin().is_err());
+        config.max_concurrency_pln = 3;
+        assert!(config.validate_for_admin().is_ok());
     }
 }

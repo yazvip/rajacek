@@ -500,16 +500,25 @@ impl HttpProvider {
                     &endpoint.service_code_mapping,
                 )?),
             };
-            let auth_header =
-                HeaderName::from_bytes(endpoint.auth_header.as_bytes()).map_err(|_| {
-                    AppError::service_unavailable("Header autentikasi provider tidak valid")
-                })?;
-            let auth_value = if endpoint.auth_header.eq_ignore_ascii_case("authorization") {
-                HeaderValue::from_str(&format!("Bearer {}", endpoint.api_key))
+            // B5: an empty auth_header (storable only for Generic
+            // endpoints) means NO auth header is sent at all — neither
+            // for Generic GET nor Generic POST. Endpoints that do set a
+            // header behave exactly as before.
+            let (auth_header, auth_value) = if endpoint.auth_header.trim().is_empty() {
+                (None, None)
             } else {
-                HeaderValue::from_str(&endpoint.api_key)
-            }
-            .map_err(|_| AppError::service_unavailable("Kredensial provider tidak valid"))?;
+                let header =
+                    HeaderName::from_bytes(endpoint.auth_header.as_bytes()).map_err(|_| {
+                        AppError::service_unavailable("Header autentikasi provider tidak valid")
+                    })?;
+                let value = if endpoint.auth_header.eq_ignore_ascii_case("authorization") {
+                    HeaderValue::from_str(&format!("Bearer {}", endpoint.api_key))
+                } else {
+                    HeaderValue::from_str(&endpoint.api_key)
+                }
+                .map_err(|_| AppError::service_unavailable("Kredensial provider tidak valid"))?;
+                (Some(header), Some(value))
+            };
 
             // Attempt loop: transient provider failures are retried up to the
             // guard-configured maximum (default 2 total attempts) because a single
@@ -557,8 +566,8 @@ impl HttpProvider {
                 match self
                     .call_provider(
                         endpoint,
-                        &auth_header,
-                        &auth_value,
+                        auth_header.as_ref(),
+                        auth_value.as_ref(),
                         &request,
                         &prepared,
                         capture_raw,
@@ -615,8 +624,8 @@ impl HttpProvider {
     async fn call_provider(
         &self,
         endpoint: &crate::provider_config::ResolvedProviderEndpoint,
-        auth_header: &HeaderName,
-        auth_value: &HeaderValue,
+        auth_header: Option<&HeaderName>,
+        auth_value: Option<&HeaderValue>,
         request: &ProviderValidationRequest,
         prepared: &PreparedCall,
         capture_raw: bool,
@@ -624,20 +633,19 @@ impl HttpProvider {
         let timeout = Duration::from_millis(u64::from(endpoint.timeout_ms));
         let response = match prepared {
             PreparedCall::Json(body) => {
-                self.client
-                    .post(&endpoint.base_url)
-                    .timeout(timeout)
-                    .header(auth_header.clone(), auth_value.clone())
-                    .json(body)
-                    .send()
-                    .await
+                let mut request_builder = self.client.post(&endpoint.base_url).timeout(timeout);
+                if let (Some(header), Some(value)) = (auth_header, auth_value) {
+                    request_builder = request_builder.header(header.clone(), value.clone());
+                }
+                request_builder.json(body).send().await
             }
             PreparedCall::GenericGet => {
                 // Generic GET: the same translated code and account number
                 // as the POST body, but as query params with admin-chosen
                 // names. The credential travels in the configured auth
-                // header and, only when key_param is set, additionally as a
-                // query param.
+                // header (unless the endpoint opts out with an empty
+                // header, B5) and, only when key_param is set,
+                // additionally as a query param.
                 let url = build_generic_get_url(
                     &endpoint.base_url,
                     request.product,
@@ -654,12 +662,11 @@ impl HttpProvider {
                     provider_failure: false,
                     retryable: false,
                 })?;
-                self.client
-                    .get(url)
-                    .timeout(timeout)
-                    .header(auth_header.clone(), auth_value.clone())
-                    .send()
-                    .await
+                let mut request_builder = self.client.get(url).timeout(timeout);
+                if let (Some(header), Some(value)) = (auth_header, auth_value) {
+                    request_builder = request_builder.header(header.clone(), value.clone());
+                }
+                request_builder.send().await
             }
             PreparedCall::CutiezyGet => {
                 // Cutiezy contracts (verified live 22 Oct): GET with the
@@ -949,7 +956,9 @@ fn translate_service_code<'a>(
 /// code and the account number as query params with admin-chosen names, plus
 /// the API key as a query param only when key_param is set. WhatsApp has no
 /// service code, so the code param is omitted for it. Existing query pairs
-/// on the base URL are preserved; values are percent-encoded.
+/// on the base URL are preserved; a generated param whose name already
+/// appears on the base URL is skipped (K5), never duplicated. Values are
+/// percent-encoded.
 fn build_generic_get_url(
     base_url: &str,
     product: ValidationProduct,
@@ -964,18 +973,33 @@ fn build_generic_get_url(
     let mut url = Url::parse(base_url)
         .map_err(|_| AppError::service_unavailable("URL endpoint provider tidak valid"))?;
     {
+        // K5: a param name already present on the base URL wins — the
+        // generated param of the same name is skipped, never duplicated.
+        // Without this the upstream is free to pick the first or the last
+        // of two values for one name (e.g. a pasted URL that already
+        // carries target= or api_key=).
+        let existing: std::collections::HashSet<String> = url
+            .query_pairs()
+            .map(|(name, _)| name.into_owned())
+            .collect();
         let mut query = url.query_pairs_mut();
         if product != ValidationProduct::Whatsapp {
             if let Some(hint) = provider_hint {
-                query.append_pair(
-                    code_param,
-                    translate_service_code(service_code_mapping, hint),
-                );
+                if !existing.contains(code_param) {
+                    query.append_pair(
+                        code_param,
+                        translate_service_code(service_code_mapping, hint),
+                    );
+                }
             }
         }
-        query.append_pair(number_param, target);
+        if !existing.contains(number_param) {
+            query.append_pair(number_param, target);
+        }
         if let Some(key_param) = key_param.filter(|value| !value.trim().is_empty()) {
-            query.append_pair(key_param, api_key);
+            if !existing.contains(key_param) {
+                query.append_pair(key_param, api_key);
+            }
         }
     }
     Ok(url)
@@ -2501,6 +2525,7 @@ mod pacer_failure_tests {
         // menunggu 5.000 ms > budget 100 ms sehingga ditolak 429.
         let guard = Arc::new(ProviderGuard::new(ProviderGuardConfig {
             max_concurrency_per_product: 16,
+            max_concurrency_pln: 3,
             queue_wait_ms: 2_000,
             failure_threshold: 1,
             cooldown_seconds: 60,
@@ -2625,6 +2650,49 @@ mod generic_get_tests {
         assert_eq!(
             url.as_str(),
             "https://api.provider.example/wa?phone=6281234567890"
+        );
+    }
+
+    #[test]
+    fn base_url_params_win_over_generated_params() {
+        // K5 trigger: a base URL that already carries target=/api_key=
+        // used to gain a second copy of each, leaving the upstream free
+        // to answer with either value.
+        let url = build_generic_get_url(
+            "https://api.provider.example/check?type=pln&target=111&api_key=base-key",
+            ValidationProduct::Pln,
+            "222",
+            Some("pln"),
+            &mapping(&[]),
+            "type",
+            "target",
+            Some("api_key"),
+            "generated-key",
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.provider.example/check?type=pln&target=111&api_key=base-key"
+        );
+    }
+
+    #[test]
+    fn only_colliding_params_are_skipped() {
+        let url = build_generic_get_url(
+            "https://api.provider.example/check?target=111",
+            ValidationProduct::BankAccount,
+            "222",
+            Some("014"),
+            &mapping(&[]),
+            "code",
+            "target",
+            Some("api_key"),
+            "kunci-uji",
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://api.provider.example/check?target=111&code=014&api_key=kunci-uji"
         );
     }
 

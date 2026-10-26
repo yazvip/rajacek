@@ -749,7 +749,7 @@
       </div>
       <div class="ep-detail" hidden>
         <div><span>URL lengkap</span><code>${escapeHtml(endpoint.base_url || "—")}</code></div>
-        <div><span>Kontrak request</span><strong>${modeLabel(endpoint.request_mode)}${endpoint.request_mode === "generic" ? ` · ${(endpoint.http_method || "POST").toUpperCase()}` : ""} · ${escapeHtml(endpoint.auth_header)}</strong></div>
+        <div><span>Kontrak request</span><strong>${modeLabel(endpoint.request_mode)}${endpoint.request_mode === "generic" ? ` · ${(endpoint.http_method || "POST").toUpperCase()}` : ""} · ${endpoint.auth_header ? escapeHtml(endpoint.auth_header) : "tanpa header auth"}</strong></div>
         <div><span>Mapping JSON</span><span>${escapeHtml(mappingSummary(endpoint))}</span></div>
         ${endpoint.product === "ewallet" ? `<div><span>Mapping kode</span><span>${escapeHtml(serviceMappingSummary(endpoint))}</span></div>` : endpoint.product === "bank_account" ? `<div><span>Mapping kode</span><span>${escapeHtml(bankMappingSummary(endpoint))}</span></div>` : ""}
         <div><span>Terakhir diubah</span><span>${formatDate(endpoint.updated_at)}</span></div>
@@ -1845,6 +1845,7 @@
     }
     const settings = guard.settings;
     $("#guard-max-concurrency").value = settings.max_concurrency_per_product;
+    $("#guard-max-concurrency-pln").value = settings.max_concurrency_pln ?? 3;
     $("#guard-queue-wait").value = settings.queue_wait_ms;
     $("#guard-failure-threshold").value = settings.failure_threshold;
     $("#guard-cooldown").value = settings.cooldown_seconds;
@@ -1859,6 +1860,7 @@
     event.preventDefault();
     const payload = {
       max_concurrency_per_product: Number($("#guard-max-concurrency").value),
+      max_concurrency_pln: Number($("#guard-max-concurrency-pln").value),
       queue_wait_ms: Number($("#guard-queue-wait").value),
       failure_threshold: Number($("#guard-failure-threshold").value),
       cooldown_seconds: Number($("#guard-cooldown").value),
@@ -2046,7 +2048,9 @@
       const mapped = config.mapping ? config.mapping[code] : undefined;
       return mapped && mapped.trim() !== "" ? mapped : code;
     };
-    const headerLine = `Header: ${config.authHeader}: •••• (tersimpan)`;
+    const headerLine = config.authHeader
+      ? `Header: ${config.authHeader}: •••• (tersimpan)`
+      : "Tanpa header auth (header kosong — tidak ada header dikirim)";
     // The bullet placeholder is a redaction marker, not a real value, so it
     // stays readable instead of percent-encoding into %E2%80%A2 sequences.
     const query = (pairs) => pairs.map(([key, value]) => `${encodeURIComponent(key)}=${value === "••••••" ? value : encodeURIComponent(value)}`).join("&");
@@ -2093,7 +2097,7 @@
       mode,
       method: ($("#provider-http-method").value || "POST").toUpperCase(),
       baseUrl: $("#provider-base-url").value.trim(),
-      authHeader: $("#provider-auth-header").value.trim() || "Authorization",
+      authHeader: $("#provider-auth-header").value.trim(),
       codeParam: $("#provider-code-param").value.trim() || "code",
       numberParam: $("#provider-number-param").value.trim() || "target",
       keyParam: $("#provider-key-param").value.trim() || null,
@@ -2174,7 +2178,7 @@
     $("#provider-number-param").value = endpoint ? (endpoint.number_param || "target") : "target";
     $("#provider-key-param").value = endpoint ? (endpoint.key_param || "") : "";
     renderHttpFields($("#provider-request-mode").value);
-    $("#provider-auth-header").value = endpoint ? (endpoint.auth_header || "Authorization") : "Authorization";
+    $("#provider-auth-header").value = endpoint ? (endpoint.auth_header ?? "Authorization") : "Authorization";
     $("#provider-api-key").value = "";
     $("#provider-api-key").placeholder = "Kosongkan jika tidak ingin merotasi kredensial";
     $("#provider-active").checked = endpoint ? endpoint.active : true;

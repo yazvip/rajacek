@@ -244,6 +244,7 @@ impl ProviderConfigStore {
         base_url: &str,
         timeout_ms: u32,
         mapping: &ProviderResponseMapping,
+        request_mode: crate::models::ProviderRequestMode,
         auth_header: &str,
     ) -> Result<String, AppError> {
         if name.is_empty() || name.len() > 160 {
@@ -258,7 +259,13 @@ impl ProviderConfigStore {
         }
         validate_endpoint_url(base_url, self.production, &self.allowed_hosts, false)?;
         validate_response_mapping(product, mapping)?;
-        validate_auth_header(auth_header)
+        // B5: an empty auth header is allowed ONLY for Generic endpoints —
+        // it means "send no auth header at all". Other modes keep
+        // requiring a valid header name.
+        validate_auth_header(
+            auth_header,
+            request_mode == crate::models::ProviderRequestMode::Generic,
+        )
     }
 
     async fn persist_endpoint(
@@ -337,6 +344,7 @@ impl ProviderConfigStore {
             input.base_url.trim(),
             input.timeout_ms,
             &input.response_mapping,
+            input.request_mode,
             &input.auth_header,
         )?;
         validate_service_code_mapping(product, &input.service_code_mapping)?;
@@ -345,6 +353,16 @@ impl ProviderConfigStore {
             &input.code_param,
             &input.number_param,
             input.key_param.as_deref(),
+        )?;
+        // K6: PLN Generic endpoints must match the known Chikamm
+        // contract at save time, so a misconfigured-but-active PLN
+        // endpoint can never silently fail every check.
+        validate_pln_generic_contract(
+            product,
+            input.request_mode,
+            &http_method,
+            &number_param,
+            key_param.as_deref(),
         )?;
         let api_key = match input.api_key.as_deref().map(str::trim) {
             Some(value) if !value.is_empty() => {
@@ -408,6 +426,7 @@ impl ProviderConfigStore {
             input.base_url.trim(),
             input.timeout_ms,
             &input.response_mapping,
+            input.request_mode,
             &input.auth_header,
         )?;
         validate_service_code_mapping(product, &input.service_code_mapping)?;
@@ -416,6 +435,16 @@ impl ProviderConfigStore {
             &input.code_param,
             &input.number_param,
             input.key_param.as_deref(),
+        )?;
+        // K6: same save-time Chikamm contract check as create; it never
+        // blocks clearing the auth header (B5) — the two checks are
+        // independent, and an empty header stays allowed for Generic.
+        validate_pln_generic_contract(
+            product,
+            input.request_mode,
+            &http_method,
+            &number_param,
+            key_param.as_deref(),
         )?;
         let api_key = match input.api_key.as_deref().map(str::trim) {
             Some(value) if !value.is_empty() => {
@@ -855,6 +884,10 @@ impl ProviderConfigStore {
                 &rows,
                 "provider_guard.max_concurrency_per_product",
             )?,
+            // Rows saved before the PLN cap existed fall back to the
+            // conservative PLN default instead of wedging startup.
+            max_concurrency_pln: lookup(&rows, "provider_guard.max_concurrency_pln")
+                .unwrap_or(3),
             queue_wait_ms: lookup(&rows, "provider_guard.queue_wait_ms")?,
             failure_threshold: lookup(&rows, "provider_guard.failure_threshold")?,
             cooldown_seconds: lookup(&rows, "provider_guard.cooldown_seconds")?,
@@ -884,6 +917,10 @@ impl ProviderConfigStore {
             (
                 "provider_guard.max_concurrency_per_product",
                 config.max_concurrency_per_product.to_string(),
+            ),
+            (
+                "provider_guard.max_concurrency_pln",
+                config.max_concurrency_pln.to_string(),
             ),
             (
                 "provider_guard.queue_wait_ms",
@@ -1211,10 +1248,20 @@ fn tukangcek_response_mapping(product: ValidationProduct) -> ProviderResponseMap
     }
 }
 
-fn validate_auth_header(value: &str) -> Result<String, AppError> {
+fn validate_auth_header(value: &str, allow_empty: bool) -> Result<String, AppError> {
     let value = value.trim();
-    if value.is_empty()
-        || value.len() > 80
+    // B5: Generic endpoints may opt out of auth headers entirely — an
+    // empty name means "send no header at all" at dispatch time. A
+    // whitespace-only or invalid name is still rejected everywhere.
+    if value.is_empty() {
+        if allow_empty {
+            return Ok(String::new());
+        }
+        return Err(AppError::bad_request(
+            "Nama header autentikasi provider tidak valid",
+        ));
+    }
+    if value.len() > 80
         || !value
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
@@ -1224,6 +1271,40 @@ fn validate_auth_header(value: &str) -> Result<String, AppError> {
         ));
     }
     Ok(value.to_owned())
+}
+
+/// K6: save-time contract check for PLN Generic endpoints (Chikamm).
+/// Only PLN + Generic is gated: other products and other request modes
+/// keep their existing behavior, and the auth header is deliberately
+/// NOT part of this check (B5: clearing it must never be blocked here).
+fn validate_pln_generic_contract(
+    product: ValidationProduct,
+    request_mode: crate::models::ProviderRequestMode,
+    http_method: &str,
+    number_param: &str,
+    key_param: Option<&str>,
+) -> Result<(), AppError> {
+    if product != ValidationProduct::Pln
+        || request_mode != crate::models::ProviderRequestMode::Generic
+    {
+        return Ok(());
+    }
+    if !http_method.eq_ignore_ascii_case("GET") {
+        return Err(AppError::bad_request(
+            "Endpoint PLN (Chikamm) harus memakai metode GET — POST mengirim body JSON ke URL yang mengharapkan query string",
+        ));
+    }
+    if number_param != "target" {
+        return Err(AppError::bad_request(
+            "Endpoint PLN (Chikamm) harus memakai nama param nomor 'target'",
+        ));
+    }
+    if key_param != Some("api_key") {
+        return Err(AppError::bad_request(
+            "Endpoint PLN (Chikamm) harus memakai nama param kunci 'api_key'",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_response_mapping(
@@ -1401,12 +1482,97 @@ fn parse_product(value: &str) -> Option<ValidationProduct> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_public_ip, parse_product, validate_endpoint_url, validate_http_params,
-        validate_service_code_mapping,
+        is_public_ip, parse_product, validate_auth_header, validate_endpoint_url,
+        validate_http_params, validate_pln_generic_contract, validate_service_code_mapping,
     };
 
     use crate::models::ValidationProduct;
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[test]
+    fn empty_auth_header_allowed_only_for_generic() {
+        // B5 trigger: saving a Generic endpoint with no header used to
+        // fail validation, so every Generic GET always sent a header.
+        assert_eq!(
+            validate_auth_header("", true).unwrap(),
+            "",
+            "empty header must be storable for Generic"
+        );
+        assert_eq!(
+            validate_auth_header("   ", true).unwrap(),
+            "",
+            "whitespace-only header normalizes to empty for Generic"
+        );
+        assert!(validate_auth_header("", false).is_err());
+        assert!(validate_auth_header("Authorization", false).is_ok());
+        assert!(validate_auth_header("X-API-Key", true).is_ok());
+        assert!(validate_auth_header("Bad Header!", true).is_err());
+    }
+
+    #[test]
+    fn pln_generic_contract_rejected_at_save_time() {
+        use crate::models::ProviderRequestMode;
+        // K6 trigger: a PLN Generic endpoint that looks active but can
+        // never succeed (POST body to a GET-query upstream, or renamed
+        // params) must be rejected here, not discovered per-check.
+        assert!(validate_pln_generic_contract(
+            ValidationProduct::Pln,
+            ProviderRequestMode::Generic,
+            "GET",
+            "target",
+            Some("api_key"),
+        )
+        .is_ok());
+        assert!(validate_pln_generic_contract(
+            ValidationProduct::Pln,
+            ProviderRequestMode::Generic,
+            "POST",
+            "target",
+            Some("api_key"),
+        )
+        .is_err());
+        assert!(validate_pln_generic_contract(
+            ValidationProduct::Pln,
+            ProviderRequestMode::Generic,
+            "GET",
+            "number",
+            Some("api_key"),
+        )
+        .is_err());
+        assert!(validate_pln_generic_contract(
+            ValidationProduct::Pln,
+            ProviderRequestMode::Generic,
+            "GET",
+            "target",
+            None,
+        )
+        .is_err());
+        assert!(validate_pln_generic_contract(
+            ValidationProduct::Pln,
+            ProviderRequestMode::Generic,
+            "GET",
+            "target",
+            Some("key"),
+        )
+        .is_err());
+        // Other products and other modes are untouched by this gate.
+        assert!(validate_pln_generic_contract(
+            ValidationProduct::BankAccount,
+            ProviderRequestMode::Generic,
+            "POST",
+            "number",
+            None,
+        )
+        .is_ok());
+        assert!(validate_pln_generic_contract(
+            ValidationProduct::Pln,
+            ProviderRequestMode::Cutiezy,
+            "POST",
+            "number",
+            None,
+        )
+        .is_ok());
+    }
 
     #[test]
     fn service_code_mapping_for_ewallet_and_bank_with_supported_codes() {

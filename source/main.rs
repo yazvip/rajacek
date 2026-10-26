@@ -50,6 +50,9 @@ async fn main() -> Result<()> {
     }
     let provider_guard = Arc::new(ProviderGuard::new(ProviderGuardConfig {
         max_concurrency_per_product: config.provider_max_concurrency_per_product,
+        // B24: PLN gets its own conservative cap (3) from the start; the
+        // env-seeded global cap never applies to it.
+        max_concurrency_pln: 3,
         queue_wait_ms: config.provider_queue_wait_ms,
         failure_threshold: config.provider_breaker_failure_threshold,
         cooldown_seconds: config.provider_breaker_cooldown_seconds,
