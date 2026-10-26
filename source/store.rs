@@ -1987,7 +1987,7 @@ impl AdminStore {
             return Ok(None);
         };
         let row = sqlx::query_as::<_, MemberRow>(
-            "SELECT id, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at FROM members WHERE google_sub = ?",
+            "SELECT id, member_code, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at FROM members WHERE google_sub = ?",
         )
         .bind(google_sub)
         .fetch_optional(&pool)
@@ -2007,7 +2007,7 @@ impl AdminStore {
             return Ok(None);
         };
         let row = sqlx::query_as::<_, MemberRow>(
-            "SELECT id, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at FROM members WHERE id = ?",
+            "SELECT id, member_code, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at FROM members WHERE id = ?",
         )
         .bind(id.to_string())
         .fetch_optional(&pool)
@@ -2019,6 +2019,11 @@ impl AdminStore {
         row.map(MemberRow::into_account).transpose()
     }
 
+    /// Satu-satunya jalur pembuatan member di produksi (dipanggil dari
+    /// Google callback member; grep `INSERT INTO members` tidak menemukan
+    /// jalur lain). Setiap member baru mendapat kode RC berikutnya dari
+    /// counter persisten, BUKAN dari COUNT(*) — lihat
+    /// `try_create_member` untuk invarian balapannya.
     pub async fn create_member(
         &self,
         google_sub: &str,
@@ -2029,9 +2034,82 @@ impl AdminStore {
         let pool = self
             .pool()
             .ok_or_else(|| AppError::internal("Database member tidak terhubung"))?;
+        // Bentrok kode unik praktis tidak mungkin terjadi (counter
+        // terkunci di bawah), tapi bila terjadi — mis. counter pernah
+        // di-reset manual — coba lagi dengan nomor berikut, bukan gagal
+        // total. Bentrok google_sub TIDAK di-retry di sini: itu berarti
+        // sign-in bersamaan untuk akun yang sama, dan pemanggil (Google
+        // callback) sudah punya fallback "adopsi baris yang sudah ada".
+        for _ in 0..3 {
+            match self
+                .try_create_member(&pool, google_sub, email, name, picture_url)
+                .await
+            {
+                Ok(member) => return Ok(member),
+                Err(CreateMemberFailure::CodeCollision) => continue,
+                Err(CreateMemberFailure::Fatal(error)) => return Err(error),
+            }
+        }
+        Err(AppError::internal("Akun member tidak dapat dibuat"))
+    }
+
+    async fn try_create_member(
+        &self,
+        pool: &sqlx::MySqlPool,
+        google_sub: &str,
+        email: &str,
+        name: Option<&str>,
+        picture_url: Option<&str>,
+    ) -> Result<crate::models::MemberAccount, CreateMemberFailure> {
+        let mut tx = pool.begin().await.map_err(|_| {
+            CreateMemberFailure::Fatal(AppError::internal(
+                "Transaksi pembuatan member tidak dapat dimulai",
+            ))
+        })?;
+        // Counter satu baris (migration 0025, tabel member_code_counter).
+        // Baris PASTI ada pasca-migrasi; INSERT bersyarat ini hanya jaring
+        // pengaman bila tabel ada tapi barisnya belum ter-seed (mis. DB
+        // dibuat sebelum migrasi 0025): seed dari kode terbesar yang ada,
+        // bukan dari COUNT(*), supaya nomor tidak pernah dipakai ulang.
+        // SELECT ... FOR UPDATE di bawah mengunci baris ini sampai commit,
+        // jadi dua transaksi bersamaan mengantre dan mendapat nomor
+        // berbeda — tidak ada hitung-hitungan dari jumlah baris members.
+        sqlx::query(
+            "INSERT INTO member_code_counter (id, next_value) \
+             SELECT 1, COALESCE(MAX(CAST(SUBSTRING(member_code, 3) AS UNSIGNED)), 0) + 1 \
+             FROM members \
+             WHERE NOT EXISTS (SELECT 1 FROM member_code_counter WHERE id = 1)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| {
+            CreateMemberFailure::Fatal(AppError::internal(
+                "Counter kode member tidak dapat disiapkan",
+            ))
+        })?;
+        let next: u64 = sqlx::query_scalar(
+            "SELECT next_value FROM member_code_counter WHERE id = 1 FOR UPDATE",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| {
+            CreateMemberFailure::Fatal(AppError::internal(
+                "Counter kode member tidak dapat dibaca",
+            ))
+        })?;
+        sqlx::query("UPDATE member_code_counter SET next_value = next_value + 1 WHERE id = 1")
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| {
+                CreateMemberFailure::Fatal(AppError::internal(
+                    "Counter kode member tidak dapat dimajukan",
+                ))
+            })?;
+        let member_code = format_member_code(next);
         let now = Utc::now();
         let member = crate::models::MemberAccount {
             id: Uuid::now_v7(),
+            member_code: Some(member_code.clone()),
             google_sub: google_sub.to_owned(),
             email: email.to_owned(),
             name: name.map(str::to_owned),
@@ -2041,10 +2119,15 @@ impl AdminStore {
             created_at: now,
             last_login_at: Some(now),
         };
-        sqlx::query(
-            "INSERT INTO members (id, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        // Member + pemajuan counter ter-commit bersamaan: gagal di sini =
+        // rollback total, nomor tidak hangus secara diam-diam menjadi
+        // celah (nomor yang terlanjur maju tapi member gagal tetap maju —
+        // itu AMAN: celah urutan boleh ada, duplikat yang tidak boleh).
+        if let Err(error) = sqlx::query(
+            "INSERT INTO members (id, member_code, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(member.id.to_string())
+        .bind(&member_code)
         .bind(&member.google_sub)
         .bind(&member.email)
         .bind(&member.name)
@@ -2053,11 +2136,22 @@ impl AdminStore {
         .bind(&member.status)
         .bind(member.created_at)
         .bind(member.last_login_at)
-        .execute(&pool)
+        .execute(&mut *tx)
         .await
-        .map_err(|error| {
+        {
+            tx.rollback().await.ok();
+            if is_member_code_collision(&error) {
+                return Err(CreateMemberFailure::CodeCollision);
+            }
             tracing::warn!(?error, "Gagal membuat member baru");
-            AppError::internal("Akun member tidak dapat dibuat")
+            return Err(CreateMemberFailure::Fatal(AppError::internal(
+                "Akun member tidak dapat dibuat",
+            )));
+        }
+        tx.commit().await.map_err(|_| {
+            CreateMemberFailure::Fatal(AppError::internal(
+                "Transaksi pembuatan member gagal dikomit",
+            ))
         })?;
         Ok(member)
     }
@@ -2467,7 +2561,7 @@ impl AdminStore {
             return Vec::new();
         };
         let rows = sqlx::query_as::<_, MemberRow>(
-            "SELECT id, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at FROM members ORDER BY created_at DESC",
+            "SELECT id, member_code, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at FROM members ORDER BY created_at DESC",
         )
         .fetch_all(&pool)
         .await;
@@ -3120,6 +3214,35 @@ pub(crate) fn is_duplicate_key_error(error: &sqlx::Error) -> bool {
         }
         _ => false,
     }
+}
+
+/// Kode member untuk nomor urut `sequence`: 1 -> "RC000001".
+/// Format RC%06d; di atas 999.999 digitnya memanjang alami
+/// ("RC1000000") dan tetap unik, tapi kolom VARCHAR(8) membatasi
+/// praktis sampai 999.999 — 1 juta member adalah batas yang jauh di
+/// luar skala saat ini, dan kegagalan insert di sana fail-closed
+/// (bukan duplikat diam-diam).
+pub(crate) fn format_member_code(sequence: u64) -> String {
+    format!("RC{sequence:06}")
+}
+
+/// True hanya untuk bentrok unique key `member_code` (bukan bentrok
+/// google_sub atau unique lain): pesan duplikat MySQL menyebut nama
+/// key-nya (`... for key 'members.uq_members_member_code'`).
+fn is_member_code_collision(error: &sqlx::Error) -> bool {
+    match error {
+        sqlx::Error::Database(db_error) => {
+            is_duplicate_key_error(error) && db_error.message().contains("member_code")
+        }
+        _ => false,
+    }
+}
+
+enum CreateMemberFailure {
+    /// Nomor counter ternyata sudah terpakai (counter pernah di-reset
+    /// manual): pemanggil boleh mencoba lagi dengan nomor berikut.
+    CodeCollision,
+    Fatal(AppError),
 }
 
 impl AdminStore {
@@ -4466,6 +4589,7 @@ impl ApiKeyRow {
 #[derive(sqlx::FromRow)]
 struct MemberRow {
     id: String,
+    member_code: Option<String>,
     google_sub: String,
     email: String,
     name: Option<String>,
@@ -4481,6 +4605,7 @@ impl MemberRow {
         Ok(crate::models::MemberAccount {
             id: Uuid::parse_str(&self.id)
                 .map_err(|_| AppError::internal("ID member di database tidak valid"))?,
+            member_code: self.member_code,
             google_sub: self.google_sub,
             email: self.email,
             name: self.name,
@@ -4534,6 +4659,88 @@ mod member_key_lock_tests {
         let store = AdminStore::new(None, 60).expect("store baru");
         let lock = store.member_key_lock(Uuid::now_v7());
         assert!(lock.try_lock().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod member_code_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn format_is_rc_plus_six_zero_padded_digits() {
+        assert_eq!(format_member_code(1), "RC000001");
+        assert_eq!(format_member_code(42), "RC000042");
+        assert_eq!(format_member_code(999_999), "RC999999");
+        // Di atas 6 digit angkanya memanjang alami, tetap unik.
+        assert_eq!(format_member_code(1_000_000), "RC1000000");
+        for code in [
+            format_member_code(1),
+            format_member_code(42),
+            format_member_code(999_999),
+        ] {
+            assert!(code.starts_with("RC"), "{code}");
+            assert_eq!(code.len(), 8, "{code}");
+            assert!(code[2..].chars().all(|c| c.is_ascii_digit()), "{code}");
+        }
+    }
+
+    #[test]
+    fn format_is_unique_over_a_thousand_sequences() {
+        let mut seen = HashSet::new();
+        for sequence in 1..=1000 {
+            assert!(seen.insert(format_member_code(sequence)), "duplikat {sequence}");
+        }
+    }
+
+    #[test]
+    fn backfill_order_matches_migration_sql() {
+        // Cerminan aturan ORDER BY migrasi 0025 (created_at ASC, id ASC):
+        // member terdaftar paling awal mendapat nomor terkecil, dan
+        // tie-break id membuat urutan deterministik walau created_at sama.
+        let mut members = vec![
+            ("id-c", "2026-10-22T10:00:00Z"),
+            ("id-a", "2026-10-22T10:00:00Z"),
+            ("id-b", "2026-10-21T09:00:00Z"),
+        ];
+        members.sort_by(|left, right| {
+            left.1.cmp(right.1).then_with(|| left.0.cmp(right.0))
+        });
+        let codes: Vec<(String, String)> = members
+            .iter()
+            .enumerate()
+            .map(|(index, (id, _))| {
+                (
+                    id.to_string(),
+                    format_member_code(u64::try_from(index + 1).expect("indeks kecil")),
+                )
+            })
+            .collect();
+        assert_eq!(
+            codes,
+            vec![
+                ("id-b".to_owned(), "RC000001".to_owned()),
+                ("id-a".to_owned(), "RC000002".to_owned()),
+                ("id-c".to_owned(), "RC000003".to_owned()),
+            ]
+        );
+        let unique: HashSet<&str> =
+            codes.iter().map(|(_, code)| code.as_str()).collect();
+        assert_eq!(unique.len(), codes.len(), "backfill tidak boleh duplikat");
+    }
+
+    #[test]
+    fn next_member_gets_the_following_number() {
+        // Semantik alokasi counter di try_create_member: nomor yang
+        // dipakai = next_value saat itu, lalu counter maju satu — jadi
+        // member baru selalu mendapat nomor berikut, tidak pernah nomor
+        // yang sudah dipakai, tanpa COUNT(*).
+        let next_value = 42u64;
+        let allocated = format_member_code(next_value);
+        let counter_after = next_value + 1;
+        assert_eq!(allocated, "RC000042");
+        assert_eq!(format_member_code(counter_after), "RC000043");
+        assert_ne!(allocated, format_member_code(counter_after));
     }
 }
 
@@ -4732,6 +4939,7 @@ mod quota_adjust_tests {
     fn member_fixture() -> MemberAccount {
         MemberAccount {
             id: Uuid::now_v7(),
+            member_code: None,
             google_sub: "google-sub-tes".to_owned(),
             email: "member-tes@example.test".to_owned(),
             name: Some("Member Tes".to_owned()),
@@ -4918,6 +5126,7 @@ mod quota_bucket_tests {
     fn member_fixture() -> MemberAccount {
         MemberAccount {
             id: Uuid::now_v7(),
+            member_code: None,
             google_sub: "google-sub-bucket".to_owned(),
             email: "member-bucket@example.test".to_owned(),
             name: Some("Member Bucket".to_owned()),

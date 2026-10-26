@@ -681,9 +681,17 @@ impl ProviderConfigStore {
                 return None;
             }
         };
+        // Riwayat ADMIN: member_code di-resolve di query yang sama
+        // (migration 0025), bukan N+1 query per baris: prefix kunci unik
+        // di admin_api_keys, jadi LEFT JOIN ini tidak pernah menggandakan
+        // baris. LEFT JOIN (bukan INNER): kunci seed env / kunci terhapus
+        // tetap tampil dengan member_code NULL, bukan hilang/error.
+        // Kolom filter apply_filters tetap tak-ambigu: hanya
+        // validation_requests yang punya product_code/outcome/
+        // api_key_prefix/request_id/target_masked/occurred_at.
         let mut rows_builder = apply_filters(
             sqlx::QueryBuilder::new(
-                "SELECT request_id, api_key_prefix, product_code, outcome, target_masked, target_raw, account_name,                  provider_reference, provider_latency_ms, rajacek_processing_ms, total_latency_ms, attempts, occurred_at, channel                  FROM validation_requests WHERE 1 = 1",
+                "SELECT vr.request_id, vr.api_key_prefix, vr.product_code, vr.outcome, vr.target_masked, vr.target_raw, vr.account_name, vr.provider_reference, vr.provider_latency_ms, vr.rajacek_processing_ms, vr.total_latency_ms, vr.attempts, vr.occurred_at, vr.channel, m.member_code FROM validation_requests vr LEFT JOIN admin_api_keys k ON k.prefix = vr.api_key_prefix LEFT JOIN members m ON m.id = k.member_id WHERE 1 = 1",
             ),
             filters,
         );
@@ -706,6 +714,7 @@ impl ProviderConfigStore {
             Option<u32>,
             chrono::NaiveDateTime,
             String,
+            Option<String>,
         )> = match rows_builder.build_query_as().fetch_all(pool).await {
             Ok(rows) => rows,
             Err(error) => {
@@ -731,6 +740,7 @@ impl ProviderConfigStore {
                     attempts,
                     occurred_at,
                     channel,
+                    member_code,
                 )| {
                     let product = match product_code.as_str() {
                         "bank_account" => ValidationProduct::BankAccount,
@@ -741,6 +751,7 @@ impl ProviderConfigStore {
                     Some(crate::models::ValidationHistoryItem {
                         request_id,
                         api_key_prefix,
+                        member_code,
                         product,
                         outcome,
                         target_masked,

@@ -1928,3 +1928,66 @@ td.empty-state { display: table-cell; }
 #history-table td code { overflow-wrap: normal; }
 #history-table td.history-date { font-size: 12px; line-height: 1.45; }
 #history-table td.history-date span { white-space: nowrap; }
+
+/* ------------------------------------------------------------------
+   Kartu riwayat admin di HP (2026-10-26, ≤767px) — SCOPED HANYA ke
+   tabel riwayat admin (#view-history #history-table). Desktop &
+   tablet (>767px) tidak tersentuh: aturan min-width 1180px + nowrap
+   di atas tetap berlaku di sana.
+   Pola: thead disembunyikan; tiap <tr> jadi kartu putih (border +
+   radius token tema); tiap <td> jadi baris berlabel — label kecil
+   abu-abu via ::before (content: attr(data-label), dipasang di
+   app.js per sel) di kiri, nilai rata kanan di sisi berlawanan.
+   Dipakai posisi absolut untuk label (bukan flex pada td) supaya
+   sel multi-baris tetap rapi apa adanya: Waktu 2 baris (tanggal /
+   jam), Member 2 baris (kode tebal / prefix sekunder), Latensi
+   2 baris (total / detail provider), Nama membungkus di spasi.
+   Nilai panjang di kartu boleh membungkus (pengecualian khusus
+   mobile untuk target/nama/detail latensi) agar tidak meluber;
+   prefix + request ID tetap mono (tetap <code>), badge Hasil
+   tetap berbentuk badge. Wrapper .table-scroll dibuat
+   overflow: visible untuk tabel ini saja, jadi kartu tidak
+   terpotong dan tidak ada scroll horizontal. Baris empty-state
+   (colspan) dikecualikan dari padding label. */
+@media (max-width: 767px) {
+  #view-history .table-scroll { overflow: visible; }
+  #view-history .table-scroll table { display: block; min-width: 0; }
+  #view-history .table-scroll thead { display: none; }
+  #view-history .table-scroll tbody { display: block; }
+  #view-history #history-table tr {
+    display: block;
+    margin: 0 16px 12px;
+    padding: 6px 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+  }
+  #view-history #history-table td {
+    position: relative;
+    display: block;
+    padding: 7px 12px 7px 112px;
+    border-top: 1px solid var(--line-soft);
+    text-align: right;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  #view-history #history-table td:first-child { border-top: 0; }
+  #view-history #history-table td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 12px;
+    top: 7px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: left;
+  }
+  #view-history #history-table td[colspan] { padding-left: 12px; text-align: center; }
+  #view-history #history-table td[colspan]::before { content: none; }
+  /* Nilai multi-baris rata kanan: stack latensi + sub-detailnya. */
+  #view-history #history-table td .latency-stack { align-items: flex-end; text-align: right; }
+  #view-history #history-table td:nth-child(8) .cell-sub { white-space: normal; }
+  #view-history #history-table td.history-date span { white-space: normal; }
+  #view-history #history-table td .cell-sub { font-size: 11px; }
+}

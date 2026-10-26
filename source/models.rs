@@ -272,6 +272,16 @@ pub struct ValidationHistoryItem {
     pub product: ValidationProduct,
     pub outcome: String,
     pub target_masked: String,
+    /// Admin-only member code ("RC000001", ...) resolved from the key
+    /// prefix (migration 0025: admin_api_keys.prefix -> members.member_code).
+    /// None when the key is not linked to a member (env seed / deleted key)
+    /// or when the item comes from the in-memory fallback history, which has
+    /// no member map. Never serialized from this struct: the member history
+    /// endpoint returns this struct verbatim, so the admin endpoint converts
+    /// to [`AdminValidationHistoryItem`] instead — same pattern as
+    /// `target_raw` / `account_name` below.
+    #[serde(skip_serializing)]
+    pub member_code: Option<String>,
     /// Raw target, admin history only. None for rows recorded before
     /// migration 0024.
     #[serde(skip_serializing)]
@@ -302,6 +312,9 @@ pub struct ValidationHistoryItem {
 pub struct AdminValidationHistoryItem {
     pub request_id: String,
     pub api_key_prefix: String,
+    /// Admin-only member code resolved via the key prefix (see
+    /// `ValidationHistoryItem::member_code`); null when unresolvable.
+    pub member_code: Option<String>,
     pub product: ValidationProduct,
     pub outcome: String,
     pub target_masked: String,
@@ -321,6 +334,7 @@ impl From<&ValidationHistoryItem> for AdminValidationHistoryItem {
         Self {
             request_id: item.request_id.clone(),
             api_key_prefix: item.api_key_prefix.clone(),
+            member_code: item.member_code.clone(),
             product: item.product,
             outcome: item.outcome.clone(),
             target_masked: item.target_masked.clone(),
@@ -830,9 +844,24 @@ pub struct AdminApiKeySummary {
 
 /// A self-serve member account created via Google sign-in. Owns one
 /// `admin_api_keys` row (via member_id) whose quota/expiry carry the plan.
+///
+/// HARD BOUNDARY (migration 0025): `member_code` is admin-only. It is
+/// deliberately NOT serialized from this struct: no member-facing endpoint
+/// serializes `MemberAccount` directly (member endpoints use hand-built
+/// views such as `MemberProfileView`, exactly like `google_sub` above,
+/// which is likewise admin-serialization-only in practice). Admin
+/// responses carry the code through explicit admin-only views instead
+/// (`AdminMemberView::member_code`, `MemberDetailMemberView::member_code`
+/// in api.rs), so a future member endpoint can never leak it by
+/// serializing this struct by accident.
 #[derive(Clone, Debug, Serialize)]
 pub struct MemberAccount {
     pub id: Uuid,
+    /// Admin-only member code ("RC000001", ...; migration 0025).
+    /// None for rows created before the migration ran or read by a
+    /// binary predating it; never serialized (see the struct doc).
+    #[serde(skip_serializing)]
+    pub member_code: Option<String>,
     pub google_sub: String,
     pub email: String,
     pub name: Option<String>,
@@ -1477,6 +1506,7 @@ mod history_filter_tests {
         ValidationHistoryItem {
             request_id: "test".to_owned(),
             api_key_prefix: prefix.to_owned(),
+            member_code: None,
             product: ValidationProduct::BankAccount,
             outcome: "valid".to_owned(),
             target_masked: String::new(),
@@ -1594,6 +1624,7 @@ mod admin_history_fields_tests {
         ValidationHistoryItem {
             request_id: "R9".to_owned(),
             api_key_prefix: "rv_live_x".to_owned(),
+            member_code: Some("RC000042".to_owned()),
             product: ValidationProduct::BankAccount,
             outcome: "valid".to_owned(),
             target_masked: "***7890".to_owned(),
@@ -1641,12 +1672,15 @@ mod admin_history_fields_tests {
     fn member_item_serialization_never_contains_raw_fields() {
         // Batas keras: ValidationHistoryItem adalah bentuk yang dipakai
         // endpoint riwayat member (member::HistoryResponse), jadi
-        // serialisasinya tidak boleh memuat target utuh / nama apa pun.
+        // serialisasinya tidak boleh memuat target utuh / nama / kode
+        // member apa pun — walau item internalnya membawa ketiganya.
         let serialized = serde_json::to_string(&history_item_with_raw()).expect("serialize");
         assert!(!serialized.contains("target_raw"));
         assert!(!serialized.contains("account_name"));
+        assert!(!serialized.contains("member_code"));
         assert!(!serialized.contains("1234567890"));
         assert!(!serialized.contains("Andrias Se****an Su****o"));
+        assert!(!serialized.contains("RC000042"));
         assert!(serialized.contains("\"target_masked\":\"***7890\""));
     }
 
@@ -1658,5 +1692,49 @@ mod admin_history_fields_tests {
         assert!(serialized.contains("\"target_raw\":\"1234567890\""));
         assert!(serialized.contains("\"account_name\":\"Andrias Se****an Su****o\""));
         assert!(serialized.contains("\"target_masked\":\"***7890\""));
+    }
+
+    #[test]
+    fn admin_history_item_carries_member_code_and_null_is_preserved() {
+        // (d) level serialisasi: prefix ter-resolve -> kode ikut;
+        // lookup gagal (item tanpa kode) -> admin tetap dapat null,
+        // bukan error — konversi From tidak pernah gagal.
+        let resolved = AdminValidationHistoryItem::from(&history_item_with_raw());
+        assert_eq!(resolved.member_code.as_deref(), Some("RC000042"));
+        let serialized = serde_json::to_string(&resolved).expect("serialize");
+        assert!(serialized.contains("\"member_code\":\"RC000042\""));
+        assert!(serialized.contains("\"api_key_prefix\":\"rv_live_x\""));
+
+        let mut unresolved = history_item_with_raw();
+        unresolved.member_code = None;
+        let admin = AdminValidationHistoryItem::from(&unresolved);
+        assert_eq!(admin.member_code, None);
+        let serialized = serde_json::to_string(&admin).expect("serialize");
+        assert!(serialized.contains("\"member_code\":null"));
+        assert!(serialized.contains("\"api_key_prefix\":\"rv_live_x\""));
+    }
+
+    #[test]
+    fn member_account_serialization_never_contains_member_code() {
+        // Batas keras kedua: MemberAccount sendiri skip_serializing
+        // member_code, jadi serialisasi langsung struct ini pun tidak
+        // membocorkan kode — view admin membawanya lewat field eksplisit
+        // (AdminMemberView / MemberDetailResponse di api.rs).
+        let account = MemberAccount {
+            id: Uuid::now_v7(),
+            member_code: Some("RC000042".to_owned()),
+            google_sub: "sub-tes".to_owned(),
+            email: "member-tes@example.test".to_owned(),
+            name: None,
+            picture_url: None,
+            plan_kind: "trial".to_owned(),
+            status: "active".to_owned(),
+            created_at: Utc::now(),
+            last_login_at: None,
+        };
+        let serialized = serde_json::to_string(&account).expect("serialize");
+        assert!(!serialized.contains("member_code"));
+        assert!(!serialized.contains("RC000042"));
+        assert!(serialized.contains("member-tes@example.test"));
     }
 }

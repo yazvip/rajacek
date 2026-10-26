@@ -1056,15 +1056,15 @@
       const target = item.target_raw != null && item.target_raw !== "" ? item.target_raw : item.target_masked;
       const accountName = item.account_name != null && item.account_name !== "" ? item.account_name : "—";
       return `<tr>
-      <td class="row-num">${formatNumber(h.total - h.offset - idx)}</td>
-      <td class="history-date" title="${escapeHtml(occurred.full)}">${escapeHtml(occurred.date)}${occurred.time ? `<br /><span>${escapeHtml(occurred.time)}</span>` : ""}</td>
-      <td><code>${escapeHtml(item.api_key_prefix)}</code></td>
-      <td>${escapeHtml(productLabel(item.product))}</td>
-      <td>${escapeHtml(target)}</td>
-      <td>${escapeHtml(accountName)}</td>
-      <td><span class="status-badge ${escapeHtml(item.outcome)}">${escapeHtml(outcomeLabel[item.outcome] || item.outcome)}</span></td>
-      <td>${latencyCell(item)}</td>
-      <td><code>${escapeHtml(String(item.request_id).length <= 12 ? String(item.request_id) : String(item.request_id).slice(0, 8) + "…")}</code></td>
+      <td data-label="No." class="row-num">${formatNumber(h.total - h.offset - idx)}</td>
+      <td data-label="Waktu" class="history-date" title="${escapeHtml(occurred.full)}">${escapeHtml(occurred.date)}${occurred.time ? `<br /><span>${escapeHtml(occurred.time)}</span>` : ""}</td>
+      <td data-label="Member"><strong>${escapeHtml(item.member_code || "—")}</strong><span class="cell-sub"><code>${escapeHtml(item.api_key_prefix)}</code></span></td>
+      <td data-label="Produk">${escapeHtml(productLabel(item.product))}</td>
+      <td data-label="Target">${escapeHtml(target)}</td>
+      <td data-label="Nama">${escapeHtml(accountName)}</td>
+      <td data-label="Hasil"><span class="status-badge ${escapeHtml(item.outcome)}">${escapeHtml(outcomeLabel[item.outcome] || item.outcome)}</span></td>
+      <td data-label="Latensi">${latencyCell(item)}</td>
+      <td data-label="Request ID"><code>${escapeHtml(String(item.request_id).length <= 12 ? String(item.request_id) : String(item.request_id).slice(0, 8) + "…")}</code></td>
     </tr>`;
     }).join("") : `<tr><td colspan="9">Belum ada riwayat yang cocok dengan filter.</td></tr>`;
     const from = h.total === 0 ? 0 : h.offset + 1;
@@ -1106,6 +1106,7 @@
     $("#members-empty").hidden = state.members.length > 0;
     $("#members-table").innerHTML = state.members.map((member) => `<tr>
       <td><strong>${escapeHtml(member.name || member.email)}</strong><br /><span class="tester-audit-note">${escapeHtml(member.email)}</span><br /><code>${escapeHtml(member.key_prefix || "—")}</code></td>
+      <td><strong>${escapeHtml(member.member_code || "—")}</strong></td>
       <td>${escapeHtml(planLabel[member.plan_kind] || member.plan_kind)}</td>
       <td><span class="status-badge ${member.status === "active" ? "valid" : "invalid"}">${member.status === "active" ? "Aktif" : "Nonaktif"}</span>${member.key_status === "revoked" ? `<br /><span class="status-badge invalid">kunci dicabut</span>` : ""}</td>
       <td>${member.quota_remaining == null ? "—" : `${formatNumber(member.quota_remaining)} / ${formatNumber(member.quota_total)}`}</td>
@@ -1625,7 +1626,7 @@
     const member = detail.member;
     const planLabel = { trial: "Trial", package: "Paket", manual: "Manual" };
     $("#member-detail-title").textContent = member.name || member.email;
-    $("#member-detail-sub").textContent = `${member.email} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[member.plan_kind] || member.plan_kind} · Daftar ${formatDate(member.created_at)} · Login terakhir ${member.last_login_at ? formatDate(member.last_login_at) : "—"}`;
+    $("#member-detail-sub").textContent = `${member.email} · Kode member: ${member.member_code || "—"} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[member.plan_kind] || member.plan_kind} · Daftar ${formatDate(member.created_at)} · Login terakhir ${member.last_login_at ? formatDate(member.last_login_at) : "—"}`;
     $("#member-detail-panel").hidden = false;
     const statusLabel = { active: "Aktif", disabled: "Nonaktif", revoked: "Dicabut" };
     $("#member-detail-keys").innerHTML = detail.keys.length ? detail.keys.map((key) => `<tr>

@@ -1714,6 +1714,12 @@ pub(crate) async fn execute_validation(
     let history_item = ValidationHistoryItem {
         request_id: usage_event.request_id.clone(),
         api_key_prefix: usage_event.api_key_prefix.clone(),
+        // Jalur memori tidak punya peta prefix -> member (member hanya
+        // ada di database), jadi None di sini; jalur database mengisi
+        // member_code lewat JOIN di validation_history_from_db, dan
+        // konversi admin mengubah None ini menjadi null — sesuai
+        // spesifikasi (lookup gagal -> null, bukan error).
+        member_code: None,
         product: usage_event.product,
         outcome: usage_event.status.as_str().to_owned(),
         target_masked: usage_event.target_masked.clone(),
@@ -2621,6 +2627,11 @@ async fn revoke_api_key(
 struct AdminMemberView {
     #[serde(flatten)]
     member: crate::models::MemberAccount,
+    /// Kode member admin-only (migration 0025). Diambil eksplisit dari
+    /// `member.member_code` karena MemberAccount sendiri
+    /// skip_serializing field itu (batas keras: respons member tak
+    /// boleh membawanya — lihat doc MemberAccount).
+    member_code: Option<String>,
     key_prefix: Option<String>,
     key_status: Option<String>,
     quota_total: Option<u64>,
@@ -2656,7 +2667,9 @@ async fn list_members(
         .filter(|member| member_matches_admin_filters(member, &filters))
     {
         let key = state.store.member_key(member.id).await;
+        let member_code = member.member_code.clone();
         views.push(AdminMemberView {
+            member_code,
             key_prefix: key.as_ref().map(|(summary, _)| summary.prefix.clone()),
             key_status: key.as_ref().map(|(summary, _)| summary.status.clone()),
             quota_total: key.as_ref().map(|(summary, _)| summary.quota_total),
@@ -2757,7 +2770,9 @@ async fn assign_member_package(
         ),
     )
     .await;
+    let member_code = member.member_code.clone();
     Ok(Json(AdminMemberView {
+        member_code,
         key_prefix: Some(summary.prefix.clone()),
         key_status: Some(summary.status.clone()),
         quota_total: Some(summary.quota_total),
@@ -2941,9 +2956,48 @@ struct MemberDailyUsageView {
     charged_hits: i64,
 }
 
+/// Admin-only serialization of a member account for the detail response:
+/// identical fields to [`crate::models::MemberAccount`] PLUS
+/// `member_code` (migration 0025). A separate struct — not a flattened
+/// `MemberAccount` — because `MemberAccount` deliberately
+/// skip_serializing `member_code` (hard boundary: no member-facing
+/// response may carry it), while the admin panel reads the code as
+/// `detail.member.member_code`. Same "admin struct terpisah" pattern as
+/// `AdminValidationHistoryItem`.
+#[derive(Serialize)]
+struct MemberDetailMemberView {
+    id: Uuid,
+    member_code: Option<String>,
+    google_sub: String,
+    email: String,
+    name: Option<String>,
+    picture_url: Option<String>,
+    plan_kind: String,
+    status: String,
+    created_at: chrono::DateTime<Utc>,
+    last_login_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl From<&crate::models::MemberAccount> for MemberDetailMemberView {
+    fn from(member: &crate::models::MemberAccount) -> Self {
+        Self {
+            id: member.id,
+            member_code: member.member_code.clone(),
+            google_sub: member.google_sub.clone(),
+            email: member.email.clone(),
+            name: member.name.clone(),
+            picture_url: member.picture_url.clone(),
+            plan_kind: member.plan_kind.clone(),
+            status: member.status.clone(),
+            created_at: member.created_at,
+            last_login_at: member.last_login_at,
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct MemberDetailResponse {
-    member: crate::models::MemberAccount,
+    member: MemberDetailMemberView,
     keys: Vec<MemberDetailKeyView>,
     orders: Vec<crate::qris::MemberOrderView>,
     orders_limit: i64,
@@ -3050,7 +3104,7 @@ async fn get_member_detail(
     let usage = fill_usage_days(wib_day, days, &sparse);
     let usage_total_charged = usage.iter().map(|day| day.charged_hits).sum();
     Ok(Json(MemberDetailResponse {
-        member,
+        member: MemberDetailMemberView::from(&member),
         keys,
         orders,
         orders_limit: limit,
@@ -5170,6 +5224,7 @@ mod member_detail_adjust_tests {
     fn member_fixture(status: &str) -> crate::models::MemberAccount {
         crate::models::MemberAccount {
             id: Uuid::now_v7(),
+            member_code: None,
             google_sub: "google-sub-tes".to_owned(),
             email: "member-tes@example.test".to_owned(),
             name: Some("Member Tes".to_owned()),
@@ -5699,6 +5754,7 @@ mod admin_export_tests {
     fn member_fixture(email: &str, name: Option<&str>, status: &str, day: u32) -> crate::models::MemberAccount {
         crate::models::MemberAccount {
             id: Uuid::parse_str("0199a5a5-0000-7000-8000-000000000001").unwrap(),
+            member_code: None,
             google_sub: "sub-fixture".to_owned(),
             email: email.to_owned(),
             name: name.map(str::to_owned),
@@ -5714,6 +5770,7 @@ mod admin_export_tests {
         crate::models::ValidationHistoryItem {
             request_id: request_id.to_owned(),
             api_key_prefix: prefix.to_owned(),
+            member_code: None,
             product: crate::models::ValidationProduct::BankAccount,
             outcome: outcome.to_owned(),
             target_masked: "***1234".to_owned(),
@@ -5961,6 +6018,7 @@ mod admin_export_tests {
         let mut item = history_fixture("rv_live_x", "valid", "R9");
         item.target_raw = Some("1234567890".to_owned());
         item.account_name = Some("Andrias Se****an Su****o".to_owned());
+        item.member_code = Some("RC000001".to_owned());
         let admin_response = ValidationHistoryResponse {
             items: vec![crate::models::AdminValidationHistoryItem::from(&item)],
             total: 1,
@@ -5976,5 +6034,31 @@ mod admin_export_tests {
         assert!(serialized.contains("\"target_raw\":\"1234567890\""));
         assert!(serialized.contains("\"account_name\":\"Andrias Se****an Su****o\""));
         assert!(serialized.contains("\"target_masked\":\"***1234\""));
+        // Riwayat admin membawa kode + prefix; bentuk member untuk item
+        // yang sama tetap tanpa kode (batas keras).
+        assert!(serialized.contains("\"member_code\":\"RC000001\""));
+        assert!(serialized.contains("\"api_key_prefix\":\"rv_live_x\""));
+        let member_serialized =
+            serde_json::to_string(&item).expect("serialize member shape");
+        assert!(!member_serialized.contains("member_code"));
+        assert!(!member_serialized.contains("RC000001"));
+        assert!(member_serialized.contains("\"api_key_prefix\":\"rv_live_x\""));
+    }
+
+    #[test]
+    fn admin_detail_member_view_carries_code_inside_member_object() {
+        // Panel admin membaca kode sebagai detail.member.member_code
+        // (web/app.js), jadi view detail admin menaruhnya DI DALAM
+        // objek member — bukan sebagai field sibling respons.
+        let mut account = member_fixture("member-detail@example.test", None, "active", 20);
+        account.member_code = Some("RC000007".to_owned());
+        let view = MemberDetailMemberView::from(&account);
+        let serialized = serde_json::to_string(&view).expect("serialize");
+        assert!(serialized.contains("\"member_code\":\"RC000007\""));
+        assert!(serialized.contains("member-detail@example.test"));
+        // Dan bentuk member biasa (MemberAccount) tetap tanpa kode.
+        let plain = serde_json::to_string(&account).expect("serialize account");
+        assert!(!plain.contains("member_code"));
+        assert!(!plain.contains("RC000007"));
     }
 }

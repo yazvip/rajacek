@@ -1815,6 +1815,7 @@ mod member_history_no_raw_fields_tests {
         let item = crate::models::ValidationHistoryItem {
             request_id: "R9".to_owned(),
             api_key_prefix: "rv_live_x".to_owned(),
+            member_code: Some("RC000001".to_owned()),
             product: ValidationProduct::BankAccount,
             outcome: "valid".to_owned(),
             target_masked: "***7890".to_owned(),
@@ -1842,8 +1843,35 @@ mod member_history_no_raw_fields_tests {
         let serialized = serde_json::to_string(&response).expect("serialize");
         assert!(!serialized.contains("target_raw"));
         assert!(!serialized.contains("account_name"));
+        assert!(!serialized.contains("member_code"));
         assert!(!serialized.contains("1234567890"));
         assert!(!serialized.contains("Andrias Se****an Su****o"));
+        assert!(!serialized.contains("RC000001"));
         assert!(serialized.contains("\"target_masked\":\"***7890\""));
+    }
+
+    #[test]
+    fn member_profile_serialization_omits_member_code() {
+        // Profil member (SessionResponse / OverviewResponse) dibangun
+        // dari MemberProfileView yang hand-built — field member_code
+        // tidak ada di struct itu, jadi tidak mungkin terserialisasi
+        // walau akun internalnya berkode.
+        let account = MemberAccount {
+            id: uuid::Uuid::now_v7(),
+            member_code: Some("RC000001".to_owned()),
+            google_sub: "sub-tes".to_owned(),
+            email: "member-tes@example.test".to_owned(),
+            name: Some("Member Tes".to_owned()),
+            picture_url: None,
+            plan_kind: "trial".to_owned(),
+            status: "active".to_owned(),
+            created_at: Utc::now(),
+            last_login_at: None,
+        };
+        let profile = MemberProfileView::from(&account);
+        let serialized = serde_json::to_string(&profile).expect("serialize");
+        assert!(!serialized.contains("member_code"));
+        assert!(!serialized.contains("RC000001"));
+        assert!(serialized.contains("member-tes@example.test"));
     }
 }
