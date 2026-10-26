@@ -1991,3 +1991,50 @@ td.empty-state { display: table-cell; }
   #view-history #history-table td.history-date span { white-space: normal; }
   #view-history #history-table td .cell-sub { font-size: 11px; }
 }
+
+/* ------------------------------------------------------------------
+   Kartu Kunci API di HP (2026-10-26, ≤767px) — SCOPED HANYA ke tabel
+   Kunci API (#view-api-keys #api-key-table). Pola sama seperti kartu
+   riwayat: thead disembunyikan; tiap <tr> jadi kartu putih; tiap <td>
+   jadi baris berlabel (label via ::before dari data-label yang dipasang
+   di app.js renderApiKeys). Desktop & tablet (>767px) tidak tersentuh.
+   Nilai memakai break-word (bukan anywhere) agar email/prefix tidak
+   patah per huruf — hanya patah bila benar-benar meluber. Wrapper
+   .table-scroll dibuat overflow: visible untuk tabel ini saja. */
+@media (max-width: 767px) {
+  #view-api-keys .table-scroll { overflow: visible; }
+  #view-api-keys .table-scroll table { display: block; min-width: 0; }
+  #view-api-keys .table-scroll thead { display: none; }
+  #view-api-keys .table-scroll tbody { display: block; }
+  #view-api-keys #api-key-table tr {
+    display: block;
+    margin: 0 16px 12px;
+    padding: 6px 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+  }
+  #view-api-keys #api-key-table td {
+    position: relative;
+    display: block;
+    padding: 7px 12px 7px 112px;
+    border-top: 1px solid var(--line-soft);
+    text-align: right;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  #view-api-keys #api-key-table td:first-child { border-top: 0; }
+  #view-api-keys #api-key-table td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 12px;
+    top: 7px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: left;
+  }
+  #view-api-keys #api-key-table td[colspan] { padding-left: 12px; text-align: center; }
+  #view-api-keys #api-key-table td[colspan]::before { content: none; }
+}

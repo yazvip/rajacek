@@ -874,12 +874,12 @@
       // Billing 2026-10-25: jatah gratis hasil tidak-valid hari ini (WIB).
       const freeUsed = typeof key.invalid_free_used_today === "number" ? key.invalid_free_used_today : 0;
       return `<tr>
-      <td><span class="table-title">${escapeHtml(key.name)}</span><span class="table-subtitle">Dibuat ${formatDate(key.created_at)}</span><span class="table-subtitle">Tidak-valid gratis hari ini: ${freeUsed}/100</span></td>
-      <td><code>${escapeHtml(key.prefix)}_••••••••</code></td>
-      <td><span class="scope-list">${key.scopes.map((scope) => `<span class="scope-badge">${escapeHtml(scope)}</span>`).join("")}</span></td>
-      <td>${escapeHtml(owner)}</td>
-      <td>${formatNumber(key.rate_limit_per_minute)} RPM</td><td>${formatDate(key.last_used_at)}</td><td>${statusBadge(key.status)}</td>
-      <td>${key.status === "active" ? `<button class="table-action danger" data-action="revoke-api-key" data-id="${key.id}" type="button">Cabut</button>` : "—"}</td>
+      <td data-label="Nama"><span class="table-title">${escapeHtml(key.name)}</span><span class="table-subtitle">Dibuat ${formatDate(key.created_at)}</span><span class="table-subtitle">Tidak-valid gratis hari ini: ${freeUsed}/100</span></td>
+      <td data-label="Prefix"><code>${escapeHtml(key.prefix)}_••••••••</code></td>
+      <td data-label="Scope"><span class="scope-list">${key.scopes.map((scope) => `<span class="scope-badge">${escapeHtml(scope)}</span>`).join("")}</span></td>
+      <td data-label="Pemilik">${escapeHtml(owner)}</td>
+      <td data-label="Rate limit">${formatNumber(key.rate_limit_per_minute)} RPM</td><td data-label="Terakhir dipakai">${formatDate(key.last_used_at)}</td><td data-label="Status">${statusBadge(key.status)}</td>
+      <td data-label="Aksi">${key.status === "active" ? `<button class="table-action danger" data-action="revoke-api-key" data-id="${key.id}" type="button">Cabut</button>` : "—"}</td>
     </tr>`;
     }).join("");
   }
