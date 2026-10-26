@@ -491,19 +491,60 @@ fn html_escape(text: &str) -> String {
 
 pub(crate) fn package_products_label(products: &[ValidationProduct]) -> String {
     let has = |wanted: ValidationProduct| products.contains(&wanted);
-    match (
-        has(ValidationProduct::BankAccount),
-        has(ValidationProduct::Ewallet),
-        has(ValidationProduct::Whatsapp),
-    ) {
-        (true, true, true) => "Rekening bank + e-wallet + WhatsApp".to_owned(),
-        (true, true, false) => "Rekening bank + e-wallet".to_owned(),
-        (true, false, true) => "Rekening bank + WhatsApp".to_owned(),
-        (false, true, true) => "E-wallet + WhatsApp".to_owned(),
-        (true, false, false) => "Rekening bank".to_owned(),
-        (false, true, false) => "E-wallet".to_owned(),
-        (false, false, true) => "WhatsApp".to_owned(),
-        (false, false, false) => "Semua produk".to_owned(),
+    let mut parts: Vec<&str> = Vec::new();
+    if has(ValidationProduct::BankAccount) {
+        parts.push("Rekening bank");
+    }
+    if has(ValidationProduct::Ewallet) {
+        parts.push("e-wallet");
+    }
+    if has(ValidationProduct::Whatsapp) {
+        parts.push("WhatsApp");
+    }
+    if has(ValidationProduct::Pln) {
+        parts.push("PLN");
+    }
+    if parts.is_empty() {
+        return "Semua produk".to_owned();
+    }
+    let mut label = parts.join(" + ");
+    // Samakan kapitalisasi arm match lama: e-wallet di posisi pertama jadi "E-wallet".
+    if let Some(first) = label.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    label
+}
+
+#[cfg(test)]
+mod package_products_label_tests {
+    use super::package_products_label;
+    use crate::models::ValidationProduct;
+
+    #[test]
+    fn all_four_products_include_pln() {
+        let products = vec![
+            ValidationProduct::BankAccount,
+            ValidationProduct::Ewallet,
+            ValidationProduct::Whatsapp,
+            ValidationProduct::Pln,
+        ];
+        assert_eq!(
+            package_products_label(&products),
+            "Rekening bank + e-wallet + WhatsApp + PLN"
+        );
+    }
+
+    #[test]
+    fn old_arms_unchanged_and_pln_only() {
+        assert_eq!(
+            package_products_label(&[
+                ValidationProduct::Ewallet,
+                ValidationProduct::Whatsapp
+            ]),
+            "E-wallet + WhatsApp"
+        );
+        assert_eq!(package_products_label(&[ValidationProduct::Pln]), "PLN");
+        assert_eq!(package_products_label(&[]), "Semua produk");
     }
 }
 
