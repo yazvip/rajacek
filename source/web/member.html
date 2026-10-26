@@ -137,6 +137,11 @@
       .kpi-foot b { font-family:'JetBrains Mono',monospace; color:var(--brand); }
       .kpi-note { margin-top:16px; display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); }
       .kpi-note svg { width:14px; height:14px; color:var(--faint); flex:none; }
+      .bucket-row { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:10px 0; border-bottom:1px solid var(--line-soft); font-size:12px; }
+      .bucket-row:last-child { border-bottom:none; }
+      .bucket-name { font-weight:700; color:var(--ink); }
+      .bucket-hits { font-family:'JetBrains Mono',monospace; font-weight:700; white-space:nowrap; }
+      .bucket-exp { color:var(--muted); white-space:nowrap; }
       .grid-main { display:grid; grid-template-columns:1fr; gap:20px; }
       .grid-key { display:grid; grid-template-columns:1fr; gap:20px; align-items:start; }
       .grid-3 { display:grid; grid-template-columns:1fr; gap:20px; }
@@ -519,6 +524,17 @@
               </div>
             </div>
 
+            <div class="card hidden" id="bucketCard">
+              <div class="section-head">
+                <div>
+                  <h2 class="section">Rincian Kuota per Paket</h2>
+                  <p class="sub">Setiap pembelian adalah paket tersendiri. Pemakaian selalu menghabiskan paket yang paling cepat kedaluwarsa dulu.</p>
+                </div>
+              </div>
+              <div id="bucketList"></div>
+              <p class="sub" style="margin-top:12px;">Paket yang sudah kedaluwarsa tidak lagi bisa dipakai, walau paket lain masih aktif.</p>
+            </div>
+
             <div class="grid-main">
               <div class="card">
                 <div class="section-head">
@@ -665,7 +681,7 @@
               <div>
                 <span class="buy-badge"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>Pembayaran Instan QRIS</span>
                 <h2 class="section" style="font-size:16px;">Beli Paket Kuota Validasi</h2>
-                <p class="sub" style="max-width:640px;">Tersedia pembayaran QRIS otomatis. Kuota baru <strong>ditambahkan ke sisa kuota Anda</strong> (tidak menggantikan), dan masa aktif diperpanjang mengikuti tanggal kedaluwarsa yang lebih panjang.</p>
+                <p class="sub" style="max-width:640px;">Tersedia pembayaran QRIS otomatis. Kuota baru <strong>ditambahkan ke sisa kuota Anda</strong> (tidak menggantikan). Setiap paket yang Anda beli punya masa aktif sendiri, dan pemakaian selalu menghabiskan paket yang paling cepat kedaluwarsa dulu.</p>
               </div>
               <div style="text-align:right;">
                 <span style="font-size:11px;color:var(--faint);display:block;">Sisa Kuota Saat Ini</span>
@@ -838,8 +854,9 @@
           <div class="buy-confirm-highlight"><dt>Kuota setelah lunas</dt><dd><span id="buyConfNew">–</span><span class="buy-confirm-delta" id="buyConfDelta"></span></dd></div>
           <div><dt>Rate limit</dt><dd id="buyConfRate">–</dd></div>
           <div><dt>Aktif sampai</dt><dd id="buyConfExpiry">–</dd></div>
+          <div id="buyConfBucketRow" class="hidden"><dt>Masa aktif paket baru</dt><dd id="buyConfBucketExpiry">–</dd></div>
         </dl>
-        <p class="buy-confirm-note">Langkah ini belum menagih apa pun. Kuota baru hanya bertambah setelah pembayaran Anda terverifikasi, dan masa aktif diperpanjang dari tanggal kedaluwarsa yang masih berjalan.</p>
+        <p class="buy-confirm-note">Langkah ini belum menagih apa pun. Kuota baru hanya bertambah setelah pembayaran Anda terverifikasi. Paket baru ini punya masa aktif sendiri; pemakaian menghabiskan paket yang paling cepat kedaluwarsa dulu.</p>
         <div class="buy-actions buy-modal-actions">
           <button type="button" class="primary" id="buyConfirmBtn">Lanjutkan &amp; Buat QR</button>
           <button type="button" id="buyPreviewCancelBtn">Batal</button>
@@ -1013,6 +1030,18 @@
         $('quotaNote').textContent = d.key.expires_at
           ? 'berlaku s/d ' + fmtDate(d.key.expires_at)
           : (d.source === 'database' ? 'kuota validasi tersedia' : 'kuota validasi tersedia (sumber cadangan)');
+        /* Bucket kuota (FIFO): tampil hanya bila backend mengirim buckets[].
+           Tanpa buckets[] (backend lama), kartu tetap tersembunyi dan
+           agregat di atas tetap tampil — tidak ada crash. */
+        if (Array.isArray(d.buckets) && d.buckets.length) {
+          const sortedBuckets = [...d.buckets].sort((a, b) => {
+            if (!a.expires_at) return 1;
+            if (!b.expires_at) return -1;
+            return new Date(a.expires_at) - new Date(b.expires_at);
+          });
+          $('bucketList').innerHTML = sortedBuckets.map((b) => `<div class="bucket-row"><span class="bucket-name">${escHtml(b.package_name || 'Paket')}</span><span class="bucket-hits">${fmtNum(b.remaining_hits || 0)} / ${fmtNum(b.total_hits || 0)} hit</span><span class="bucket-exp">${b.expires_at ? 's/d ' + fmtDate(b.expires_at) : 'Tanpa kedaluwarsa'}</span></div>`).join('');
+          $('bucketCard').classList.remove('hidden');
+        }
         if (d.member) {
           $('memberCard').classList.remove('hidden');
           $('memberCard').style.display = 'flex';
@@ -1701,6 +1730,8 @@
             ? fmtNum(d.current_rate_limit_per_minute) + ' → ' + fmtNum(d.new_rate_limit_per_minute) + '/menit'
             : fmtNum(d.new_rate_limit_per_minute) + '/menit';
           $('buyConfExpiry').textContent = fmtDate(d.new_expires_at);
+          if (d.new_bucket_expires_at) { $('buyConfBucketExpiry').textContent = fmtDate(d.new_bucket_expires_at); $('buyConfBucketRow').classList.remove('hidden'); }
+          else $('buyConfBucketRow').classList.add('hidden');
           buyOpenPreview();
         } catch (e) {
           $('buyMsg').textContent = e.message || 'Pratinjau gagal.';

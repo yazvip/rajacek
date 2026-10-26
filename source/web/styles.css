@@ -1523,6 +1523,9 @@ td.empty-state { display: table-cell; }
 .member-adjust-form input { width: 120px; }
 .member-usage-row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); font-size: 12px; }
 .member-usage-row:last-child { border-bottom: 0; }
+.member-bucket-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 10px 12px; background: #f8fafc; border: 1px solid var(--line-soft); border-radius: 12px; font-size: 12px; margin-bottom: 8px; }
+.member-bucket-name { font-weight: 700; color: var(--ink); }
+.member-bucket-hits { font-family: ui-monospace, monospace; font-weight: 700; white-space: nowrap; }
 .member-usage-bar { height: 8px; border-radius: 999px; background: var(--brand); flex: none; }
 #order-detail { min-width: 0; }
 .order-hero {

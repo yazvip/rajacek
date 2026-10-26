@@ -1619,6 +1619,21 @@
     $$("#member-detail-keys [data-adjust-key]").forEach((form) => {
       form.addEventListener("submit", (event) => submitMemberAdjust(event, form.dataset.adjustKey));
     });
+    /* Bucket kuota (FIFO): tampil hanya bila detail mengirim buckets[]
+       (atau buckets[] per kunci). Tanpa buckets[], seksi tersembunyi dan
+       tabel kunci agregat tetap tampil — tidak ada crash. */
+    const detailBuckets = Array.isArray(detail.buckets)
+      ? detail.buckets
+      : detail.keys.flatMap((key) => Array.isArray(key.buckets) ? key.buckets : []);
+    const bucketsWrap = $("#member-detail-buckets-wrap");
+    if (bucketsWrap) {
+      bucketsWrap.hidden = detailBuckets.length === 0;
+      $("#member-detail-buckets").innerHTML = detailBuckets.length ? [...detailBuckets].sort((a, b) => {
+        if (!a.expires_at) return 1;
+        if (!b.expires_at) return -1;
+        return new Date(a.expires_at) - new Date(b.expires_at);
+      }).map((bucket) => `<div class="member-bucket-row"><span class="member-bucket-name">${escapeHtml(bucket.package_name || "Paket")}</span><span class="member-bucket-hits">${formatNumber(bucket.remaining_hits || 0)} / ${formatNumber(bucket.total_hits || 0)} hit</span><span class="tester-audit-note" style="margin:0;">${bucket.expires_at ? `s/d ${escapeHtml(formatDate(bucket.expires_at))}` : "Tanpa kedaluwarsa"}</span></div>`).join("") : "";
+    }
     const orderLabel = { waiting_payment: "Menunggu bayar", paid: "Lunas (belum grant)", granted: "Ter-grant", expired: "Kedaluwarsa", canceled: "Dibatalkan", needs_review: "Perlu tinjauan" };
     $("#member-detail-orders").innerHTML = detail.orders.length ? detail.orders.map((order) => `<tr>
       <td>${escapeHtml(formatDate(order.created_at))}</td>

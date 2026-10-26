@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
-    <link rel="stylesheet" href="/styles.css?v=20261026-10" />
+    <link rel="stylesheet" href="/styles.css?v=20261026-11" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -265,7 +265,7 @@
             <form id="member-assign-form" class="form-grid">
               <label>Sumber paket<select id="member-assign-source"><option value="package">Paket yang ada</option><option value="manual">Manual (custom)</option></select></label>
               <label id="member-assign-package-wrap">Paket<select id="member-assign-package"></select></label>
-              <label>Mode<select id="member-assign-mode"><option value="replace">Ganti (kuota & masa aktif mulai ulang)</option><option value="add">Tambah (kuota ditambah, masa diperpanjang)</option></select></label>
+              <label>Mode<select id="member-assign-mode"><option value="replace">Ganti (kuota & masa aktif mulai ulang)</option><option value="add">Tambah (bucket baru, masa aktif sendiri)</option></select></label>
               <label id="member-assign-hits-wrap" hidden>Hit manual<input id="member-assign-hits" type="number" min="1" step="1" placeholder="cth. 500" /></label>
               <label>Masa aktif (hari)<input id="member-assign-days" type="number" min="1" max="3650" step="1" value="30" required /></label>
               <label class="full-width">Rate limit (per menit — kosong: ikut paket; untuk Manual tidak berubah)<input id="member-assign-rate" type="number" min="1" max="100000" step="1" placeholder="otomatis" /></label>
@@ -286,6 +286,11 @@
             <h3>Kunci</h3>
             <div class="table-scroll"><table><thead><tr><th>Kunci</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Gratis invalid hari ini</th><th>Adjust kuota manual</th></tr></thead><tbody id="member-detail-keys"></tbody></table></div>
             <p class="tester-audit-note">Adjust kuota bersifat relatif (sisa ditambah/dikurangi delta, bukan di-set absolut) dan selalu dicatat di Aktivitas beserta alasan. Delta positif yang melampaui total ikut menaikkan total; delta negatif tidak mengubah total.</p>
+            <div id="member-detail-buckets-wrap" hidden>
+            <h3>Kuota per paket</h3>
+            <p class="tester-audit-note">Setiap pembelian adalah paket tersendiri; pemakaian menghabiskan paket yang paling cepat kedaluwarsa dulu. Paket yang kedaluwarsa tidak lagi bisa dipakai, walau paket lain masih aktif.</p>
+            <div id="member-detail-buckets"></div>
+            </div>
             <h3>Order</h3>
             <div class="table-scroll"><table><thead><tr><th>Waktu</th><th>Paket</th><th>Nominal</th><th>Status</th><th>Grant</th></tr></thead><tbody id="member-detail-orders"></tbody></table></div>
             <div class="form-actions full-width"><button class="button button-secondary" id="member-detail-orders-prev" type="button">← Sebelumnya</button><span id="member-detail-orders-info" class="tester-audit-note"></span><button class="button button-secondary" id="member-detail-orders-next" type="button">Berikutnya →</button></div>
@@ -374,6 +379,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261026-6" defer></script>
+    <script src="/app.js?v=20261026-7" defer></script>
   </body>
 </html>

@@ -163,7 +163,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         <h2 id="pembelian-paket">Pembelian paket (portal member)</h2>
         <p>Member yang masuk lewat portal bisa membeli paket sendiri dengan QRIS. Alurnya: lihat pratinjau efek pembelian → buat order → pindai QR → tekan "Saya sudah bayar". Ketentuan yang berlaku:</p>
         <ul>
-          <li><strong>Kuota tidak pernah hilang karena membeli.</strong> Kuota paket baru <em>ditambahkan</em> ke sisa kuota Anda; masa aktif diperpanjang dari tanggal kedaluwarsa yang masih berjalan (atau dari sekarang bila sudah lewat); rate limit menjadi yang terbesar antara rate aktif dan rate paket baru.</li>
+          <li><strong>Kuota tidak pernah hilang karena membeli.</strong> Kuota paket baru <em>ditambahkan</em> ke sisa kuota Anda, tetapi setiap paket punya masa aktif sendiri: paket baru berlaku selama masa aktifnya sendiri dan tidak mengubah masa aktif paket lama. Total kuota yang tampil adalah gabungan semua paket yang masih aktif, dan pemakaian selalu menghabiskan paket yang paling cepat kedaluwarsa dulu. Paket yang sudah kedaluwarsa tidak lagi bisa dipakai, walau paket lain masih aktif. Rate limit menjadi yang terbesar antara rate aktif dan rate paket baru.</li>
           <li><strong>Satu order menunggu per member.</strong> Membuat order kedua selagi ada order menunggu akan mengembalikan order yang sama (bukan QR baru).</li>
           <li>QR berlaku sesuai masa yang ditampilkan (hitungan mundur di portal). Order yang kedaluwarsa atau dibatalkan tidak memotong apa pun.</li>
           <li>Pembayaran yang sudah lunas tapi nominalnya tidak cocok, atau membernya dinonaktifkan, <strong>ditahan untuk peninjauan</strong> — kuota tidak di-grant otomatis sampai peninjauan selesai.</li>

@@ -1586,21 +1586,25 @@ pub(crate) async fn execute_validation(
         .with_request_id(request_id));
     }
 
-    let remaining_quota = match state.store.reserve_quota(&api_key.prefix).await {
-        Ok(remaining) => remaining,
-        Err(error) => {
-            state
-                .idempotency
-                .abandon(&idempotency_key, &fingerprint)
-                .await;
-            return Err(error.with_request_id(request_id));
-        }
-    };
+    // Bucket yang dipotong dicatat agar setiap refund di bawah ini
+    // mengembalikan hit ke bucket yang SAMA (bukan bucket FIFO-pertama
+    // saat itu, yang bisa berbeda bila grant/assign mendarat di tengah).
+    let (remaining_quota, reserved_bucket) =
+        match state.store.reserve_quota(&api_key.prefix).await {
+            Ok((remaining, bucket_id)) => (remaining, bucket_id),
+            Err(error) => {
+                state
+                    .idempotency
+                    .abandon(&idempotency_key, &fingerprint)
+                    .await;
+                return Err(error.with_request_id(request_id));
+            }
+        };
 
     let outcome = match state.provider.validate(request.clone()).await {
         Ok(outcome) => outcome,
         Err(error) => {
-            state.store.refund_quota(&api_key.prefix).await;
+            state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
             state
                 .idempotency
                 .abandon(&idempotency_key, &fingerprint)
@@ -1633,10 +1637,10 @@ pub(crate) async fn execute_validation(
         {
             free_invalid = true;
             charged = false;
-            state.store.refund_quota(&api_key.prefix).await;
+            state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
         }
     } else if !outcome.status.is_billable() {
-        state.store.refund_quota(&api_key.prefix).await;
+        state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
     }
 
     let total_latency_ms = request_started.elapsed().as_millis() as u64;
@@ -1713,7 +1717,7 @@ pub(crate) async fn execute_validation(
         // No ledger event = no delivery: reverse the charge, or return a
         // free-pool slot the member never got a result for.
         if charged {
-            state.store.refund_quota(&api_key.prefix).await;
+            state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
         } else if free_invalid {
             state
                 .store
@@ -2904,6 +2908,9 @@ struct MemberDetailKeyView {
     summary: crate::models::AdminApiKeySummary,
     quota_remaining: u64,
     invalid_free_used_today: u32,
+    /// Bucket FIFO kunci ini (urutan expiry terdekat dulu; nama paket
+    /// di-resolve, null bila paket sudah dihapus/manual).
+    buckets: Vec<crate::models::QuotaBucketView>,
 }
 
 #[derive(Serialize)]
@@ -2994,10 +3001,12 @@ async fn get_member_detail(
             .store
             .invalid_free_used_today(&summary.prefix, wib_day)
             .await;
+        let buckets = state.store.key_buckets(&summary.prefix).await;
         keys.push(MemberDetailKeyView {
             summary,
             quota_remaining: remaining,
             invalid_free_used_today,
+            buckets,
         });
     }
     let (orders, usage_source) = match state.store.pool() {
@@ -5266,6 +5275,7 @@ mod member_detail_adjust_tests {
             summary,
             quota_remaining: 900,
             invalid_free_used_today: 3,
+            buckets: Vec::new(),
         };
         let serialized = serde_json::to_string(&view).expect("serialisasi view detail");
         assert!(serialized.contains("rk_live_ab12"));

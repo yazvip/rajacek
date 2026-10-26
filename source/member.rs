@@ -532,6 +532,8 @@ pub struct OverviewResponse {
     key: MemberKeyView,
     member: Option<MemberProfileView>,
     remaining_quota: u64,
+    /// Bucket FIFO kunci sesi ini (urutan expiry terdekat dulu).
+    buckets: Vec<crate::models::QuotaBucketView>,
     checks_today: i64,
     checks_last_30_days: i64,
     /// "database" = durable MySQL history; "memory" = this process only.
@@ -636,6 +638,7 @@ pub async fn overview(
         .await;
     let invalid_free_remaining_today = crate::store::INVALID_FREE_DAILY_LIMIT
         .saturating_sub(invalid_free_used_today);
+    let buckets = state.store.key_buckets(&prefix).await;
     let package_name = match summary.package_id {
         Some(package_id) => state
             .store
@@ -663,6 +666,7 @@ pub async fn overview(
         },
         member: session.member.as_ref().map(MemberProfileView::from),
         remaining_quota,
+        buckets,
         checks_today: usage.checks_today,
         checks_last_30_days: usage.checks_last_30_days,
         source,
@@ -1351,10 +1355,7 @@ pub async fn ewallets(
 // Pembelian paket mandiri (QRIS Cutiezy)
 // ---------------------------------------------------------------------------
 
-use crate::{
-    models::compute_grant_effect,
-    qris::{self, MemberOrderView, PackageOrderRow, QrisClient},
-};
+use crate::qris::{self, MemberOrderView, PackageOrderRow, QrisClient};
 
 /// Member id pemilik order. Sesi member (Google) membawa id langsung;
 /// sesi prefix (login API key) dipetakan ke member pemilik kunci itu.
@@ -1463,9 +1464,18 @@ pub struct PurchasePreviewResponse {
     current_remaining: u64,
     current_expires_at: Option<DateTime<Utc>>,
     current_rate_limit_per_minute: u32,
+    new_total: u64,
     new_remaining: u64,
     new_expires_at: DateTime<Utc>,
     new_rate_limit_per_minute: u32,
+    /// Expiry bucket BARU yang akan dibuat grant (beli + valid_days),
+    /// berbeda dari new_expires_at (expiry agregat terdekat setelah
+    /// grant, yang bisa berasal dari bucket lama).
+    new_bucket_expires_at: DateTime<Utc>,
+    /// Bucket kunci SAAT INI (sebelum grant), urutan FIFO. Bucket baru
+    /// belum punya id sehingga tidak dimasukkan di sini — expiry-nya
+    /// ada di new_bucket_expires_at.
+    buckets: Vec<crate::models::QuotaBucketView>,
 }
 
 /// Efek pembelian SEBELUM bayar (murni komputasi, tanpa memanggil
@@ -1496,26 +1506,49 @@ pub async fn purchase_preview(
     if !package.active || effective == 0 {
         return Err(AppError::bad_request("Paket ini tidak dapat dibeli"));
     }
-    let (current_total, current_remaining, current_expires_at, current_rate) =
+    // Agregat live (total = jumlah bucket, sisa = sisa aktif) + bucket
+    // saat ini untuk tampilan. Member tanpa kunci melihat efek dari nol.
+    let (current_total, current_remaining, current_expires_at, current_rate, current_key) =
         match state.store.member_key(member_id).await {
             Some((summary, remaining)) => (
                 summary.quota_total,
                 remaining,
                 summary.expires_at,
                 summary.rate_limit_per_minute,
+                Some(summary),
             ),
-            None => (0, 0, None, 0),
+            None => (0, 0, None, 0, None),
         };
-    let effect = compute_grant_effect(
-        current_total,
-        current_remaining,
-        current_expires_at,
-        Utc::now(),
-        package.included_hits,
-        settings.valid_days,
-        current_rate,
-        package.rate_limit_per_minute,
-    );
+    let now = Utc::now();
+    let new_bucket_expires_at = now + chrono::Duration::days(settings.valid_days);
+    let new_total = current_total.saturating_add(package.included_hits);
+    let new_remaining = current_remaining.saturating_add(package.included_hits);
+    let new_rate_limit_per_minute = current_rate.max(package.rate_limit_per_minute);
+    // new_expires_at = expiry agregat terdekat SETELAH grant: hitung dari
+    // bucket saat ini + bucket baru (bukan dari current_expires_at —
+    // agregat lama bisa berasal dari bucket habis yang tidak lagi
+    // bersisa, sehingga min() dengannya akan salah).
+    let (buckets, new_expires_at) = match &current_key {
+        Some(summary) => {
+            let views = state.store.key_buckets(&summary.prefix).await;
+            let mut raw = state.store.key_bucket_list(&summary.prefix).await;
+            raw.push(crate::models::new_purchase_bucket(
+                summary.id,
+                Some(member_id),
+                None,
+                Some(package.id),
+                package.included_hits,
+                settings.valid_days,
+                now,
+            ));
+            let (_, _, expiry) = crate::models::bucket_aggregate(&raw, now);
+            // Setelah grant selalu ada bucket baru bersisa, jadi agregat
+            // tidak pernah jatuh ke fallback kosong — tapi pertahankan
+            // fallback defensif ke expiry bucket baru.
+            (views, expiry.unwrap_or(new_bucket_expires_at))
+        }
+        None => (Vec::new(), new_bucket_expires_at),
+    };
     Ok(Json(PurchasePreviewResponse {
         package_id: package.id.to_string(),
         package_name: package.name,
@@ -1527,9 +1560,12 @@ pub async fn purchase_preview(
         current_remaining,
         current_expires_at,
         current_rate_limit_per_minute: current_rate,
-        new_remaining: effect.new_remaining,
-        new_expires_at: effect.new_expires_at,
-        new_rate_limit_per_minute: effect.new_rate_limit_per_minute,
+        new_total,
+        new_remaining,
+        new_expires_at,
+        new_rate_limit_per_minute,
+        new_bucket_expires_at,
+        buckets,
     }))
 }
 

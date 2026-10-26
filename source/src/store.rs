@@ -15,7 +15,8 @@ use crate::{
     models::{
         ActivityItem, AdminApiKeySummary, AdminAuditEntry, AdminPackage, AdminProduct, ApiKeyContext,
         CreateApiKeyRequest, CreatePackageRequest, CreateRateLimitPolicyRequest, CreatedApiKey,
-        DashboardAlert, DashboardMetrics, DashboardOverview, GrantOutcome, RateLimitPolicy,
+        DashboardAlert, DashboardMetrics, DashboardOverview, GrantOutcome, QuotaBucket,
+        QuotaBucketView, RateLimitPolicy,
         ServiceStatus, TrafficPoint, UpdatePackageRequest, UpdateProductRequest,
         UpdateRateLimitPolicyRequest, ValidationHistoryFilters, ValidationHistoryItem,
         ValidationProduct,
@@ -41,6 +42,180 @@ struct ApiKeyRecord {
     expires_at: Option<chrono::DateTime<Utc>>,
     package_id: Option<Uuid>,
     member_id: Option<Uuid>,
+    /// FIFO quota buckets milik kunci ini. Kosong = kunci lama/legacy
+    /// (belum pernah dimigrasikan ke bucket): jalur potong memakai
+    /// agregat lama (remaining_quota) sampai bucket tersedia. Begitu
+    /// bucket ada, agregat DIHITUNG dari bucket (lihat
+    /// `sync_aggregates_from_buckets` + `live_view`) dan kolom agregat
+    /// hanya cache tampilan — bukan sumber kebenaran potong.
+    buckets: Vec<QuotaBucket>,
+}
+
+impl ApiKeyRecord {
+    /// Sinkronkan kolom agregat (record + summary) dari bucket, bila ada.
+    /// Dipanggil setiap kali bucket berubah di bawah data lock, sebelum
+    /// snapshot dikirim ke writer — jadi snapshot tidak pernah membawa
+    /// agregat basi yang menimpa hasil mutasi bucket.
+    fn sync_aggregates_from_buckets(&mut self, now: chrono::DateTime<Utc>) {
+        if self.buckets.is_empty() {
+            return;
+        }
+        let (total, remaining, expiry) =
+            crate::models::bucket_aggregate(&self.buckets, now);
+        self.quota_total = total;
+        self.remaining_quota = remaining;
+        self.expires_at = expiry;
+        self.summary.quota_total = total;
+        self.summary.expires_at = expiry;
+    }
+
+    /// Tampilan live kunci: ringkasan + sisa. Untuk kunci ber-bucket,
+    /// agregat dihitung ulang dari bucket pada `now` — jadi lewatnya
+    /// expiry sebuah bucket langsung terlihat di tampilan tanpa menunggu
+    /// mutasi berikutnya. Kunci legacy (tanpa bucket) memakai nilai
+    /// tersimpan apa adanya.
+    fn live_view(&self, now: chrono::DateTime<Utc>) -> (AdminApiKeySummary, u64) {
+        if self.buckets.is_empty() {
+            return (self.summary.clone(), self.remaining_quota);
+        }
+        let (total, remaining, expiry) = crate::models::bucket_aggregate(&self.buckets, now);
+        let mut summary = self.summary.clone();
+        summary.quota_total = total;
+        summary.expires_at = expiry;
+        (summary, remaining)
+    }
+
+    /// Apakah kunci sudah kedaluwarsa untuk jalur auth. Dengan bucket,
+    /// kunci baru kedaluwarsa bila SEMUA bucket sudah lewat expiry —
+    /// memakai expiry agregat (bucket aktif terdekat) di sini akan
+    /// memblokir bucket yang lebih lama expiry-nya, jadi auth WAJIB
+    /// memakai tes ini, bukan record.expires_at. Bucket tanpa expiry
+    /// membuat kunci tidak pernah kedaluwarsa. Kunci legacy memakai
+    /// expires_at seperti dulu.
+    fn key_expired(&self, now: chrono::DateTime<Utc>) -> bool {
+        if self.buckets.is_empty() {
+            return self
+                .expires_at
+                .map_or(false, |expiry| expiry <= now);
+        }
+        self.buckets.iter().all(|bucket| {
+            bucket
+                .expires_at
+                .map_or(false, |expiry| expiry <= now)
+        })
+    }
+}
+
+/// Apakah kunci tanpa bucket punya agregat yang layak di-seed (saldo
+/// atau expiry lama yang harus dipertahankan, bukan kunci kosong).
+fn needs_seed(record: &ApiKeyRecord) -> bool {
+    record.buckets.is_empty()
+        && (record.quota_total > 0
+            || record.remaining_quota > 0
+            || record.expires_at.is_some())
+}
+
+/// Isi bucket awal dari agregat kunci lama bila kunci belum punya bucket
+/// sama sekali (jendela deploy campuran / baris bucket hilang). Dipakai
+/// grant + assign-add sebelum menambah bucket baru, agar saldo lama
+/// tidak hilang saat bucket pertama ditambahkan. Kunci kosong (0/0/tanpa
+/// expiry) tidak di-seed — tidak ada yang perlu dipertahankan.
+fn seed_bucket_if_needed(record: &mut ApiKeyRecord, now: chrono::DateTime<Utc>) -> bool {
+    if !needs_seed(record) {
+        return false;
+    }
+    record.buckets.push(crate::models::backfill_bucket_for_key(
+        record.summary.id,
+        record.member_id,
+        record.package_id,
+        record.quota_total,
+        record.remaining_quota,
+        record.expires_at,
+        now,
+    ));
+    true
+}
+
+/// Satu baris quota_buckets untuk dibaca saat load.
+#[derive(sqlx::FromRow)]
+struct QuotaBucketRow {
+    id: String,
+    key_id: String,
+    member_id: Option<String>,
+    order_id: Option<String>,
+    package_id: Option<String>,
+    total_hits: u64,
+    remaining_hits: u64,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    created_at: chrono::DateTime<Utc>,
+}
+
+impl QuotaBucketRow {
+    fn into_bucket(self) -> Result<QuotaBucket, AppError> {
+        let parse = |value: &str| {
+            Uuid::parse_str(value)
+                .map_err(|_| AppError::internal("ID bucket kuota di database tidak valid"))
+        };
+        Ok(QuotaBucket {
+            id: parse(&self.id)?,
+            key_id: parse(&self.key_id)?,
+            member_id: self
+                .member_id
+                .as_deref()
+                .map(parse)
+                .transpose()?,
+            order_id: self
+                .order_id
+                .as_deref()
+                .map(parse)
+                .transpose()?,
+            package_id: self
+                .package_id
+                .as_deref()
+                .map(parse)
+                .transpose()?,
+            total_hits: self.total_hits,
+            remaining_hits: self.remaining_hits,
+            expires_at: self.expires_at,
+            created_at: self.created_at,
+        })
+    }
+}
+
+async fn insert_bucket_row(
+    pool: &sqlx::MySqlPool,
+    bucket: &QuotaBucket,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(bucket.id.to_string())
+    .bind(bucket.key_id.to_string())
+    .bind(bucket.member_id.map(|id| id.to_string()))
+    .bind(bucket.order_id.map(|id| id.to_string()))
+    .bind(bucket.package_id.map(|id| id.to_string()))
+    .bind(bucket.total_hits)
+    .bind(bucket.remaining_hits)
+    .bind(bucket.expires_at)
+    .bind(bucket.created_at)
+    .execute(pool)
+    .await
+    .map(|_| ())
+}
+
+async fn update_bucket_row(
+    pool: &sqlx::MySqlPool,
+    bucket: &QuotaBucket,
+) -> Result<u64, sqlx::Error> {
+    sqlx::query(
+        "UPDATE quota_buckets SET total_hits = ?, remaining_hits = ? WHERE id = ?",
+    )
+    .bind(bucket.total_hits)
+    .bind(bucket.remaining_hits)
+    .bind(bucket.id.to_string())
+    .execute(pool)
+    .await
+    .map(|result| result.rows_affected())
 }
 
 struct StoreData {
@@ -129,6 +304,11 @@ struct QuotaWrite {
     prefix: String,
     remaining: u64,
     at: chrono::DateTime<Utc>,
+    /// Delta bucket dari gerakan ini (bucket_id, sisa baru bucket itu),
+    /// ditulis writer dalam pesan yang sama dengan snapshot agregat di
+    /// atas. None = gerakan agregat lama (grant/assign/adjust, yang
+    /// menulis baris bucket-nya sendiri) atau kunci tanpa bucket.
+    bucket: Option<(Uuid, u64)>,
 }
 
 /// Durable dashboard aggregates computed from `validation_requests`.
@@ -258,6 +438,7 @@ impl AdminStore {
                 member_id: None,
                 created_at: now,
             };
+            let demo_key_id = summary.id;
             api_keys.insert(
                 prefix,
                 ApiKeyRecord {
@@ -269,6 +450,9 @@ impl AdminStore {
                     expires_at: None,
                     package_id: None,
                     member_id: None,
+                    buckets: vec![crate::models::backfill_bucket_for_key(
+                        demo_key_id, None, None, 50_000, 50_000, None, now,
+                    )],
                 },
             );
         }
@@ -503,6 +687,50 @@ impl AdminStore {
             }
             Err(error) => tracing::warn!(?error, "Gagal memuat kunci API dari database"),
         }
+        // Bucket kuota: dibaca setelah kunci, ditempel per key_id, lalu
+        // diurutkan FIFO. Tabel belum ada (worker belum menjalankan
+        // migrasi 0023) = warn saja: kunci tetap jalan lewat agregat
+        // lama sampai migrasi diterapkan, bukan crash saat start.
+        match sqlx::query_as::<_, QuotaBucketRow>(
+            "SELECT id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at FROM quota_buckets",
+        )
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(rows) => {
+                let mut by_key: std::collections::HashMap<Uuid, Vec<QuotaBucket>> =
+                    std::collections::HashMap::new();
+                for row in rows {
+                    match row.into_bucket() {
+                        Ok(bucket) => {
+                            by_key.entry(bucket.key_id).or_default().push(bucket);
+                        }
+                        Err(error) => {
+                            tracing::warn!(?error, "Baris bucket kuota dilewati saat muat")
+                        }
+                    }
+                }
+                let now = Utc::now();
+                let mut data = self.data.write().await;
+                for record in data.api_keys.values_mut() {
+                    if let Some(buckets) = by_key.remove(&record.summary.id) {
+                        record.buckets = buckets;
+                        crate::models::sort_buckets_fifo(&mut record.buckets);
+                    } else if record.summary.status != "revoked" {
+                        // Safety net: kunci non-revoked tanpa baris bucket
+                        // (dibuat binary lama di jendela deploy campuran,
+                        // INSERT bucket gagal, atau crash replace di
+                        // antara DELETE dan INSERT) mendapat satu bucket
+                        // dari agregatnya — persis aturan backfill 0023.
+                        // Kunci revoked sengaja TIDAK di-seed: bucket-nya
+                        // sudah pindah ke kunci pengganti.
+                        seed_bucket_if_needed(record, now);
+                    }
+                }
+                tracing::info!("Bucket kuota dimuat dari database");
+            }
+            Err(error) => tracing::warn!(?error, "Gagal memuat bucket kuota dari database"),
+        }
     }
 
     async fn persist_package(&self, package: &AdminPackage) {
@@ -722,6 +950,38 @@ impl AdminStore {
                         }
                     }
                 }
+                // Bucket delta menyusul di pesan yang SAMA (bukan pesan
+                // terpisah), jadi urutan key-vs-bucket tidak pernah
+                // terbalik: baris bucket yang dipotong/dikembalikan
+                // ditulis setelah snapshot agregatnya, dengan retry yang
+                // sama. 0 baris = baris bucket hilang (hanya lewat
+                // intervensi manual / migrasi belum jalan): warn + lanjut,
+                // jangan loop selamanya; snapshot agregat sudah benar.
+                if let Some((bucket_id, bucket_remaining)) = write.bucket {
+                    let mut delay = std::time::Duration::from_secs(1);
+                    loop {
+                        match sqlx::query(
+                            "UPDATE quota_buckets SET remaining_hits = ? WHERE id = ?",
+                        )
+                        .bind(bucket_remaining)
+                        .bind(bucket_id.to_string())
+                        .execute(&pool)
+                        .await
+                        {
+                            Ok(result) => {
+                                if result.rows_affected() == 0 {
+                                    tracing::warn!(prefix = %write.prefix, bucket_id = %bucket_id, "Snapshot bucket tidak menemukan baris bucket di database (0 baris diubah); snapshot bucket hilang");
+                                }
+                                break;
+                            }
+                            Err(error) => {
+                                tracing::warn!(?error, prefix = %write.prefix, bucket_id = %bucket_id, "Gagal menyimpan sisa bucket ke database (writer); percobaan ulang");
+                                tokio::time::sleep(delay).await;
+                                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+                            }
+                        }
+                    }
+                }
             }
         });
         *slot = Some(tx);
@@ -752,12 +1012,25 @@ impl AdminStore {
     /// rare dropped write self-healing on the next movement. Without a
     /// writer (worker binary, tests) the UPDATE runs inline as before.
     async fn persist_key_quota(&self, prefix: &str, remaining_quota: u64) {
+        self.persist_key_quota_with_bucket(prefix, remaining_quota, None)
+            .await;
+    }
+
+    /// Seperti persist_key_quota, ditambah delta satu bucket (dipakai
+    /// reserve/refund jalur panas — bukan grant/assign/adjust).
+    async fn persist_key_quota_with_bucket(
+        &self,
+        prefix: &str,
+        remaining_quota: u64,
+        bucket: Option<(Uuid, u64)>,
+    ) {
         let tx = self.quota_tx.read().expect("quota writer lock").clone();
         if let Some(tx) = tx {
             let write = QuotaWrite {
                 prefix: prefix.to_owned(),
                 remaining: remaining_quota,
                 at: Utc::now(),
+                bucket,
             };
             match tx.try_send(write) {
                 Ok(()) => return,
@@ -776,7 +1049,7 @@ impl AdminStore {
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
             }
         }
-        self.persist_key_quota_direct(prefix, remaining_quota, Utc::now())
+        self.persist_key_quota_direct(prefix, remaining_quota, Utc::now(), bucket)
             .await;
     }
 
@@ -785,6 +1058,7 @@ impl AdminStore {
         prefix: &str,
         remaining_quota: u64,
         at: chrono::DateTime<Utc>,
+        bucket: Option<(Uuid, u64)>,
     ) {
         let Some(pool) = self.pool() else { return };
         match sqlx::query(
@@ -804,6 +1078,25 @@ impl AdminStore {
             }
             Err(error) => {
                 tracing::warn!(?error, prefix, "Gagal menyimpan sisa kuota ke database");
+            }
+        }
+        if let Some((bucket_id, bucket_remaining)) = bucket {
+            match sqlx::query(
+                "UPDATE quota_buckets SET remaining_hits = ? WHERE id = ?",
+            )
+            .bind(bucket_remaining)
+            .bind(bucket_id.to_string())
+            .execute(&pool)
+            .await
+            {
+                Ok(result) => {
+                    if result.rows_affected() == 0 {
+                        tracing::warn!(prefix, bucket_id = %bucket_id, "Snapshot bucket tidak menemukan baris bucket di database (0 baris diubah); snapshot bucket hilang");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(?error, prefix, bucket_id = %bucket_id, "Gagal menyimpan sisa bucket ke database");
+                }
             }
         }
     }
@@ -1483,10 +1776,11 @@ impl AdminStore {
 
     pub async fn list_api_keys(&self) -> Vec<AdminApiKeySummary> {
         let data = self.data.read().await;
+        let now = Utc::now();
         let mut keys = data
             .api_keys
             .values()
-            .map(|record| record.summary.clone())
+            .map(|record| record.live_view(now).0)
             .collect::<Vec<_>>();
         keys.sort_by(|left, right| right.created_at.cmp(&left.created_at));
         keys
@@ -1593,6 +1887,23 @@ impl AdminStore {
                         expires_at,
                         package_id,
                         member_id,
+                        // Kunci baru selalu lahir dengan satu bucket
+                        // (kecuali kuota 0 — grant nanti yang membuat
+                        // bucket pertamanya). Baris bucket di database
+                        // ditulis persist_new_key lanjutan di bawah.
+                        buckets: if quota_total > 0 {
+                            vec![crate::models::backfill_bucket_for_key(
+                                summary.id,
+                                member_id,
+                                package_id,
+                                quota_total,
+                                quota_total,
+                                expires_at,
+                                now,
+                            )]
+                        } else {
+                            Vec::new()
+                        },
                     };
                     data.api_keys.insert(prefix, record.clone());
                     issued = Some((record, plaintext_key));
@@ -1605,6 +1916,20 @@ impl AdminStore {
             };
             match self.persist_new_key(&record).await {
                 Ok(()) => {
+                    // Baris bucket menyusul (best-effort, bukan fail
+                    // closed): kunci sudah sah di memori + baris kunci
+                    // sudah tersimpan; bila INSERT bucket gagal, kunci
+                    // tetap jalan lewat agregat, dan safety net load
+                    // (synthesis) memulihkan bucket-nya saat restart.
+                    // Menggagalkan penerbitan di sini justru akan
+                    // meninggalkan baris kunci yatim di database.
+                    if let Some(pool) = self.pool() {
+                        if let Some(bucket) = record.buckets.first() {
+                            if let Err(error) = insert_bucket_row(&pool, bucket).await {
+                                tracing::warn!(?error, prefix = %record.summary.prefix, "Baris bucket kunci baru gagal ditulis; dipulihkan synthesis saat load");
+                            }
+                        }
+                    }
                     return Ok(CreatedApiKey {
                         key: record.summary.clone(),
                         plaintext_key,
@@ -1844,7 +2169,7 @@ impl AdminStore {
                     record.summary.created_at,
                 )
             })
-            .map(|record| (record.summary.clone(), record.remaining_quota))
+            .map(|record| record.live_view(Utc::now()))
     }
 
     /// Semua kunci milik satu member (semua status, terbaru dulu).
@@ -1857,11 +2182,12 @@ impl AdminStore {
         member_id: Uuid,
     ) -> Vec<(AdminApiKeySummary, u64)> {
         let data = self.data.read().await;
+        let now = Utc::now();
         let mut keys: Vec<(AdminApiKeySummary, u64)> = data
             .api_keys
             .values()
             .filter(|record| record.member_id == Some(member_id))
-            .map(|record| (record.summary.clone(), record.remaining_quota))
+            .map(|record| record.live_view(now))
             .collect();
         keys.sort_by(|a, b| b.0.created_at.cmp(&a.0.created_at));
         keys
@@ -1955,6 +2281,105 @@ impl AdminStore {
             return Err(AppError::conflict(
                 "Kunci tidak aktif; adjust hanya untuk kunci active",
             ));
+        }
+        // Jalur bucket (2026-10-26): kunci ber-bucket tidak memakai
+        // compute_adjusted_quota (agregat lama) — mutasinya di bucket.
+        // Positif: isi headroom bucket aktif FIFO dulu (total tidak naik
+        // selama masih ada pemakaian lama untuk diisi, persis aturan
+        // lama); negatif: konsumsi FIFO dari sisa aktif (sisa bucket
+        // kedaluwarsa sudah mati, jadi batas negatifnya adalah sisa
+        // aktif — lebih ketat dari aturan lama bila ada sisa kedaluwarsa).
+        if !record.buckets.is_empty() {
+            let now = Utc::now();
+            let (before_total, before_remaining, _) =
+                crate::models::bucket_aggregate(&record.buckets, now);
+            let mut buckets = record.buckets.clone();
+            let mut new_bucket: Option<QuotaBucket> = None;
+            if delta > 0 {
+                let remainder =
+                    crate::models::add_hits_to_buckets(&mut buckets, now, delta as u64);
+                if remainder > 0 {
+                    // Tidak ada bucket aktif sama sekali: bucket baru.
+                    // Expiry = expiry agregat lama bila masih future,
+                    // else tanpa expiry (input adjust tidak membawa
+                    // durasi, jadi tidak ada expiry yang bisa ditebak).
+                    let expiry = record.expires_at.filter(|expiry| *expiry > now);
+                    new_bucket = Some(QuotaBucket {
+                        id: Uuid::now_v7(),
+                        key_id,
+                        member_id: Some(member_id),
+                        order_id: None,
+                        package_id: record.package_id,
+                        total_hits: remainder,
+                        remaining_hits: remainder,
+                        expires_at: expiry,
+                        created_at: now,
+                    });
+                    buckets.push(new_bucket.clone().expect("bucket baru dibuat"));
+                }
+            } else {
+                crate::models::consume_buckets_fifo(&mut buckets, now, delta.unsigned_abs())
+                    .ok_or_else(|| {
+                        AppError::bad_request("Penyesuaian membuat sisa kuota negatif")
+                    })?;
+            }
+            let (new_total, new_remaining, _) =
+                crate::models::bucket_aggregate(&buckets, now);
+            let prefix = record.summary.prefix.clone();
+            if let Some(pool) = self.pool() {
+                // Baris bucket dulu (nilai absolut = idempotent saat
+                // retry), lalu agregat absolut. Guard status tetap ada;
+                // guard lantai sisa tidak dipakai di sini karena lantai
+                // sudah ditegakkan pada data bucket live di atas (nilai
+                // agregat database bisa basi bila expiry lewat tanpa
+                // mutasi, sehingga guard SQL bisa menolak adjust yang sah).
+                if let Some(bucket) = &new_bucket {
+                    insert_bucket_row(&pool, bucket).await.map_err(|error| {
+                        tracing::warn!(?error, prefix = %prefix, "Gagal menulis bucket baru saat adjust");
+                        AppError::internal("Adjust kuota tidak dapat disimpan")
+                    })?;
+                }
+                for bucket in &buckets {
+                    update_bucket_row(&pool, bucket).await.map_err(|error| {
+                        tracing::warn!(?error, prefix = %prefix, "Gagal menulis bucket saat adjust");
+                        AppError::internal("Adjust kuota tidak dapat disimpan")
+                    })?;
+                }
+                let updated = sqlx::query(
+                    "UPDATE admin_api_keys SET quota_remaining = ?, quota_total = ? WHERE id = ? AND member_id = ? AND status = 'active'",
+                )
+                .bind(new_remaining)
+                .bind(new_total)
+                .bind(key_id.to_string())
+                .bind(member_id.to_string())
+                .execute(&pool)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(?error, prefix = %prefix, "Gagal menulis adjust kuota ke database");
+                    AppError::internal("Adjust kuota tidak dapat disimpan")
+                })?;
+                if updated.rows_affected() == 0 {
+                    return Err(AppError::conflict(
+                        "Kunci berubah selama adjust; muat ulang dan coba lagi",
+                    ));
+                }
+            }
+            record.buckets = buckets;
+            // Sinkronisasi agregat juga menyegarkan expiry agregat ke
+            // nilai turunan bucket (koreksi tampilan, bukan perubahan
+            // masa berlaku — auth memakai tes bucket-aware, bukan field
+            // ini). Total/sisa mengikuti aturan agregat bucket.
+            record.sync_aggregates_from_buckets(now);
+            self.persist_key_quota(&prefix, new_remaining).await;
+            return Ok(QuotaAdjustment {
+                key_id,
+                prefix,
+                delta,
+                quota_total_before: before_total,
+                quota_total_after: new_total,
+                quota_remaining_before: before_remaining,
+                quota_remaining_after: new_remaining,
+            });
         }
         let (new_total, new_remaining) =
             compute_adjusted_quota(record.quota_total, record.remaining_quota, delta)?;
@@ -2059,10 +2484,12 @@ impl AdminStore {
     }
 
     /// Apply a package (or manual plan) to the member's key.
-    /// mode "replace": quota and validity restart from the plan's values.
-    /// mode "add": quota is added; validity extends from the later of now
-    /// and the current expiry. Rate limit follows the plan when provided
-    /// (package value or manual override); None keeps the current limit.
+    /// Bucket (2026-10-26): mode "replace" menghapus semua bucket lalu
+    /// membuat satu bucket (kuota baru, expiry = sekarang + valid_days).
+    /// mode "add" menambah satu bucket baru (expiry = assign +
+    /// valid_days) tanpa memperpanjang bucket lama. Rate limit follows
+    /// the plan when provided (package value or manual override); None
+    /// keeps the current limit.
     ///
     /// CATATAN (audit 2026-10-25, K1 — sengaja TIDAK diselaraskan ke
     /// `active` seperti grant): assign adalah aksi admin EKSPLISIT,
@@ -2104,30 +2531,40 @@ impl AdminStore {
             record.clone()
         };
         let now = Utc::now();
+        // Bucket (2026-10-26): stacking-expiry lama dihapus di kedua mode.
+        // replace = hapus semua bucket, satu bucket baru (kuota baru,
+        // expiry = sekarang + valid_days) — tampilan luarnya sama persis
+        // (total = sisa = kuota baru, expiry dari sekarang). add = satu
+        // bucket baru per assign (expiry = assign + valid_days); bucket
+        // lama tidak diperpanjang. Agregat selalu dihitung dari bucket.
+        let new_bucket = crate::models::new_purchase_bucket(
+            record.summary.id,
+            record.member_id,
+            None,
+            package_id,
+            quota_hits,
+            valid_days,
+            now,
+        );
+        let mut seeded_bucket: Option<QuotaBucket> = None;
         match mode {
             "replace" => {
-                record.quota_total = quota_hits;
-                record.remaining_quota = quota_hits;
-                record.expires_at = Some(now + chrono::Duration::days(valid_days));
+                record.buckets = vec![new_bucket.clone()];
             }
             "add" => {
-                record.quota_total = record.quota_total.saturating_add(quota_hits);
-                record.remaining_quota = record.remaining_quota.saturating_add(quota_hits);
-                let base = record
-                    .expires_at
-                    .filter(|expiry| *expiry > now)
-                    .unwrap_or(now);
-                record.expires_at = Some(base + chrono::Duration::days(valid_days));
+                if seed_bucket_if_needed(&mut record, now) {
+                    seeded_bucket = record.buckets.first().cloned();
+                }
+                record.buckets.push(new_bucket.clone());
             }
             _ => return Err(AppError::bad_request("Mode paket tidak dikenal")),
         }
+        record.sync_aggregates_from_buckets(now);
         if let Some(rate) = rate_limit_per_minute {
             record.summary.rate_limit_per_minute = rate;
         }
         record.package_id = package_id;
         record.summary.package_id = package_id;
-        record.summary.quota_total = record.quota_total;
-        record.summary.expires_at = record.expires_at;
         // Database FIRST (audit 2026-10-25, B5): a failed persist now fails
         // the assign instead of diverging silently, and a crash between the
         // database write and the memory update reloads the assigned values
@@ -2135,6 +2572,41 @@ impl AdminStore {
         // snapshot under the same lock, so the writer applies snapshots in
         // true order (an older queued snapshot can no longer land after
         // the assign and erase it from the database).
+        // Urutan tulis database: baris bucket DULU, baru agregat kunci.
+        // Bila crash di antara keduanya, load synthesis membangun ulang
+        // bucket dari agregat baru — hasil akhirnya tetap assign yang
+        // dimaksud, bukan saldo ganda/hilang.
+        if let Some(pool) = self.pool() {
+            match mode {
+                "replace" => {
+                    sqlx::query("DELETE FROM quota_buckets WHERE key_id = ?")
+                        .bind(record.summary.id.to_string())
+                        .execute(&pool)
+                        .await
+                        .map_err(|error| {
+                            tracing::warn!(?error, "Gagal menghapus bucket lama saat assign-replace");
+                            AppError::internal("Assign paket tidak dapat disimpan")
+                        })?;
+                    insert_bucket_row(&pool, &new_bucket).await.map_err(|error| {
+                        tracing::warn!(?error, "Gagal menulis bucket baru saat assign-replace");
+                        AppError::internal("Assign paket tidak dapat disimpan")
+                    })?;
+                }
+                "add" => {
+                    if let Some(seed) = &seeded_bucket {
+                        insert_bucket_row(&pool, seed).await.map_err(|error| {
+                            tracing::warn!(?error, "Gagal menulis bucket seed saat assign-add");
+                            AppError::internal("Assign paket tidak dapat disimpan")
+                        })?;
+                    }
+                    insert_bucket_row(&pool, &new_bucket).await.map_err(|error| {
+                        tracing::warn!(?error, "Gagal menulis bucket baru saat assign-add");
+                        AppError::internal("Assign paket tidak dapat disimpan")
+                    })?;
+                }
+                _ => unreachable!("mode sudah divalidasi di atas"),
+            }
+        }
         self.persist_key(&record).await?;
         {
             let mut data = self.data.write().await;
@@ -2222,19 +2694,46 @@ impl AdminStore {
         }
         let key_id = record.summary.id;
         let key_prefix = record.summary.prefix.clone();
-        let effect = crate::models::compute_grant_effect(
-            record.quota_total,
-            record.remaining_quota,
-            record.expires_at,
-            Utc::now(),
+        // Bucket (2026-10-26): grant = satu bucket baru (expiry = beli +
+        // valid_days), BUKAN stacking dari expiry lama. Semua dihitung
+        // dari salinan bucket dulu — record memori baru diubah SETELAH
+        // commit, seperti dulu (effect hanya dihitung, bukan diterapkan).
+        let now = Utc::now();
+        let mut buckets_after = record.buckets.clone();
+        let seeded_bucket = if needs_seed(record) {
+            let seed = crate::models::backfill_bucket_for_key(
+                key_id,
+                record.member_id,
+                record.package_id,
+                record.quota_total,
+                record.remaining_quota,
+                record.expires_at,
+                now,
+            );
+            buckets_after.push(seed.clone());
+            Some(seed)
+        } else {
+            None
+        };
+        let new_bucket = crate::models::new_purchase_bucket(
+            key_id,
+            record.member_id,
+            Some(order_id),
+            Some(package_id),
             quota_hits,
             valid_days,
-            record.summary.rate_limit_per_minute,
-            package_rate,
+            now,
         );
-        // Transaksi atomik: baris kunci + baris order + plan_kind berubah
-        // bersamaan, dengan CAS o.status = 'paid'. Hanya satu grant yang
-        // menang; grant lain untuk order yang sama melihat AlreadyGranted.
+        buckets_after.push(new_bucket.clone());
+        let (new_total, new_remaining, new_expiry) =
+            crate::models::bucket_aggregate(&buckets_after, now);
+        let new_rate = record.summary.rate_limit_per_minute.max(package_rate);
+        // Transaksi atomik: baris kunci + baris order + baris bucket +
+        // plan_kind berubah bersamaan, dengan CAS o.status = 'paid'.
+        // Hanya satu grant yang menang; grant lain untuk order yang sama
+        // melihat AlreadyGranted. granted_quota/granted_expires_at kini
+        // = bucket baru itu (dulu granted_quota diisi sisa agregat baru
+        // — keliru sebagai "kuota yang di-grant" — kini = hit paket).
         let mut tx = pool
             .begin()
             .await
@@ -2249,13 +2748,13 @@ impl AdminStore {
                  AND k.status = 'active'",
         )
         .bind(order_id.to_string())
-        .bind(effect.new_total)
-        .bind(effect.new_remaining)
-        .bind(effect.new_expires_at)
-        .bind(effect.new_rate_limit_per_minute)
+        .bind(new_total)
+        .bind(new_remaining)
+        .bind(new_expiry)
+        .bind(new_rate)
         .bind(package_id.to_string())
-        .bind(effect.new_remaining)
-        .bind(effect.new_expires_at)
+        .bind(quota_hits)
+        .bind(new_bucket.expires_at)
         .bind(key_id.to_string())
         .bind(key_id.to_string())
         .bind(member_id.to_string())
@@ -2286,6 +2785,25 @@ impl AdminStore {
                 )),
             };
         }
+        // Bucket baru (+ seed bila ada) masuk transaksi yang sama:
+        // gagal di sini = rollback total, bukan grant tanpa bucket.
+        for bucket in seeded_bucket.iter().chain(std::iter::once(&new_bucket)) {
+            sqlx::query(
+                "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(bucket.id.to_string())
+            .bind(bucket.key_id.to_string())
+            .bind(bucket.member_id.map(|id| id.to_string()))
+            .bind(bucket.order_id.map(|id| id.to_string()))
+            .bind(bucket.package_id.map(|id| id.to_string()))
+            .bind(bucket.total_hits)
+            .bind(bucket.remaining_hits)
+            .bind(bucket.expires_at)
+            .bind(bucket.created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| AppError::internal("Bucket grant gagal ditulis"))?;
+        }
         sqlx::query("UPDATE members SET plan_kind = 'package' WHERE id = ?")
             .bind(member_id.to_string())
             .execute(&mut *tx)
@@ -2298,21 +2816,18 @@ impl AdminStore {
         // snapshot kuota lewat channel — semuanya di bawah data lock,
         // sesuai invarian reserve_quota (snapshot basi tidak boleh
         // menimpa grant).
-        record.quota_total = effect.new_total;
-        record.remaining_quota = effect.new_remaining;
-        record.expires_at = Some(effect.new_expires_at);
+        record.buckets = buckets_after;
+        record.sync_aggregates_from_buckets(now);
         record.package_id = Some(package_id);
-        record.summary.quota_total = effect.new_total;
-        record.summary.expires_at = Some(effect.new_expires_at);
-        record.summary.rate_limit_per_minute = effect.new_rate_limit_per_minute;
+        record.summary.rate_limit_per_minute = new_rate;
         record.summary.package_id = Some(package_id);
-        self.persist_key_quota(&key_prefix, effect.new_remaining)
+        self.persist_key_quota(&key_prefix, new_remaining)
             .await;
         drop(data);
         Ok(GrantOutcome::Granted {
-            new_total: effect.new_total,
-            new_remaining: effect.new_remaining,
-            new_rate_limit_per_minute: effect.new_rate_limit_per_minute,
+            new_total,
+            new_remaining,
+            new_rate_limit_per_minute: new_rate,
         })
     }
 
@@ -2401,7 +2916,10 @@ impl AdminStore {
     }
 
     /// Revoke the member's current key and issue a replacement carrying the
-    /// same quota, expiry, rate limit, and package link.
+    /// same quota, expiry, rate limit, and package link — including the
+    /// old key's buckets, which MOVE to the replacement (buckets are
+    /// owned by the key; the revoked key keeps only its aggregate
+    /// display, never spendable buckets).
     ///
     /// Serialized per member (audit flow B4): the guard is held for the
     /// ENTIRE function — the old code revoked under a momentary lock,
@@ -2442,37 +2960,115 @@ impl AdminStore {
             return Err(AppError::not_found("Member belum memiliki kunci API"));
         };
         self.persist_key(&old).await?;
+        // Terbitkan kunci pengganti dengan kuota 0 (BUKAN old.quota_total):
+        // issue dengan kuota lama akan membuat satu bucket segar (total
+        // lama, expiry lama) yang lalu harus dihapus lagi saat bucket
+        // lama dipindah — jendela ganda yang tidak perlu. Kuota + bucket
+        // diatur dari kunci lama di blok adjusted di bawah.
         let mut created = self
             .issue_api_key(
                 old.summary.name.clone(),
                 old.summary.scopes.clone(),
                 old.summary.rate_limit_per_minute,
-                old.quota_total,
+                0,
                 old.expires_at,
                 old.package_id,
                 Some(member.id),
             )
             .await?;
-        // Preserve the remaining balance (issue_api_key starts full) and
-        // the previous status (a disabled key's replacement stays disabled).
+        // Pindahkan saldo ke kunci baru (bucket ikut pindah — bucket
+        // dimiliki KEY, dan regenerasi memindahkan kepemilikan itu) dan
+        // pertahankan status sebelumnya (kunci disabled yang diganti
+        // tetap disabled).
         let adjusted = {
             let mut data = self.data.write().await;
-            match data.api_keys.get_mut(&created.key.prefix) {
-                Some(record) => {
-                    record.remaining_quota = old.remaining_quota.min(record.quota_total);
-                    if previous_status == "disabled" {
-                        record.summary.status = "disabled".to_owned();
-                    }
-                    Some(record.clone())
+            let mut result = None;
+            if let Some(record) = data.api_keys.get_mut(&created.key.prefix) {
+                if !old.buckets.is_empty() {
+                    // Bucket pindah dengan key_id ditulis ulang ke kunci
+                    // baru; agregat dihitung ulang dari bucket yang
+                    // pindah (sisa AKTIF — sisa bucket kedaluwarsa mati
+                    // bersama kunci lama, konsisten dengan semantik
+                    // bucket; bucket segar dari issue dibuang).
+                    let now = Utc::now();
+                    record.buckets = old
+                        .buckets
+                        .iter()
+                        .map(|bucket| {
+                            let mut moved = bucket.clone();
+                            moved.key_id = record.summary.id;
+                            moved
+                        })
+                        .collect();
+                    record.sync_aggregates_from_buckets(now);
+                } else {
+                    // Kunci legacy tanpa bucket: pulihkan agregat lama
+                    // persis (dulu: remaining lama dibatasi total baru —
+                    // total baru kini 0 dari issue, jadi pemulihan
+                    // eksplisit ini wajib agar saldo tidak lenyap).
+                    record.quota_total = old.quota_total;
+                    record.remaining_quota = old.remaining_quota;
+                    record.expires_at = old.expires_at;
+                    record.summary.quota_total = old.quota_total;
+                    record.summary.expires_at = old.expires_at;
                 }
-                None => None,
+                if previous_status == "disabled" {
+                    record.summary.status = "disabled".to_owned();
+                }
+                result = Some(record.clone());
             }
+            // Kunci lama kehilangan bucket-nya (sudah pindah); agregat
+            // lamanya tetap sebagai tampilan historis lewat jalur legacy
+            // (buckets kosong = fallback nilai tersimpan).
+            if let Some(old_record) = data.api_keys.get_mut(&old.summary.prefix) {
+                old_record.buckets.clear();
+            }
+            result
         };
         if let Some(record) = adjusted {
             // A failed adjust persist must fail the whole regeneration: a
             // disabled member's replacement key must never stay active in
             // the database (it would reactivate the account on restart).
             self.persist_key(&record).await?;
+            // Pindah baris bucket di database dalam satu transaksi
+            // (hapus baris kunci lama, tulis baris yang pindah). Gagal
+            // di sini = warn saja, bukan gagal total: kunci pengganti
+            // sudah sah + agregatnya sudah tersimpan, dan safety net
+            // load (synthesis) membangun ulang bucket-nya dari agregat
+            // saat restart; baris kunci lama yang tertinggal tidak bisa
+            // dibelanjakan karena kunci lama sudah revoked.
+            if let Some(pool) = self.pool() {
+                let moved = record.buckets.clone();
+                let old_id = old.summary.id.to_string();
+                let move_result = async {
+                    let mut tx = pool.begin().await?;
+                    sqlx::query("DELETE FROM quota_buckets WHERE key_id = ?")
+                        .bind(&old_id)
+                        .execute(&mut *tx)
+                        .await?;
+                    for bucket in &moved {
+                        sqlx::query(
+                            "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        )
+                        .bind(bucket.id.to_string())
+                        .bind(bucket.key_id.to_string())
+                        .bind(bucket.member_id.map(|id| id.to_string()))
+                        .bind(bucket.order_id.map(|id| id.to_string()))
+                        .bind(bucket.package_id.map(|id| id.to_string()))
+                        .bind(bucket.total_hits)
+                        .bind(bucket.remaining_hits)
+                        .bind(bucket.expires_at)
+                        .bind(bucket.created_at)
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                    tx.commit().await
+                }
+                .await;
+                if let Err(error) = move_result {
+                    tracing::warn!(?error, "Gagal memindahkan baris bucket saat regenerasi; dipulihkan synthesis saat load");
+                }
+            }
             // The response must reflect the adjusted record (preserved
             // status/balance), not the just-issued snapshot.
             created.key = record.summary;
@@ -2587,20 +3183,23 @@ impl AdminStore {
                 "API key telah dinonaktifkan atau dicabut",
             ));
         }
-        if let Some(expires_at) = record.expires_at {
-            if expires_at <= Utc::now() {
-                return Err(AppError::forbidden(
-                    "Masa aktif API key telah berakhir. Silakan perpanjang paket Anda.",
-                ));
-            }
+        // Bucket-aware (2026-10-26): kunci baru kedaluwarsa bila SEMUA
+        // bucket lewat expiry. Memakai expires_at agregat di sini akan
+        // memblokir bucket yang expiry-nya masih jauh begitu bucket
+        // terdekat lewat — persis yang diperbaiki bucket.
+        if record.key_expired(Utc::now()) {
+            return Err(AppError::forbidden(
+                "Masa aktif API key telah berakhir. Silakan perpanjang paket Anda.",
+            ));
         }
+        let live_remaining = record.live_view(Utc::now()).1;
         Ok(ApiKeyContext {
             key_id: record.summary.id,
             prefix: record.summary.prefix,
             owner_id: record.member_id,
             organization_id: None,
             scopes: record.summary.scopes,
-            remaining_quota: record.remaining_quota,
+            remaining_quota: live_remaining,
             rate_limit_per_minute: record.summary.rate_limit_per_minute,
         })
     }
@@ -2623,25 +3222,25 @@ impl AdminStore {
             ));
         }
 
-        if let Some(expires_at) = record.expires_at {
-            if expires_at <= Utc::now() {
-                return Err(AppError::forbidden(
-                    "Masa aktif API key telah berakhir. Silakan perpanjang paket Anda.",
-                ));
-            }
+        // Bucket-aware, sama seperti api_key_context_by_prefix di atas.
+        if record.key_expired(Utc::now()) {
+            return Err(AppError::forbidden(
+                "Masa aktif API key telah berakhir. Silakan perpanjang paket Anda.",
+            ));
         }
 
         if !verify_secret(&secret, &record.secret_hash) {
             return Err(AppError::unauthorized("API key tidak valid"));
         }
 
+        let live_remaining = record.live_view(Utc::now()).1;
         Ok(ApiKeyContext {
             key_id: record.summary.id,
             prefix: record.summary.prefix,
             owner_id: record.member_id,
             organization_id: None,
             scopes: record.summary.scopes,
-            remaining_quota: record.remaining_quota,
+            remaining_quota: live_remaining,
             rate_limit_per_minute: record.summary.rate_limit_per_minute,
         })
     }
@@ -2652,15 +3251,100 @@ impl AdminStore {
         let data = self.data.read().await;
         data.api_keys
             .get(prefix)
-            .map(|record| (record.summary.clone(), record.remaining_quota))
+            .map(|record| record.live_view(Utc::now()))
     }
 
-    pub async fn reserve_quota(&self, prefix: &str) -> Result<u64, AppError> {
+    /// Bucket mentah kunci ini (urutan FIFO), untuk komputasi preview
+    /// pembelian. Kunci tak dikenal = daftar kosong.
+    pub async fn key_bucket_list(&self, prefix: &str) -> Vec<QuotaBucket> {
+        let data = self.data.read().await;
+        let Some(record) = data.api_keys.get(prefix) else {
+            return Vec::new();
+        };
+        let mut buckets = record.buckets.clone();
+        crate::models::sort_buckets_fifo(&mut buckets);
+        buckets
+    }
+
+    /// Bucket kunci ini untuk tampilan (overview member, detail admin,
+    /// preview pembelian): urutan FIFO, nama paket di-resolve dari
+    /// package_id. Kunci tak dikenal = daftar kosong.
+    pub async fn key_buckets(&self, prefix: &str) -> Vec<QuotaBucketView> {
+        let data = self.data.read().await;
+        let Some(record) = data.api_keys.get(prefix) else {
+            return Vec::new();
+        };
+        let mut buckets = record.buckets.clone();
+        crate::models::sort_buckets_fifo(&mut buckets);
+        buckets
+            .iter()
+            .map(|bucket| QuotaBucketView {
+                id: bucket.id,
+                order_id: bucket.order_id,
+                package_name: bucket.package_id.and_then(|package_id| {
+                    data.packages
+                        .get(&package_id)
+                        .map(|package| package.name.clone())
+                }),
+                total_hits: bucket.total_hits,
+                remaining_hits: bucket.remaining_hits,
+                expires_at: bucket.expires_at,
+            })
+            .collect()
+    }
+
+    /// Potong 1 hit dari bucket FIFO-pertama yang masih aktif. "Habis"
+    /// = total sisa bucket AKTIF 0 (sisa bucket kedaluwarsa tidak
+    /// dihitung) — itulah yang menutup celah expiry agregat: kunci
+    /// dengan bucket lama kedaluwarsa + bucket baru masih jalan selama
+    /// bucket barunya bersisa. Mengembalikan (sisa agregat aktif,
+    /// bucket_id yang dipotong) — pemanggil WAJIB meneruskan bucket_id
+    /// ke refund_quota agar pengembalian mendarat di bucket yang sama.
+    /// Kunci legacy (tanpa bucket) memakai jalur agregat lama dan
+    /// mengembalikan bucket_id None.
+    pub async fn reserve_quota(
+        &self,
+        prefix: &str,
+    ) -> Result<(u64, Option<Uuid>), AppError> {
         let mut data = self.data.write().await;
         let record = data
             .api_keys
             .get_mut(prefix)
             .ok_or_else(|| AppError::unauthorized("API key tidak dikenali"))?;
+        let now = Utc::now();
+        if !record.buckets.is_empty() {
+            let touched = crate::models::consume_buckets_fifo(&mut record.buckets, now, 1);
+            let Some(touched) = touched else {
+                return Err(AppError::new(
+                    axum::http::StatusCode::PAYMENT_REQUIRED,
+                    "quota_exhausted",
+                    "Kuota API sudah habis. Silakan lakukan top up atau ubah paket.",
+                ));
+            };
+            // Reserve 1 hit menyentuh tepat satu bucket.
+            let (bucket_id, bucket_remaining) = touched
+                .into_iter()
+                .next()
+                .expect("konsumsi 1 hit menyentuh tepat satu bucket");
+            record.sync_aggregates_from_buckets(now);
+            record.summary.last_used_at = Some(now);
+            let remaining = record.remaining_quota;
+            // Ordering invariant (learned live: 8 concurrent validations
+            // once persisted only 7 decrements): snapshots must reach
+            // MySQL in the order memory mutated. The mutation and the
+            // writer-channel send both happen under this lock, and the
+            // single writer consumes FIFO — the same guarantee without
+            // holding the lock across MySQL I/O. Pesan writer membawa
+            // delta bucket dalam pesan yang sama (bukan pesan terpisah).
+            self.persist_key_quota_with_bucket(
+                prefix,
+                remaining,
+                Some((bucket_id, bucket_remaining)),
+            )
+            .await;
+            drop(data);
+            return Ok((remaining, Some(bucket_id)));
+        }
         if record.remaining_quota == 0 {
             return Err(AppError::new(
                 axum::http::StatusCode::PAYMENT_REQUIRED,
@@ -2669,7 +3353,7 @@ impl AdminStore {
             ));
         }
         record.remaining_quota -= 1;
-        record.summary.last_used_at = Some(Utc::now());
+        record.summary.last_used_at = Some(now);
         let remaining = record.remaining_quota;
         // Ordering invariant (learned live: 8 concurrent validations once
         // persisted only 7 decrements): snapshots must reach MySQL in the
@@ -2678,34 +3362,52 @@ impl AdminStore {
         // the same guarantee without holding the lock across MySQL I/O.
         self.persist_key_quota(prefix, remaining).await;
         drop(data);
-        Ok(remaining)
+        Ok((remaining, None))
     }
 
     /// Live remaining quota for a prefix, if the key is known in memory.
+    /// Kunci ber-bucket: sisa aktif live (lewatnya expiry langsung
+    /// terlihat); kunci legacy: nilai tersimpan.
     pub async fn quota_remaining(&self, prefix: &str) -> Option<u64> {
         let data = self.data.read().await;
         data.api_keys
             .get(prefix)
-            .map(|record| record.remaining_quota)
+            .map(|record| record.live_view(Utc::now()).1)
     }
 
-    pub async fn refund_quota(&self, prefix: &str) {
+    /// Kembalikan 1 hit KE BUCKET YANG TADI DIPOTONG (bucket_id dari
+    /// reserve_quota), dibatasi total bucket itu (audit 2026-10-25, K1:
+    /// refund tanpa cap bisa mencetak hit gratis bila grant mendarat di
+    /// antara reserve dan refund). bucket_id None = jalur agregat lama
+    /// (kunci legacy) atau fallback bucket FIFO-pertama bila kunci
+    /// ternyata ber-bucket.
+    pub async fn refund_quota(&self, prefix: &str, bucket_id: Option<Uuid>) {
         let mut data = self.data.write().await;
-        let remaining = match data.api_keys.get_mut(prefix) {
+        let now = Utc::now();
+        let movement = match data.api_keys.get_mut(prefix) {
             Some(record) => {
-                // Capped at the quota total (audit 2026-10-25, K1): an
-                // uncapped refund could mint a free hit when a grant landed
-                // between the reserve and the refund.
-                record.remaining_quota =
-                    record.remaining_quota.saturating_add(1).min(record.quota_total);
-                Some(record.remaining_quota)
+                if !record.buckets.is_empty() {
+                    match crate::models::refund_bucket(&mut record.buckets, now, bucket_id) {
+                        Some((id, bucket_remaining)) => {
+                            record.sync_aggregates_from_buckets(now);
+                            Some((record.remaining_quota, Some((id, bucket_remaining))))
+                        }
+                        None => None,
+                    }
+                } else {
+                    // Jalur legacy: cap di total agregat, seperti dulu.
+                    record.remaining_quota =
+                        record.remaining_quota.saturating_add(1).min(record.quota_total);
+                    Some((record.remaining_quota, None))
+                }
             }
             None => None,
         };
-        if let Some(remaining) = remaining {
+        if let Some((remaining, bucket)) = movement {
             // Same ordering rule as reserve_quota: the send happens under
             // the lock so a refund can never overtake its reserve.
-            self.persist_key_quota(prefix, remaining).await;
+            self.persist_key_quota_with_bucket(prefix, remaining, bucket)
+                .await;
         }
     }
 
@@ -3754,6 +4456,9 @@ impl ApiKeyRow {
             expires_at: self.expires_at,
             package_id,
             member_id,
+            // Bucket diisi tahap load terpisah (load_persisted), bukan
+            // dari baris kunci ini — lihat safety net synthesis di sana.
+            buckets: Vec::new(),
         })
     }
 }
@@ -4202,5 +4907,249 @@ mod quota_adjust_tests {
             .member_daily_usage_from_ledger(member.id, 30)
             .await
             .is_empty());
+    }
+}
+
+#[cfg(test)]
+mod quota_bucket_tests {
+    use super::*;
+    use crate::models::MemberAccount;
+
+    fn member_fixture() -> MemberAccount {
+        MemberAccount {
+            id: Uuid::now_v7(),
+            google_sub: "google-sub-bucket".to_owned(),
+            email: "member-bucket@example.test".to_owned(),
+            name: Some("Member Bucket".to_owned()),
+            picture_url: None,
+            plan_kind: "manual".to_owned(),
+            status: "active".to_owned(),
+            created_at: Utc::now(),
+            last_login_at: None,
+        }
+    }
+
+    async fn key_with_expiry(
+        store: &AdminStore,
+        member: &MemberAccount,
+        quota_total: u64,
+        expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> AdminApiKeySummary {
+        let created = store
+            .create_member_api_key(member, quota_total, expires_at, 60)
+            .await
+            .expect("kunci fixture terbit");
+        drop(created.plaintext_key);
+        created.key
+    }
+
+    /// Kunci 2 bucket: A (expiry +10 hari) + B via assign-add (+30 hari).
+    async fn two_bucket_key(
+        store: &AdminStore,
+        member: &MemberAccount,
+    ) -> (AdminApiKeySummary, Uuid, Uuid) {
+        let now = Utc::now();
+        let key = key_with_expiry(
+            store,
+            member,
+            100,
+            Some(now + chrono::Duration::days(10)),
+        )
+        .await;
+        store
+            .assign_plan_to_member_key(member.id, 50, 30, "add", None, None, "package")
+            .await
+            .expect("assign-add membuat bucket kedua");
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        assert_eq!(buckets.len(), 2, "harus ada 2 bucket: {:?}", buckets);
+        // Urutan FIFO: A (+10 hari) dulu, B (+30 hari) kemudian.
+        assert_eq!(buckets[0].total_hits, 100);
+        assert_eq!(buckets[1].total_hits, 50);
+        let first_id = buckets[0].id;
+        let second_id = buckets[1].id;
+        (key, first_id, second_id)
+    }
+
+    #[tokio::test]
+    async fn reserve_consumes_fifo_and_refund_returns_to_same_bucket() {
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let member = member_fixture();
+        let (key, first_id, second_id) = two_bucket_key(&store, &member).await;
+        // Reserve 1 hit: dari bucket A (terdekat), bukan B.
+        let (remaining, bucket_id) = store
+            .reserve_quota(&key.prefix)
+            .await
+            .expect("reserve lolos");
+        assert_eq!(remaining, 149);
+        assert_eq!(bucket_id, Some(first_id));
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        assert_eq!(
+            buckets.iter().find(|b| b.id == first_id).unwrap().remaining_hits,
+            99
+        );
+        assert_eq!(
+            buckets.iter().find(|b| b.id == second_id).unwrap().remaining_hits,
+            50
+        );
+        // Refund ke bucket yang sama: A kembali 100, B tetap 50.
+        store.refund_quota(&key.prefix, bucket_id).await;
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        assert_eq!(
+            buckets.iter().find(|b| b.id == first_id).unwrap().remaining_hits,
+            100
+        );
+        assert_eq!(
+            buckets.iter().find(|b| b.id == second_id).unwrap().remaining_hits,
+            50
+        );
+        assert_eq!(store.quota_remaining(&key.prefix).await, Some(150));
+    }
+
+    #[tokio::test]
+    async fn reserve_skips_expired_bucket_and_empty_active_means_402() {
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let member = member_fixture();
+        let now = Utc::now();
+        // Bucket A sudah kedaluwarsa (50 sisa mati), bucket B aktif (30).
+        let key = key_with_expiry(
+            &store,
+            &member,
+            50,
+            Some(now - chrono::Duration::days(1)),
+        )
+        .await;
+        store
+            .assign_plan_to_member_key(member.id, 30, 30, "add", None, None, "package")
+            .await
+            .expect("assign-add");
+        // Sisa tampil = aktif saja (30), bukan 80.
+        assert_eq!(store.quota_remaining(&key.prefix).await, Some(30));
+        // Habiskan 30 dari bucket B; bucket A tidak pernah tersentuh.
+        for _ in 0..30 {
+            store
+                .reserve_quota(&key.prefix)
+                .await
+                .expect("reserve dari bucket aktif");
+        }
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        assert_eq!(
+            buckets.iter().find(|b| b.total_hits == 50).unwrap().remaining_hits,
+            50,
+            "bucket kedaluwarsa tidak boleh dipotong"
+        );
+        // Sisa aktif 0 -> 402 dengan pesan yang SAMA persis seperti dulu.
+        let error = store
+            .reserve_quota(&key.prefix)
+            .await
+            .expect_err("sisa aktif 0 harus 402");
+        assert_eq!(error.status, axum::http::StatusCode::PAYMENT_REQUIRED);
+        assert_eq!(error.code, "quota_exhausted");
+        assert_eq!(
+            error.message,
+            "Kuota API sudah habis. Silakan lakukan top up atau ubah paket."
+        );
+    }
+
+    #[tokio::test]
+    async fn assign_add_creates_bucket_and_replace_resets_buckets() {
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let member = member_fixture();
+        let (key, _, _) = two_bucket_key(&store, &member).await;
+        let (_, remaining) = store.member_key(member.id).await.unwrap();
+        assert_eq!(remaining, 150);
+        // Replace: semua bucket lama hilang, satu bucket baru 200 hit.
+        let (summary, remaining) = store
+            .assign_plan_to_member_key(member.id, 200, 30, "replace", None, None, "package")
+            .await
+            .expect("assign-replace");
+        assert_eq!(remaining, 200);
+        assert_eq!(summary.quota_total, 200);
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].total_hits, 200);
+        assert_eq!(buckets[0].remaining_hits, 200);
+    }
+
+    #[tokio::test]
+    async fn adjust_consumes_and_refills_fifo_buckets() {
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let member = member_fixture();
+        let (key, first_id, second_id) = two_bucket_key(&store, &member).await;
+        // -120 FIFO: A (+10 hari, 100) habis dulu, lalu B 20
+        // -> A 0, B 30, sisa 30, total tetap 150.
+        let outcome = store
+            .adjust_member_key_quota(member.id, key.id, -120)
+            .await
+            .expect("adjust negatif lolos");
+        assert_eq!(outcome.quota_remaining_after, 30);
+        assert_eq!(outcome.quota_total_after, 150);
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        assert_eq!(
+            buckets.iter().find(|b| b.id == first_id).unwrap().remaining_hits,
+            0
+        );
+        assert_eq!(
+            buckets.iter().find(|b| b.id == second_id).unwrap().remaining_hits,
+            30
+        );
+        // +200: isi headroom A (100) + B (20) = 120, sisa 80 menaikkan
+        // total bucket FIFO-pertama (A): A 180, B 50, total 230, sisa 230.
+        let outcome = store
+            .adjust_member_key_quota(member.id, key.id, 200)
+            .await
+            .expect("adjust positif lolos");
+        assert_eq!(outcome.quota_remaining_after, 230);
+        assert_eq!(outcome.quota_total_after, 230);
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        assert_eq!(
+            buckets.iter().find(|b| b.id == first_id).unwrap().total_hits,
+            180
+        );
+        assert_eq!(
+            buckets.iter().find(|b| b.id == second_id).unwrap().total_hits,
+            50
+        );
+        // Negatif melebihi sisa aktif ditolak tanpa perubahan.
+        assert!(store
+            .adjust_member_key_quota(member.id, key.id, -231)
+            .await
+            .is_err());
+        assert_eq!(store.quota_remaining(&key.prefix).await, Some(230));
+    }
+
+    #[tokio::test]
+    async fn regenerate_moves_buckets_to_new_key() {
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let member = member_fixture();
+        let (old_key, _, _) = two_bucket_key(&store, &member).await;
+        store
+            .reserve_quota(&old_key.prefix)
+            .await
+            .expect("satu reserve sebelum regenerasi");
+        let created = store
+            .regenerate_member_key(&member)
+            .await
+            .expect("regenerasi lolos");
+        drop(created.plaintext_key);
+        // Kunci baru membawa kedua bucket (total 150, sisa aktif 149);
+        // kunci lama tidak lagi punya bucket.
+        let new_buckets = store.key_bucket_list(&created.key.prefix).await;
+        assert_eq!(new_buckets.len(), 2);
+        assert_eq!(
+            new_buckets.iter().map(|b| b.total_hits).sum::<u64>(),
+            150
+        );
+        assert_eq!(
+            new_buckets.iter().map(|b| b.remaining_hits).sum::<u64>(),
+            149
+        );
+        assert!(new_buckets.iter().all(|b| b.key_id == created.key.id));
+        assert!(store.key_bucket_list(&old_key.prefix).await.is_empty());
+        // Kunci baru bisa dipotong (dari bucket FIFO-pertama yang pindah).
+        let (remaining, _) = store
+            .reserve_quota(&created.key.prefix)
+            .await
+            .expect("reserve kunci baru lolos");
+        assert_eq!(remaining, 148);
     }
 }

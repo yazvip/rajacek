@@ -846,37 +846,272 @@ fn default_number_param() -> String {
     "target".to_owned()
 }
 
-/// Hasil grant pembelian paket ke kunci member: mode "add" (kuota menumpuk,
-/// masa aktif diperpanjang dari expiry lama bila masih future) + rate
-/// tertinggi (membeli paket murah tidak pernah menurunkan rate member).
-/// Dipakai store::grant_package_order; diuji di bawah tanpa database.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct GrantEffect {
-    pub new_total: u64,
-    pub new_remaining: u64,
-    pub new_expires_at: DateTime<Utc>,
-    pub new_rate_limit_per_minute: u32,
+/// Bucket FIFO kuota (2026-10-26): menggantikan semantik stacking-expiry
+/// lama (compute_grant_effect, dihapus — grant/assign kini membuat bucket
+/// baru dengan expiry beli + valid_days, dan agregat dihitung dari bucket).
+/// Rate grant tetap max (membeli paket murah tidak pernah menurunkan rate
+/// member); logika itu kini inline di store::grant_package_order.
+/// Satu bucket kuota FIFO: satu pembelian (grant/assign-add), satu
+/// penyesuaian manual yang butuh bucket baru, atau satu bucket backfill
+/// dari agregat kunci lama. Bucket dimiliki KEY (bukan member): saat
+/// regenerasi, bucket pindah ke kunci pengganti bersama saldonya.
+/// Pemotongan selalu dari bucket paling cepat kedaluwarsa dulu (FIFO);
+/// bucket tanpa expiry dikonsumsi TERAKHIR dan tidak pernah kedaluwarsa.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct QuotaBucket {
+    pub id: Uuid,
+    pub key_id: Uuid,
+    pub member_id: Option<Uuid>,
+    /// Order pembelian yang melahirkan bucket ini; NULL untuk bucket
+    /// backfill, assign admin, dan adjust manual.
+    pub order_id: Option<Uuid>,
+    pub package_id: Option<Uuid>,
+    pub total_hits: u64,
+    pub remaining_hits: u64,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
 }
 
-pub fn compute_grant_effect(
-    current_total: u64,
-    current_remaining: u64,
-    current_expires_at: Option<DateTime<Utc>>,
+/// Bentuk bucket di respons API (kontrak tampilan): nama paket di-resolve
+/// dari package_id saat dibaca, jadi rename paket ikut terlihat dan paket
+/// yang sudah dihapus tampil sebagai null — bukan snapshot nama beku.
+#[derive(Clone, Debug, Serialize)]
+pub struct QuotaBucketView {
+    pub id: Uuid,
+    pub order_id: Option<Uuid>,
+    pub package_name: Option<String>,
+    pub total_hits: u64,
+    pub remaining_hits: u64,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Bucket masih berlaku pada `now`: tanpa expiry, atau expiry-nya future.
+/// Bucket kedaluwarsa dilewati pemotongan (sisanya mati), bukan dihapus.
+pub fn bucket_is_active(bucket: &QuotaBucket, now: DateTime<Utc>) -> bool {
+    bucket.expires_at.map_or(true, |expiry| expiry > now)
+}
+
+/// Urutan FIFO: expiry paling awal dulu; bucket tanpa expiry TERAKHIR;
+/// seri dipecah created_at lalu id agar urutannya deterministik.
+fn fifo_key(bucket: &QuotaBucket) -> (bool, DateTime<Utc>, DateTime<Utc>, Uuid) {
+    (
+        bucket.expires_at.is_none(),
+        bucket.expires_at.unwrap_or(DateTime::<Utc>::MAX_UTC),
+        bucket.created_at,
+        bucket.id,
+    )
+}
+
+pub fn sort_buckets_fifo(buckets: &mut [QuotaBucket]) {
+    buckets.sort_by_key(fifo_key);
+}
+
+/// Indeks bucket dalam urutan FIFO tanpa mengurut ulang vec aslinya.
+fn fifo_indices(buckets: &[QuotaBucket]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..buckets.len()).collect();
+    indices.sort_by_key(|&index| fifo_key(&buckets[index]));
+    indices
+}
+
+/// Agregat tampilan dari bucket (satu-satunya definisi agregat untuk kunci
+/// ber-bucket):
+/// - total = jumlah total_hits SEMUA bucket (termasuk kedaluwarsa/habis);
+/// - sisa = jumlah remaining_hits bucket AKTIF saja (sisa bucket
+///   kedaluwarsa sudah mati dan tidak dihitung);
+/// - expiry agregat = expiry bucket aktif terdekat yang masih bersisa;
+///   NULL bila yang bersisa hanya bucket tanpa expiry. Bila TIDAK ADA
+///   bucket aktif bersisa sama sekali (semua habis/kedaluwarsa), jatuh ke
+///   expiry terdekat dari bucket yang ada (atau NULL bila semua tanpa
+///   expiry) agar tampilan tetap menyebut masa aktif terakhir, bukan
+///   "tidak pernah kedaluwarsa" yang menyesatkan.
+pub fn bucket_aggregate(
+    buckets: &[QuotaBucket],
     now: DateTime<Utc>,
-    package_hits: u64,
-    valid_days: i64,
-    current_rate: u32,
-    package_rate: u32,
-) -> GrantEffect {
-    let base = current_expires_at
-        .filter(|expiry| *expiry > now)
-        .unwrap_or(now);
-    GrantEffect {
-        new_total: current_total.saturating_add(package_hits),
-        new_remaining: current_remaining.saturating_add(package_hits),
-        new_expires_at: base + chrono::Duration::days(valid_days),
-        new_rate_limit_per_minute: current_rate.max(package_rate),
+) -> (u64, u64, Option<DateTime<Utc>>) {
+    let total = buckets
+        .iter()
+        .fold(0u64, |sum, bucket| sum.saturating_add(bucket.total_hits));
+    let mut active_remaining = 0u64;
+    let mut nearest_dated: Option<DateTime<Utc>> = None;
+    let mut has_active_undated_with_remaining = false;
+    for bucket in buckets {
+        if !bucket_is_active(bucket, now) {
+            continue;
+        }
+        active_remaining = active_remaining.saturating_add(bucket.remaining_hits);
+        if bucket.remaining_hits > 0 {
+            match bucket.expires_at {
+                Some(expiry) => {
+                    nearest_dated = Some(match nearest_dated {
+                        Some(current) => current.min(expiry),
+                        None => expiry,
+                    });
+                }
+                None => has_active_undated_with_remaining = true,
+            }
+        }
     }
+    let expiry = if let Some(expiry) = nearest_dated {
+        Some(expiry)
+    } else if has_active_undated_with_remaining {
+        None
+    } else {
+        buckets.iter().filter_map(|bucket| bucket.expires_at).min()
+    };
+    (total, active_remaining, expiry)
+}
+
+/// Bucket baru dari satu pembelian: total = sisa = hit paket, expiry =
+/// saat beli + valid_days (TIDAK menumpuk dari expiry lama — itulah inti
+/// bucket: pembelian lama dan baru kedaluwarsa masing-masing).
+/// Prasyarat: valid_days >= 1 (ditegakkan validasi settings QRIS dan
+/// handler assign; bucket dengan valid_days <= 0 akan langsung mati).
+pub fn new_purchase_bucket(
+    key_id: Uuid,
+    member_id: Option<Uuid>,
+    order_id: Option<Uuid>,
+    package_id: Option<Uuid>,
+    hits: u64,
+    valid_days: i64,
+    now: DateTime<Utc>,
+) -> QuotaBucket {
+    QuotaBucket {
+        id: Uuid::now_v7(),
+        key_id,
+        member_id,
+        order_id,
+        package_id,
+        total_hits: hits,
+        remaining_hits: hits,
+        expires_at: Some(now + chrono::Duration::days(valid_days)),
+        created_at: now,
+    }
+}
+
+/// Bucket backfill satu kunci lama (cerminan persis migrasi 0023):
+/// satu bucket dari agregat kunci saat migrasi. Dipakai tes + safety net
+/// load (kunci non-revoked tanpa baris bucket mendapat bucket ini).
+pub fn backfill_bucket_for_key(
+    key_id: Uuid,
+    member_id: Option<Uuid>,
+    package_id: Option<Uuid>,
+    quota_total: u64,
+    quota_remaining: u64,
+    expires_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> QuotaBucket {
+    QuotaBucket {
+        id: Uuid::now_v7(),
+        key_id,
+        member_id,
+        order_id: None,
+        package_id,
+        total_hits: quota_total,
+        remaining_hits: quota_remaining,
+        expires_at,
+        created_at: now,
+    }
+}
+
+/// Konsumsi FIFO `hits` dari bucket aktif bersisa, paling cepat
+/// kedaluwarsa dulu. GAGAL (None, tanpa mutasi apa pun) bila total sisa
+/// aktif < hits — pemanggil reserve memakai ini untuk 402. Sukses
+/// mengembalikan daftar (bucket_id, sisa baru) yang tersentuh, dalam
+/// urutan konsumsi, untuk persist berurutan.
+pub fn consume_buckets_fifo(
+    buckets: &mut [QuotaBucket],
+    now: DateTime<Utc>,
+    hits: u64,
+) -> Option<Vec<(Uuid, u64)>> {
+    let active_remaining: u64 = buckets
+        .iter()
+        .filter(|bucket| bucket_is_active(bucket, now))
+        .fold(0u64, |sum, bucket| sum.saturating_add(bucket.remaining_hits));
+    if active_remaining < hits {
+        return None;
+    }
+    let mut left = hits;
+    let mut touched = Vec::new();
+    for index in fifo_indices(buckets) {
+        if left == 0 {
+            break;
+        }
+        let bucket = &mut buckets[index];
+        if !bucket_is_active(bucket, now) || bucket.remaining_hits == 0 {
+            continue;
+        }
+        let take = left.min(bucket.remaining_hits);
+        bucket.remaining_hits -= take;
+        left -= take;
+        touched.push((bucket.id, bucket.remaining_hits));
+    }
+    debug_assert_eq!(left, 0);
+    Some(touched)
+}
+
+/// Kembalikan 1 hit ke satu bucket, dibatasi total bucket itu (refund
+/// tidak pernah mencetak hit). Target: bucket_id bila ditemukan; bila
+/// tidak (mis. bucket terhapus replace di tengah jalan), jatuh ke bucket
+/// aktif FIFO-pertama, lalu bucket FIFO-pertama mana pun. None bila tidak
+/// ada bucket sama sekali (pemanggil memakai jalur agregat lama).
+pub fn refund_bucket(
+    buckets: &mut [QuotaBucket],
+    now: DateTime<Utc>,
+    bucket_id: Option<Uuid>,
+) -> Option<(Uuid, u64)> {
+    let target = bucket_id
+        .and_then(|id| buckets.iter().position(|bucket| bucket.id == id))
+        .or_else(|| {
+            fifo_indices(buckets)
+                .into_iter()
+                .find(|&index| bucket_is_active(&buckets[index], now))
+        })
+        .or_else(|| fifo_indices(buckets).into_iter().next());
+    let index = target?;
+    let bucket = &mut buckets[index];
+    bucket.remaining_hits = bucket.remaining_hits.saturating_add(1).min(bucket.total_hits);
+    Some((bucket.id, bucket.remaining_hits))
+}
+
+/// Tambah positif adjust ke bucket: isi dulu headroom (total - sisa)
+/// bucket aktif urutan FIFO — "mengisi kembali" pemakaian lama TANPA
+/// menaikkan total, persis aturan compute_adjusted_quota lama. Bila
+/// semua headroom aktif penuh, sisa delta menaikkan total+sisa bucket
+/// aktif FIFO-pertama (total baru = sisa baru, seperti aturan lama).
+/// Mengembalikan sisa delta yang TIDAK tertampung — itu hanya terjadi
+/// bila tidak ada bucket aktif sama sekali, dan pemanggil wajib membuat
+/// bucket baru dari sisa tersebut (expiry/paket dari kunci).
+pub fn add_hits_to_buckets(
+    buckets: &mut [QuotaBucket],
+    now: DateTime<Utc>,
+    delta: u64,
+) -> u64 {
+    let mut left = delta;
+    for index in fifo_indices(buckets) {
+        if left == 0 {
+            break;
+        }
+        let bucket = &mut buckets[index];
+        if !bucket_is_active(bucket, now) {
+            continue;
+        }
+        let headroom = bucket.total_hits.saturating_sub(bucket.remaining_hits);
+        let take = left.min(headroom);
+        bucket.remaining_hits += take;
+        left -= take;
+    }
+    if left > 0 {
+        if let Some(index) = fifo_indices(buckets)
+            .into_iter()
+            .find(|&index| bucket_is_active(&buckets[index], now))
+        {
+            let bucket = &mut buckets[index];
+            bucket.total_hits = bucket.total_hits.saturating_add(left);
+            bucket.remaining_hits = bucket.remaining_hits.saturating_add(left);
+            left = 0;
+        }
+    }
+    left
 }
 
 /// Hasil grant_package_order: Granted berarti transaksi atomik berhasil,
@@ -913,59 +1148,189 @@ mod tests {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
+    // Tes-tes grant lama di bawah ini DIGANTI eksplisit (2026-10-26):
+    // compute_grant_effect dihapus bersama semantik stacking-expiry-nya
+    // (expiry baru = expiry lama + valid_days). Penggantinya: grant
+    // membuat bucket baru (expiry = beli + valid_days) dan agregat
+    // dihitung dari bucket. Rate-max tetap ditegakkan di grant (bukan
+    // lagi lewat fungsi ini) dan saturasi diuji lewat agregat.
+    fn bucket(
+        total: u64,
+        remaining: u64,
+        expires_at: Option<DateTime<Utc>>,
+        created_at: DateTime<Utc>,
+    ) -> QuotaBucket {
+        QuotaBucket {
+            id: Uuid::now_v7(),
+            key_id: Uuid::now_v7(),
+            member_id: None,
+            order_id: None,
+            package_id: None,
+            total_hits: total,
+            remaining_hits: remaining,
+            expires_at,
+            created_at,
+        }
+    }
+
     #[test]
-    fn grant_stacks_and_extends_from_active_expiry() {
-        let effect = compute_grant_effect(
+    fn grant_bucket_expires_from_purchase_not_from_old_expiry() {
+        // Kunci lama: bucket 1000 total / 200 sisa, expiry 1 Nov.
+        // Beli 500 hit, 30 hari, pada 25 Okt: bucket BARU expiry
+        // 24 Nov (beli + 30 hari) — BUKAN 1 Des (stacking lama).
+        let now = dt("2026-10-25T00:00:00Z");
+        let key_id = Uuid::now_v7();
+        let mut buckets = vec![bucket(
             1000,
             200,
             Some(dt("2026-11-01T00:00:00Z")),
-            dt("2026-10-25T00:00:00Z"),
-            500,
-            30,
-            30,
-            120,
-        );
-        assert_eq!(effect.new_total, 1500);
-        assert_eq!(effect.new_remaining, 700);
-        assert_eq!(effect.new_expires_at, dt("2026-12-01T00:00:00Z"));
-        assert_eq!(effect.new_rate_limit_per_minute, 120);
-    }
-
-    #[test]
-    fn grant_extends_from_now_when_expired_or_missing() {
-        let now = dt("2026-10-25T00:00:00Z");
-        let expired = compute_grant_effect(
-            0,
-            0,
-            Some(dt("2026-10-01T00:00:00Z")),
             now,
-            100,
-            30,
-            120,
-            120,
-        );
-        assert_eq!(expired.new_expires_at, dt("2026-11-24T00:00:00Z"));
-        let missing = compute_grant_effect(0, 0, None, now, 100, 30, 120, 120);
-        assert_eq!(missing.new_expires_at, dt("2026-11-24T00:00:00Z"));
+        )];
+        buckets[0].key_id = key_id;
+        let new_bucket = new_purchase_bucket(key_id, None, None, None, 500, 30, now);
+        assert_eq!(new_bucket.total_hits, 500);
+        assert_eq!(new_bucket.remaining_hits, 500);
+        assert_eq!(new_bucket.expires_at, Some(dt("2026-11-24T00:00:00Z")));
+        buckets.push(new_bucket);
+        let (total, remaining, expiry) = bucket_aggregate(&buckets, now);
+        assert_eq!(total, 1500);
+        assert_eq!(remaining, 700);
+        // Agregat = bucket aktif terdekat bersisa = bucket lama (1 Nov).
+        assert_eq!(expiry, Some(dt("2026-11-01T00:00:00Z")));
     }
 
     #[test]
-    fn grant_never_downgrades_rate_and_saturates() {
-        let effect =
-            compute_grant_effect(100, 100, None, dt("2026-10-25T00:00:00Z"), 50, 30, 120, 30);
-        assert_eq!(effect.new_rate_limit_per_minute, 120);
-        let saturated = compute_grant_effect(
-            u64::MAX,
-            u64::MAX,
-            None,
-            dt("2026-10-25T00:00:00Z"),
-            1,
-            30,
-            1,
-            1,
+    fn fifo_consumes_earliest_expiry_and_skips_expired() {
+        let now = dt("2026-10-25T00:00:00Z");
+        let mut buckets = vec![
+            bucket(100, 100, Some(dt("2026-12-01T00:00:00Z")), now),
+            bucket(50, 50, Some(dt("2026-10-01T00:00:00Z")), now),
+            bucket(70, 70, None, now),
+            bucket(30, 30, Some(dt("2026-11-01T00:00:00Z")), now),
+        ];
+        // Konsumsi 40: lewati bucket kedaluwarsa (1 Okt), habiskan 30 dari
+        // bucket 1 Nov dulu, lalu 10 dari bucket 1 Des. Bucket tanpa
+        // expiry tidak tersentuh.
+        let touched = consume_buckets_fifo(&mut buckets, now, 40).expect("sisa cukup");
+        assert_eq!(touched.len(), 2);
+        let by_id: std::collections::HashMap<Uuid, u64> = touched.into_iter().collect();
+        let nov = buckets
+            .iter()
+            .find(|b| b.expires_at == Some(dt("2026-11-01T00:00:00Z")))
+            .unwrap();
+        let dec = buckets
+            .iter()
+            .find(|b| b.expires_at == Some(dt("2026-12-01T00:00:00Z")))
+            .unwrap();
+        assert_eq!(nov.remaining_hits, 0);
+        assert_eq!(dec.remaining_hits, 90);
+        assert_eq!(by_id[&nov.id], 0);
+        assert_eq!(by_id[&dec.id], 90);
+        // Agregat: total semua bucket (250), sisa aktif saja (kedaluwarsa
+        // 50 tidak dihitung): 0 + 90 + 70 = 160.
+        let (total, remaining, expiry) = bucket_aggregate(&buckets, now);
+        assert_eq!(total, 250);
+        assert_eq!(remaining, 160);
+        assert_eq!(expiry, Some(dt("2026-12-01T00:00:00Z")));
+    }
+
+    #[test]
+    fn fifo_empty_active_remaining_consumes_nothing() {
+        let now = dt("2026-10-25T00:00:00Z");
+        let mut buckets = vec![
+            bucket(100, 0, Some(dt("2026-12-01T00:00:00Z")), now),
+            bucket(50, 50, Some(dt("2026-10-01T00:00:00Z")), now),
+        ];
+        // Habis = sisa aktif 0 (satu habis, satu kedaluwarsa): konsumsi
+        // gagal TANPA mutasi — pemanggil mengubahnya menjadi 402.
+        assert!(consume_buckets_fifo(&mut buckets, now, 1).is_none());
+        assert_eq!(buckets[0].remaining_hits, 0);
+        assert_eq!(buckets[1].remaining_hits, 50);
+        let (_, remaining, _) = bucket_aggregate(&buckets, now);
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn refund_returns_to_same_bucket_capped_at_its_total() {
+        let now = dt("2026-10-25T00:00:00Z");
+        let mut buckets = vec![
+            bucket(10, 9, Some(dt("2026-11-01T00:00:00Z")), now),
+            bucket(20, 20, Some(dt("2026-12-01T00:00:00Z")), now),
+        ];
+        let first_id = buckets[0].id;
+        let (id, remaining) = refund_bucket(&mut buckets, now, Some(first_id)).unwrap();
+        assert_eq!(id, first_id);
+        assert_eq!(remaining, 10);
+        // Refund kedua tidak mencetak hit: cap di total bucket.
+        let (_, remaining) = refund_bucket(&mut buckets, now, Some(first_id)).unwrap();
+        assert_eq!(remaining, 10);
+        // Bucket tak dikenal jatuh ke FIFO-pertama aktif (bucket Nov).
+        let (id, _) = refund_bucket(&mut buckets, now, Some(Uuid::now_v7())).unwrap();
+        assert_eq!(id, first_id);
+    }
+
+    #[test]
+    fn aggregate_uses_nearest_active_expiry_and_null_only_case() {
+        let now = dt("2026-10-25T00:00:00Z");
+        let dated = bucket(100, 40, Some(dt("2026-12-01T00:00:00Z")), now);
+        let undated = bucket(50, 50, None, now);
+        let (_, _, expiry) = bucket_aggregate(&[dated, undated.clone()], now);
+        assert_eq!(expiry, Some(dt("2026-12-01T00:00:00Z")));
+        let (_, _, expiry) = bucket_aggregate(&[undated], now);
+        assert_eq!(expiry, None);
+    }
+
+    #[test]
+    fn aggregate_saturates_instead_of_overflowing() {
+        let now = dt("2026-10-25T00:00:00Z");
+        let buckets = vec![
+            bucket(u64::MAX, u64::MAX, None, now),
+            bucket(1, 1, None, now),
+        ];
+        let (total, remaining, _) = bucket_aggregate(&buckets, now);
+        assert_eq!(total, u64::MAX);
+        assert_eq!(remaining, u64::MAX);
+    }
+
+    #[test]
+    fn add_hits_refills_headroom_before_raising_total() {
+        let now = dt("2026-10-25T00:00:00Z");
+        let mut buckets = vec![bucket(1000, 500, None, now)];
+        // +100 mengisi pemakaian lama: total tetap 1000, sisa 600.
+        assert_eq!(add_hits_to_buckets(&mut buckets, now, 100), 0);
+        assert_eq!(buckets[0].total_hits, 1000);
+        assert_eq!(buckets[0].remaining_hits, 600);
+        // +500 lagi: 400 headroom + 100 overflow menaikkan total 1100.
+        assert_eq!(add_hits_to_buckets(&mut buckets, now, 500), 0);
+        assert_eq!(buckets[0].total_hits, 1100);
+        assert_eq!(buckets[0].remaining_hits, 1100);
+    }
+
+    #[test]
+    fn backfill_mirrors_key_aggregates() {
+        let now = dt("2026-10-25T00:00:00Z");
+        let key_id = Uuid::now_v7();
+        let member_id = Uuid::now_v7();
+        let package_id = Uuid::now_v7();
+        let bucket = backfill_bucket_for_key(
+            key_id,
+            Some(member_id),
+            Some(package_id),
+            5000,
+            1234,
+            Some(dt("2026-12-01T00:00:00Z")),
+            now,
         );
-        assert_eq!(saturated.new_total, u64::MAX);
-        assert_eq!(saturated.new_remaining, u64::MAX);
+        assert_eq!(bucket.key_id, key_id);
+        assert_eq!(bucket.member_id, Some(member_id));
+        assert_eq!(bucket.package_id, Some(package_id));
+        assert_eq!(bucket.order_id, None);
+        assert_eq!(bucket.total_hits, 5000);
+        assert_eq!(bucket.remaining_hits, 1234);
+        assert_eq!(bucket.expires_at, Some(dt("2026-12-01T00:00:00Z")));
+        let (total, remaining, expiry) = bucket_aggregate(&[bucket], now);
+        assert_eq!((total, remaining), (5000, 1234));
+        assert_eq!(expiry, Some(dt("2026-12-01T00:00:00Z")));
     }
 }
 
