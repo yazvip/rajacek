@@ -29,6 +29,10 @@ pub struct ResolvedProviderEndpoint {
     pub timeout_ms: u32,
     pub request_mode: ProviderRequestMode,
     pub auth_header: String,
+    /// Admin-only: bila true, endpoint tetap di-admit meski circuit
+    /// breaker-nya terbuka (bypass HANYA breaker; pacer/semaphore/
+    /// antrean tetap berlaku, hasil tetap dicatat ke breaker).
+    pub force_on: bool,
     pub response_mapping: ProviderResponseMapping,
     pub service_code_mapping: std::collections::HashMap<String, String>,
     pub http_method: String,
@@ -115,6 +119,7 @@ impl ProviderConfigStore {
                             timeout_ms: (config.request_timeout_seconds * 1_000).clamp(100, 60_000)
                                 as u32,
                             active: true,
+                            force_on: false,
                             request_mode: if tukangcek {
                                 ProviderRequestMode::Tukangcek
                             } else {
@@ -164,6 +169,7 @@ impl ProviderConfigStore {
                         base_url: String::new(),
                         timeout_ms: 8_000,
                         active: false,
+                        force_on: false,
                         request_mode: ProviderRequestMode::Generic,
                         auth_header: "Authorization".to_owned(),
                         api_key_configured: false,
@@ -209,6 +215,7 @@ impl ProviderConfigStore {
             timeout_ms: record.endpoint.timeout_ms,
             request_mode: record.endpoint.request_mode,
             auth_header: record.endpoint.auth_header.clone(),
+            force_on: record.endpoint.force_on,
             response_mapping: record.endpoint.response_mapping.clone(),
             service_code_mapping: record.endpoint.service_code_mapping.clone(),
             http_method: record.endpoint.http_method.clone(),
@@ -279,14 +286,14 @@ impl ProviderConfigStore {
                 r#"
                 INSERT INTO third_party_endpoints (
                     id, product_code, name, base_url, credential_ciphertext,
-                    timeout_ms, request_mode, auth_header, active, response_mapping, service_code_mapping,
+                    timeout_ms, request_mode, auth_header, active, force_on, response_mapping, service_code_mapping,
                     http_method, code_param, number_param, key_param, updated_at
-                ) VALUES (UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON DUPLICATE KEY UPDATE
                     name = VALUES(name), base_url = VALUES(base_url),
                     credential_ciphertext = VALUES(credential_ciphertext),
                     timeout_ms = VALUES(timeout_ms), request_mode = VALUES(request_mode),
-                    auth_header = VALUES(auth_header), active = VALUES(active),
+                    auth_header = VALUES(auth_header), active = VALUES(active), force_on = VALUES(force_on),
                     response_mapping = VALUES(response_mapping),
                     service_code_mapping = VALUES(service_code_mapping),
                     http_method = VALUES(http_method), code_param = VALUES(code_param),
@@ -307,6 +314,7 @@ impl ProviderConfigStore {
             })
             .bind(&endpoint.auth_header)
             .bind(endpoint.active)
+            .bind(endpoint.force_on)
             .bind(
                 serde_json::to_string(&endpoint.response_mapping).map_err(|_| {
                     AppError::internal("Mapping respons provider tidak dapat diserialisasi")
@@ -384,6 +392,7 @@ impl ProviderConfigStore {
             base_url: input.base_url.trim().to_owned(),
             timeout_ms: input.timeout_ms,
             active: input.active,
+            force_on: input.force_on,
             request_mode: input.request_mode,
             auth_header,
             api_key_configured: true,
@@ -469,6 +478,7 @@ impl ProviderConfigStore {
             base_url: input.base_url.trim().to_owned(),
             timeout_ms: input.timeout_ms,
             active: input.active,
+            force_on: input.force_on,
             request_mode: input.request_mode,
             auth_header,
             api_key_configured: true,
@@ -501,6 +511,38 @@ impl ProviderConfigStore {
             .ok_or_else(|| AppError::not_found("Endpoint provider tidak ditemukan"))?;
         let mut endpoint = existing.endpoint.clone();
         endpoint.active = active;
+        endpoint.updated_at = Utc::now();
+        self.persist_endpoint(&endpoint, &existing.api_key).await?;
+        self.entries.write().await.insert(
+            id,
+            ProviderEndpointRecord {
+                endpoint: endpoint.clone(),
+                api_key: existing.api_key.clone(),
+            },
+        );
+        Ok(endpoint)
+    }
+
+    /// Admin toggle paksa ON (PATCH force-on): hanya membalik flag,
+    /// tanpa menyentuh breaker — SENGAJA tidak memanggil
+    /// reset_breaker_on_activation. Berbeda dengan aktivasi
+    /// nonaktif->aktif (K34) yang me-reset breaker, toggle paksa
+    /// on/off harus membiarkan state breaker apa adanya: hasil yang
+    /// tercatat selama paksa ON tetap berlaku saat paksa dimatikan.
+    pub async fn set_force_on(
+        &self,
+        id: Uuid,
+        force_on: bool,
+    ) -> Result<ProviderEndpoint, AppError> {
+        let existing = self
+            .entries
+            .read()
+            .await
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| AppError::not_found("Endpoint provider tidak ditemukan"))?;
+        let mut endpoint = existing.endpoint.clone();
+        endpoint.force_on = force_on;
         endpoint.updated_at = Utc::now();
         self.persist_endpoint(&endpoint, &existing.api_key).await?;
         self.entries.write().await.insert(
@@ -971,7 +1013,7 @@ impl ProviderConfigStore {
             r#"
             SELECT BIN_TO_UUID(id) AS id, product_code, name, base_url,
                    credential_ciphertext, timeout_ms, request_mode, auth_header,
-                   active, CAST(response_mapping AS CHAR) AS response_mapping,
+                   active, force_on, CAST(response_mapping AS CHAR) AS response_mapping,
                    CAST(service_code_mapping AS CHAR) AS service_code_mapping,
                    http_method, code_param, number_param, key_param, updated_at
             FROM third_party_endpoints
@@ -995,6 +1037,7 @@ impl ProviderConfigStore {
                     base_url: row.base_url,
                     timeout_ms: row.timeout_ms,
                     active: row.active,
+                    force_on: row.force_on,
                     request_mode: match row.request_mode.as_str() {
                         "tukangcek" => ProviderRequestMode::Tukangcek,
                         "cutiezy" => ProviderRequestMode::Cutiezy,
@@ -1063,6 +1106,7 @@ struct ProviderEndpointRow {
     request_mode: String,
     auth_header: String,
     active: bool,
+    force_on: bool,
     response_mapping: String,
     service_code_mapping: Option<String>,
     http_method: String,

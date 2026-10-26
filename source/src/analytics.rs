@@ -828,6 +828,7 @@ mod tests {
             request_mode: ProviderRequestMode::Generic,
             auth_header: "X-Test".to_owned(),
             active,
+            force_on: false,
             api_key_configured: false,
             response_mapping: ProviderResponseMapping::default_for(product),
             service_code_mapping: std::collections::HashMap::new(),

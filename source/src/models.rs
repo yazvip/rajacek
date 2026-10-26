@@ -634,6 +634,11 @@ pub struct ProviderEndpoint {
     pub request_mode: ProviderRequestMode,
     pub auth_header: String,
     pub active: bool,
+    /// Admin-only: bila true, endpoint tetap di-admit meski circuit
+    /// breaker-nya terbuka. Tidak pernah dikirim ke permukaan member
+    /// (hanya rute admin yang mengembalikan ProviderEndpoint).
+    #[serde(default)]
+    pub force_on: bool,
     pub api_key_configured: bool,
     pub response_mapping: ProviderResponseMapping,
     #[serde(default)]
@@ -676,6 +681,8 @@ pub struct UpdateProviderEndpointRequest {
     pub key_param: Option<String>,
     #[serde(default = "default_active")]
     pub active: bool,
+    #[serde(default)]
+    pub force_on: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -711,6 +718,8 @@ pub struct CreateProviderEndpointRequest {
     pub key_param: Option<String>,
     #[serde(default = "default_active")]
     pub active: bool,
+    #[serde(default)]
+    pub force_on: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]

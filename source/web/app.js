@@ -738,9 +738,11 @@
         <span class="ep-chip">${modeLabel(endpoint.request_mode)}</span>
         <span class="ep-meta">${formatNumber(endpoint.timeout_ms)} ms</span>
         <span class="ep-cred">${endpoint.api_key_configured ? "•••• tersimpan" : "Kunci belum diisi"}</span>
+        ${endpoint.force_on ? `<span class="ep-chip" title="Paksa ON: tetap di-admit meski circuit breaker terbuka">DIPAKSA ON</span>` : ""}
       </div>
       <div class="ep-actions">
         <label class="ep-switch" title="${endpoint.active ? "Matikan server" : "Aktifkan server"}"><input type="checkbox" data-action="toggle-provider" data-id="${endpoint.id}" ${endpoint.active ? "checked" : ""} /><span aria-hidden="true"></span></label>
+        <label class="ep-switch" title="Paksa ON: tetap di-admit meski circuit breaker terbuka"><input type="checkbox" data-action="toggle-provider-force" data-id="${endpoint.id}" ${endpoint.force_on ? "checked" : ""} /><span aria-hidden="true"></span></label>
         <button class="table-action" type="button" data-action="test-provider" data-id="${endpoint.id}">Tes</button>
         <button class="table-action" type="button" data-action="edit-provider" data-id="${endpoint.id}">Kelola</button>
         <button class="table-action" type="button" data-action="duplicate-provider" data-id="${endpoint.id}">Duplikat</button>
@@ -2232,7 +2234,7 @@
   // kredensial: kunci lama tidak pernah dikembalikan API, jadi admin wajib
   // mengisi kunci baru untuk salinannya (backend menolak create tanpa kunci).
   function duplicateProvider(endpoint) {
-    const copy = { ...endpoint, id: "", name: `${endpoint.name} (salinan)` };
+    const copy = { ...endpoint, id: "", force_on: false, name: `${endpoint.name} (salinan)` };
     openProviderModal(copy);
     $("#provider-modal-title").textContent = `Tambah server — ${productLabel(endpoint.product)} (salinan)`;
     $("#provider-api-key").placeholder = "Wajib diisi untuk endpoint baru";
@@ -2257,6 +2259,7 @@
     $("#provider-api-key").value = "";
     $("#provider-api-key").placeholder = "Kosongkan jika tidak ingin merotasi kredensial";
     $("#provider-active").checked = endpoint ? endpoint.active : true;
+    $("#provider-force-on").checked = endpoint ? !!endpoint.force_on : false;
     applyProviderMapping(product, endpoint ? endpoint.response_mapping : presetMapping(product, $("#provider-request-mode").value));
     renderServiceMapping(product, $("#provider-request-mode").value, endpoint ? endpoint.service_code_mapping : null);
     renderBankMapping(product, $("#provider-request-mode").value, endpoint ? endpoint.service_code_mapping : null);
@@ -2295,6 +2298,7 @@
         reference_path: optionalMappingPath("#mapping-reference-path"),
       },
       active: $("#provider-active").checked,
+      force_on: $("#provider-force-on").checked,
       service_code_mapping: product === "bank_account"
         ? collectBankMapping(product, $("#provider-request-mode").value)
         : collectServiceMapping(product, $("#provider-request-mode").value),
@@ -2335,6 +2339,30 @@
       showToast(`Server ${endpoint.name} ${active ? "diaktifkan" : "dinonaktifkan"}.`, "success");
     } catch (error) {
       input.checked = !active;
+      handleApiError(error);
+    }
+  }
+
+  async function toggleProviderForce(input) {
+    const id = input.dataset.id;
+    const forceOn = input.checked;
+    const endpoint = state.providers.find((item) => item.id === id);
+    const label = endpoint ? endpoint.name : "server ini";
+    // Konfirmasi SELALU saat mengaktifkan: bypass breaker berarti tetap
+    // menghantam upstream yang sedang gagal — admin harus sadar akan
+    // risikonya. Mematikan paksa aman (kembali ke perilaku normal).
+    if (forceOn && !window.confirm(`Paksa ON server "${label}"? Server ini akan TETAP di-admit meski circuit breaker-nya terbuka — validasi tetap menghantam upstream yang sedang gagal. Pacer & batas konkurensi tetap berlaku, dan hasil tetap dicatat ke breaker.`)) {
+      input.checked = !forceOn;
+      return;
+    }
+    try {
+      const updated = await api(`/v1/admin/provider-endpoints/${id}/force-on`, { method: "PATCH", body: { force_on: forceOn } });
+      const index = state.providers.findIndex((item) => item.id === updated.id);
+      if (index >= 0) state.providers[index] = updated;
+      renderProviders();
+      showToast(`Server ${updated.name} ${forceOn ? "dipaksa ON" : "paksa ON dimatikan"} (tercatat di audit).`, "success");
+    } catch (error) {
+      input.checked = !forceOn;
       handleApiError(error);
     }
   }
@@ -3148,6 +3176,7 @@
       if (action === "add-provider") openProviderModal(null, id);
       if (action === "delete-provider") deleteProvider(id);
       if (action === "toggle-provider") toggleProvider(actionElement);
+      if (action === "toggle-provider-force") toggleProviderForce(actionElement);
       if (action === "health-toggle-provider") toggleHealthProvider(id);
       if (action === "dlq-replay") replayDlq(id);
       if (action === "dlq-replay-all") replayAllDlq();

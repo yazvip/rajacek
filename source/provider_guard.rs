@@ -463,10 +463,18 @@ impl ProviderGuard {
     /// Circuit-breaker check shared by `acquire` and `try_acquire`:
     /// open -> 503, half-open probe already active -> 503, otherwise
     /// Normal (or Probe, which reserves the half-open probe lease).
+    ///
+    /// Paksa ON (`force_on`): endpoint tetap di-admit sebagai Normal
+    /// meski breaker terbuka — bypass HANYA breaker. Entri breaker
+    /// tetap dibuat/dipelihara (tidak ada state yang disembunyikan)
+    /// agar hasil yang tercatat selama paksa ON tetap berlaku saat
+    /// paksa dimatikan; open_until/probe_since tidak disentuh di sini.
+    /// Semaphore, antrean, dan pacer tetap berlaku di pemanggil.
     async fn check_breaker(
         &self,
         product: ValidationProduct,
         endpoint_id: &str,
+        force_on: bool,
     ) -> Result<Admission, AppError> {
         let mut breakers = self.endpoint_breakers.lock().await;
         let entry = breakers
@@ -475,6 +483,9 @@ impl ProviderGuard {
                 product,
                 state: BreakerState::default(),
             });
+        if force_on {
+            return Ok(Admission::Normal);
+        }
         let breaker = &mut entry.state;
         match breaker.open_until {
             Some(until) if until > Instant::now() => Err(AppError::service_unavailable(format!(
@@ -507,9 +518,10 @@ impl ProviderGuard {
         &self,
         product: ValidationProduct,
         endpoint_id: &str,
+        force_on: bool,
     ) -> Result<Option<GuardTicket>, AppError> {
         let index = product_index(product);
-        let admission = self.check_breaker(product, endpoint_id).await?;
+        let admission = self.check_breaker(product, endpoint_id, force_on).await?;
         match self.semaphores[index].try_acquire() {
             Some(permit) => Ok(Some(GuardTicket {
                 _permit: permit,
@@ -536,9 +548,10 @@ impl ProviderGuard {
         &self,
         product: ValidationProduct,
         endpoint_id: &str,
+        force_on: bool,
     ) -> Result<GuardTicket, AppError> {
         let index = product_index(product);
-        let admission = self.check_breaker(product, endpoint_id).await?;
+        let admission = self.check_breaker(product, endpoint_id, force_on).await?;
 
         let queue_wait_ms = self.config().queue_wait_ms;
         match self.semaphores[index]
@@ -746,12 +759,12 @@ mod tests {
         let guard = guard(5, 30, 1);
         let product = ValidationProduct::BankAccount;
         let held = guard
-            .acquire(product, "ep-penuh")
+            .acquire(product, "ep-penuh", false)
             .await
             .expect("first acquire takes the only slot");
         let started = std::time::Instant::now();
         let skipped = guard
-            .try_acquire(product, "ep-penuh")
+            .try_acquire(product, "ep-penuh", false)
             .await
             .expect("try_acquire evaluates");
         assert!(skipped.is_none(), "full queue must skip, not wait");
@@ -762,7 +775,7 @@ mod tests {
         );
         drop(held);
         let admitted = guard
-            .try_acquire(product, "ep-penuh")
+            .try_acquire(product, "ep-penuh", false)
             .await
             .expect("try_acquire evaluates");
         assert!(admitted.is_some(), "slot freed -> try_acquire admits");
@@ -843,7 +856,7 @@ mod tests {
         let guard = guard(3, 60, 4);
         for _ in 0..3 {
             let ticket = guard
-                .acquire(ValidationProduct::Ewallet, "srv-ewallet")
+                .acquire(ValidationProduct::Ewallet, "srv-ewallet", false)
                 .await
                 .expect("closed circuit admits");
             guard.record_failure(&ticket).await;
@@ -851,14 +864,14 @@ mod tests {
         assert!(guard.is_open("srv-ewallet").await);
         assert!(
             guard
-                .acquire(ValidationProduct::Ewallet, "srv-ewallet")
+                .acquire(ValidationProduct::Ewallet, "srv-ewallet", false)
                 .await
                 .is_err(),
             "open circuit must fail fast"
         );
         assert!(
             guard
-                .acquire(ValidationProduct::Ewallet, "srv-ewallet-lain")
+                .acquire(ValidationProduct::Ewallet, "srv-ewallet-lain", false)
                 .await
                 .is_ok(),
             "server lain produk yang sama tidak ikut tertutup"
@@ -870,19 +883,19 @@ mod tests {
         let guard = guard(3, 60, 4);
         for _ in 0..2 {
             let ticket = guard
-                .acquire(ValidationProduct::BankAccount, "srv-bank")
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
                 .await
                 .unwrap();
             guard.record_failure(&ticket).await;
         }
         let ticket = guard
-            .acquire(ValidationProduct::BankAccount, "srv-bank")
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
             .await
             .unwrap();
         guard.record_success(&ticket).await;
         for _ in 0..2 {
             let ticket = guard
-                .acquire(ValidationProduct::BankAccount, "srv-bank")
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
                 .await
                 .unwrap();
             guard.record_failure(&ticket).await;
@@ -894,25 +907,25 @@ mod tests {
     async fn probe_success_closes_circuit_after_cooldown() {
         let guard = guard(1, 1, 4);
         let ticket = guard
-            .acquire(ValidationProduct::Whatsapp, "srv-wa")
+            .acquire(ValidationProduct::Whatsapp, "srv-wa", false)
             .await
             .unwrap();
         guard.record_failure(&ticket).await;
         assert!(guard.is_open("srv-wa").await);
         tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
         let probe = guard
-            .acquire(ValidationProduct::Whatsapp, "srv-wa")
+            .acquire(ValidationProduct::Whatsapp, "srv-wa", false)
             .await
             .expect("half-open admits one probe");
         assert!(guard
-            .acquire(ValidationProduct::Whatsapp, "srv-wa")
+            .acquire(ValidationProduct::Whatsapp, "srv-wa", false)
             .await
             .is_err());
         guard.record_success(&probe).await;
         assert!(!guard.is_open("srv-wa").await);
         assert!(
             guard
-                .acquire(ValidationProduct::Ewallet, "srv-ewallet-lain")
+                .acquire(ValidationProduct::Ewallet, "srv-ewallet-lain", false)
                 .await
                 .is_ok(),
             "server lain produk yang sama tidak ikut tertutup"
@@ -923,13 +936,13 @@ mod tests {
     async fn probe_failure_reopens_circuit() {
         let guard = guard(1, 1, 4);
         let ticket = guard
-            .acquire(ValidationProduct::BankAccount, "srv-bank")
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
             .await
             .unwrap();
         guard.record_failure(&ticket).await;
         tokio::time::sleep(std::time::Duration::from_millis(1_100)).await;
         let probe = guard
-            .acquire(ValidationProduct::BankAccount, "srv-bank")
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
             .await
             .unwrap();
         guard.record_failure(&probe).await;
@@ -940,12 +953,12 @@ mod tests {
     async fn semaphore_rejects_after_queue_wait_when_full() {
         let guard = guard(5, 60, 1);
         let _held = guard
-            .acquire(ValidationProduct::Ewallet, "srv-ewallet")
+            .acquire(ValidationProduct::Ewallet, "srv-ewallet", false)
             .await
             .expect("first call takes the only slot");
         let started = std::time::Instant::now();
         let rejected = guard
-            .acquire(ValidationProduct::Ewallet, "srv-ewallet")
+            .acquire(ValidationProduct::Ewallet, "srv-ewallet", false)
             .await;
         assert!(rejected.is_err(), "full semaphore must reject after wait");
         assert!(
@@ -958,7 +971,7 @@ mod tests {
     async fn reset_endpoint_purges_breaker_entry_for_deleted_endpoint() {
         let guard = guard(1, 600, 4);
         let ticket = guard
-            .acquire(ValidationProduct::BankAccount, "srv-hapus")
+            .acquire(ValidationProduct::BankAccount, "srv-hapus", false)
             .await
             .expect("circuit tertutup menerima");
         guard.record_failure(&ticket).await;
@@ -980,7 +993,7 @@ mod tests {
         let guard = guard(2, 600, 4);
         for _ in 0..2 {
             let ticket = guard
-                .acquire(ValidationProduct::BankAccount, "srv-bank")
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
                 .await
                 .unwrap();
             guard.record_failure(&ticket).await;
@@ -988,7 +1001,7 @@ mod tests {
         assert!(guard.is_open("srv-bank").await);
         assert!(
             guard
-                .acquire(ValidationProduct::BankAccount, "srv-bank")
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
                 .await
                 .is_err(),
             "open circuit rejects during cooldown"
@@ -997,7 +1010,7 @@ mod tests {
         assert!(!guard.is_open("srv-bank").await);
         assert!(
             guard
-                .acquire(ValidationProduct::BankAccount, "srv-bank")
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
                 .await
                 .is_ok(),
             "after an admin reset the endpoint admits at once, no cooldown"
@@ -1009,7 +1022,7 @@ mod tests {
         let guard = guard(2, 60, 4);
         for _ in 0..4 {
             let ticket = guard
-                .acquire(ValidationProduct::BankAccount, "srv-bank")
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
                 .await
                 .unwrap();
             guard.record_neutral(&ticket).await;
@@ -1021,11 +1034,11 @@ mod tests {
     async fn config_update_resizes_semaphore_live() {
         let guard = guard(5, 60, 1);
         let _held = guard
-            .acquire(ValidationProduct::Ewallet, "srv-ewallet")
+            .acquire(ValidationProduct::Ewallet, "srv-ewallet", false)
             .await
             .unwrap();
         assert!(guard
-            .acquire(ValidationProduct::Ewallet, "srv-ewallet")
+            .acquire(ValidationProduct::Ewallet, "srv-ewallet", false)
             .await
             .is_err());
         // Raising the limit must immediately admit another caller.
@@ -1033,14 +1046,14 @@ mod tests {
         config.max_concurrency_per_product = 2;
         guard.update_config(config);
         assert!(guard
-            .acquire(ValidationProduct::Ewallet, "srv-ewallet")
+            .acquire(ValidationProduct::Ewallet, "srv-ewallet", false)
             .await
             .is_ok());
         // Lowering it again must not cancel in-flight calls, only block new ones.
         config.max_concurrency_per_product = 1;
         guard.update_config(config);
         assert!(guard
-            .acquire(ValidationProduct::Ewallet, "srv-ewallet")
+            .acquire(ValidationProduct::Ewallet, "srv-ewallet", false)
             .await
             .is_err());
     }
@@ -1049,7 +1062,7 @@ mod tests {
     async fn config_update_changes_breaker_threshold_live() {
         let guard = guard(5, 60, 4);
         let ticket = guard
-            .acquire(ValidationProduct::BankAccount, "srv-bank")
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
             .await
             .unwrap();
         guard.record_failure(&ticket).await;
@@ -1058,7 +1071,7 @@ mod tests {
         config.failure_threshold = 2;
         guard.update_config(config);
         let ticket = guard
-            .acquire(ValidationProduct::BankAccount, "srv-bank")
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
             .await
             .unwrap();
         guard.record_failure(&ticket).await;
@@ -1081,14 +1094,14 @@ mod tests {
         for _ in 0..3 {
             held.push(
                 guard
-                    .acquire(ValidationProduct::Pln, "srv-pln")
+                    .acquire(ValidationProduct::Pln, "srv-pln", false)
                     .await
                     .expect("PLN admits up to its own cap"),
             );
         }
         assert!(
             guard
-                .acquire(ValidationProduct::Pln, "srv-pln")
+                .acquire(ValidationProduct::Pln, "srv-pln", false)
                 .await
                 .is_err(),
             "a 4th concurrent PLN call must be shed at the PLN cap, not the global cap"
@@ -1111,7 +1124,7 @@ mod tests {
         config.max_concurrency_pln = 4;
         guard.update_config(config);
         assert!(guard
-            .acquire(ValidationProduct::Pln, "srv-pln")
+            .acquire(ValidationProduct::Pln, "srv-pln", false)
             .await
             .is_ok());
         let statuses = guard.status().await;
@@ -1144,5 +1157,130 @@ mod tests {
         assert!(config.validate_for_admin().is_err());
         config.max_concurrency_pln = 3;
         assert!(config.validate_for_admin().is_ok());
+    }
+
+    #[tokio::test]
+    async fn force_on_admits_despite_open_breaker() {
+        // Paksa ON bypass HANYA breaker: endpoint yang breaker-nya
+        // terbuka tetap di-admit sebagai Normal bila force_on=true,
+        // sementara pemanggil normal tetap fail-fast 503.
+        let guard = guard(1, 60, 4);
+        let ticket = guard
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
+            .await
+            .expect("closed circuit admits");
+        guard.record_failure(&ticket).await;
+        assert!(guard.is_open("srv-bank").await);
+        assert!(
+            guard
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
+                .await
+                .is_err(),
+            "normal caller must still fail fast on open circuit"
+        );
+        assert!(
+            guard
+                .acquire(ValidationProduct::BankAccount, "srv-bank", true)
+                .await
+                .is_ok(),
+            "forced endpoint must be admitted despite open circuit"
+        );
+        assert!(
+            guard
+                .try_acquire(ValidationProduct::BankAccount, "srv-bank", true)
+                .await
+                .expect("forced try_acquire evaluates")
+                .is_some(),
+            "forced try_acquire must also bypass the breaker"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_on_still_respects_semaphore() {
+        // Bypass breaker BUKAN bypass antrean: slot penuh tetap
+        // menolak, bahkan untuk endpoint paksa ON.
+        let guard = guard(5, 60, 1);
+        let _held = guard
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
+            .await
+            .expect("first call takes the only slot");
+        let skipped = guard
+            .try_acquire(ValidationProduct::BankAccount, "srv-bank", true)
+            .await
+            .expect("forced try_acquire evaluates");
+        assert!(
+            skipped.is_none(),
+            "forced endpoint must still skip on a full queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_on_results_keep_breaker_state_live() {
+        // Hasil endpoint paksa ON tetap dicatat: gagal memperpanjang
+        // keadaan terbuka, sukses menutupnya — jadi saat paksa
+        // dimatikan, breaker kembali ke perilaku normal dari state
+        // yang tercatat, bukan dari state basi.
+        let guard = guard(1, 60, 4);
+        let ticket = guard
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
+            .await
+            .unwrap();
+        guard.record_failure(&ticket).await;
+        assert!(guard.is_open("srv-bank").await);
+        let forced = guard
+            .acquire(ValidationProduct::BankAccount, "srv-bank", true)
+            .await
+            .expect("forced admits on open circuit");
+        guard.record_failure(&forced).await;
+        assert!(
+            guard.is_open("srv-bank").await,
+            "forced failure must keep the circuit open"
+        );
+        let forced = guard
+            .acquire(ValidationProduct::BankAccount, "srv-bank", true)
+            .await
+            .expect("forced still admits");
+        guard.record_success(&forced).await;
+        assert!(
+            !guard.is_open("srv-bank").await,
+            "forced success must close the circuit again"
+        );
+        assert!(
+            guard
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
+                .await
+                .is_ok(),
+            "normal caller works again once the circuit closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_on_admission_alone_does_not_reset_breaker() {
+        // Meng-admit paksa saja (tanpa hasil) tidak boleh me-reset
+        // breaker — berbeda dengan aktivasi nonaktif->aktif (K34).
+        // Ini mengunci bahwa toggle paksa on/off tidak me-reset.
+        let guard = guard(1, 60, 4);
+        let ticket = guard
+            .acquire(ValidationProduct::BankAccount, "srv-bank", false)
+            .await
+            .unwrap();
+        guard.record_failure(&ticket).await;
+        assert!(guard.is_open("srv-bank").await);
+        let forced = guard
+            .acquire(ValidationProduct::BankAccount, "srv-bank", true)
+            .await
+            .expect("forced admits on open circuit");
+        drop(forced);
+        assert!(
+            guard.is_open("srv-bank").await,
+            "breaker must stay open when no outcome was recorded"
+        );
+        assert!(
+            guard
+                .acquire(ValidationProduct::BankAccount, "srv-bank", false)
+                .await
+                .is_err(),
+            "normal caller still fails fast after forced admission"
+        );
     }
 }

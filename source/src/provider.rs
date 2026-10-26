@@ -298,7 +298,7 @@ impl HttpProvider {
             .ok_or_else(|| AppError::not_found("Endpoint provider tidak ditemukan"))?;
         let ticket = self
             .guard
-            .acquire(product, &endpoint.id.to_string())
+            .acquire(product, &endpoint.id.to_string(), endpoint.force_on)
             .await?;
         let (result, provider_failure) = self
             .validate_upstream_endpoint(&endpoint, request, true)
@@ -328,6 +328,12 @@ impl HttpProvider {
     /// product, so the cost is zero — but before activating a second
     /// server for redundancy, weigh a sequential-fallback mode
     /// (primary first, fallback only on failure) against this fan-out.
+    ///
+    /// Paksa ON (per-endpoint, admin-only): a forced endpoint bypasses
+    /// ONLY its breaker check at admission — it is still subject to the
+    /// product semaphore, queue wait, pacer, and rate limit, and its
+    /// outcome is still recorded to its breaker. So a product whose only
+    /// endpoint is forced ON never fails fast 503 on breaker grounds.
     ///
     /// Fallback ranking (audit 2026-10-25, B1/K4 — ONE ranking, shared by
     /// the whole race; there is no second ranking anywhere): when no leg
@@ -362,7 +368,7 @@ impl HttpProvider {
         for endpoint in &endpoints {
             match self
                 .guard
-                .try_acquire(request.product, &endpoint.id.to_string())
+                .try_acquire(request.product, &endpoint.id.to_string(), endpoint.force_on)
                 .await
             {
                 Ok(Some(ticket)) => admitted.push((endpoint.clone(), ticket)),
@@ -392,7 +398,7 @@ impl HttpProvider {
             for endpoint in endpoints {
                 match self
                     .guard
-                    .acquire(request.product, &endpoint.id.to_string())
+                    .acquire(request.product, &endpoint.id.to_string(), endpoint.force_on)
                     .await
                 {
                     Ok(ticket) => admitted.push((endpoint, ticket)),
@@ -2211,6 +2217,7 @@ mod mode_rejection_tests {
             product: ValidationProduct::Pln,
             name: "uji".to_owned(),
             base_url: "https://example.invalid/check".to_owned(),
+            force_on: false,
             api_key: "kunci-uji".to_owned(),
             timeout_ms: 5_000,
             request_mode: ProviderRequestMode::Cutiezy,
@@ -2591,6 +2598,7 @@ mod pacer_failure_tests {
             product: ValidationProduct::BankAccount,
             name: "uji".to_owned(),
             base_url: format!("http://127.0.0.1:{port}/check"),
+            force_on: false,
             api_key: "kunci-uji".to_owned(),
             timeout_ms: 5_000,
             request_mode: ProviderRequestMode::Generic,

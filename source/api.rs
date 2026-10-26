@@ -170,6 +170,10 @@ pub fn build_router(state: AppState) -> Router {
             patch(set_provider_endpoint_active),
         )
         .route(
+            "/v1/admin/provider-endpoints/:id/force-on",
+            patch(set_provider_endpoint_force_on),
+        )
+        .route(
             "/v1/admin/provider-endpoints/:id/test",
             post(test_provider_endpoint),
         )
@@ -2285,6 +2289,62 @@ async fn set_provider_endpoint_active(
             endpoint.name,
             endpoint.product.label_id(),
             if input.active { "aktif" } else { "nonaktif" }
+        ),
+        Some("provider_endpoint"),
+        Some(&endpoint.id.to_string()),
+    )
+    .await;
+
+    Ok(Json(endpoint))
+}
+
+#[derive(Deserialize)]
+struct SetEndpointForceOnInput {
+    force_on: bool,
+}
+
+/// Admin toggle paksa ON (per-endpoint, peran sama dengan create/update
+/// endpoint: Manager). SENGAJA tidak memanggil
+/// reset_breaker_on_activation: berbeda dengan aktivasi nonaktif->aktif
+/// (K34) yang me-reset breaker, toggle paksa on/off harus membiarkan
+/// state breaker apa adanya — hasil yang tercatat selama paksa ON tetap
+/// berlaku saat paksa dimatikan. Perubahan dicatat di audit dengan
+/// entity terisi (K37).
+async fn set_provider_endpoint_force_on(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<SetEndpointForceOnInput>,
+) -> Result<Json<ProviderEndpoint>, AppError> {
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "PATCH /v1/admin/provider-endpoints/:id/force-on",
+    )
+    .await?;
+    let endpoint = state
+        .provider_configs
+        .set_force_on(id, input.force_on)
+        .await?;
+
+    record_admin_activity_with_entity(
+        &state,
+        &principal,
+        if input.force_on {
+            "Server provider dipaksa ON"
+        } else {
+            "Paksa ON server provider dimatikan"
+        },
+        format!(
+            "Server {} ({}) {}.",
+            endpoint.name,
+            endpoint.product.label_id(),
+            if input.force_on {
+                "dipaksa ON: tetap di-admit meski circuit breaker terbuka (pacer & batas konkurensi tetap berlaku)"
+            } else {
+                "kembali ke perilaku circuit breaker normal"
+            }
         ),
         Some("provider_endpoint"),
         Some(&endpoint.id.to_string()),
@@ -6998,6 +7058,7 @@ mod site_status_tests {
             request_mode: crate::models::ProviderRequestMode::Generic,
             auth_header: "Authorization".to_owned(),
             active: true,
+            force_on: false,
             api_key_configured: true,
             response_mapping: crate::models::ProviderResponseMapping::default_for(
                 crate::models::ValidationProduct::BankAccount,
@@ -7012,13 +7073,13 @@ mod site_status_tests {
         let id = endpoint.id.to_string();
         // Buka breaker, lalu edit yang tetap aktif TIDAK BOLEH me-reset.
         let ticket = guard
-            .acquire(crate::models::ValidationProduct::BankAccount, &id)
+            .acquire(crate::models::ValidationProduct::BankAccount, &id, false)
             .await
             .expect("circuit tertutup menerima");
         guard.record_failure(&ticket).await;
         assert!(
             guard
-                .acquire(crate::models::ValidationProduct::BankAccount, &id)
+                .acquire(crate::models::ValidationProduct::BankAccount, &id, false)
                 .await
                 .is_err(),
             "breaker harus terbuka sebelum edit"
@@ -7026,7 +7087,7 @@ mod site_status_tests {
         reset_breaker_on_activation(&state, true, &endpoint).await;
         assert!(
             guard
-                .acquire(crate::models::ValidationProduct::BankAccount, &id)
+                .acquire(crate::models::ValidationProduct::BankAccount, &id, false)
                 .await
                 .is_err(),
             "edit aktif->aktif tidak boleh me-reset breaker"
@@ -7035,7 +7096,7 @@ mod site_status_tests {
         reset_breaker_on_activation(&state, false, &endpoint).await;
         assert!(
             guard
-                .acquire(crate::models::ValidationProduct::BankAccount, &id)
+                .acquire(crate::models::ValidationProduct::BankAccount, &id, false)
                 .await
                 .is_ok(),
             "transisi nonaktif->aktif harus me-reset breaker"
@@ -7176,7 +7237,7 @@ mod site_status_tests {
             ..ProviderGuardConfig::default()
         });
         let ticket = guard
-            .acquire(ValidationProduct::Ewallet, "srv-ewallet-uji")
+            .acquire(ValidationProduct::Ewallet, "srv-ewallet-uji", false)
             .await
             .expect("circuit tertutup menerima");
         guard.record_failure(&ticket).await;
