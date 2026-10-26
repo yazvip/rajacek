@@ -207,8 +207,19 @@ Portal member: pilih paket → preview (harga diskon dikunci saat order dibuat)
   (string `paid_at` Cutiezy gagal diparse) tetap bisa dicatat refund-nya
   bila statusnya `paid`/`granted` (Fase 1, K23) — bukti alternatifnya
   check-status Paid + nominal cocok.
-- Kill switch off → tombol beli hilang, tapi order berbayar tetap grant via
-  sweep. Webhook URL: https://www.rajacek.com/v1/payments/qris/webhook
+- Kill switch off (Fase 3, B15/D3) → tombol beli hilang DAN semua order
+  waiting yang BELUM dibayar DIBATALKAN saat itu juga (cancel massal
+  saat toggle dimatikan + gerbang di `verify_and_grant` untuk yang
+  terlewat — mencakup tombol member, sweep, dan webhook). QR Cutiezy
+  dibatalkan best-effort (endpoint cancel Cutiezy DIDUKUNG; gagal
+  cancel tidak menggagalkan pembatalan lokal). Pengecualian keras:
+  order yang SUDAH terbayar TETAP di-grant (cancel hanya menyasar
+  waiting + `paid_at` NULL lewat CAS; yang keburu lunas lolos lewat
+  CAS dan di-grant). Order yang dibatalkan kill switch ditandai kolom
+  `package_orders.kill_switch_canceled` (migrasi 0030): re-check
+  terminal B10 TIDAK auto-grant order bertanda ini — pembayaran yang
+  telanjur masuk hanya bisa di-grant lewat resolve-berbukti admin
+  (K26). Webhook URL: https://www.rajacek.com/v1/payments/qris/webhook
   (event asli `qris.payment`; balas 200 ≤5 detik via background).
 - Pengaturan produksi saat snapshot: enabled=1, expiry 15 menit, valid 30
   hari, source_id NULL (create sukses dengan source_id NULL pada 25 Okt
@@ -225,10 +236,20 @@ di tiap handler (UI saja tidak cukup):
 
 | Peran | Boleh |
 |---|---|
-| viewer | GET / baca saja |
-| support | resolve order, status member, assign paket, rate-limit member, refund-record |
-| manager | produk, endpoint provider, tester, guard, paket, rate-limit, api-keys, reveal/regenerate kunci, trial, QRIS, site-settings, adjust kuota |
+| viewer | GET / baca saja (kecuali pengecualian berpokok di bawah) |
+| support | resolve order, status member, rate-limit member, refund-record, rekonsiliasi keuangan |
+| manager | produk, endpoint provider, tester, guard, paket, rate-limit, api-keys, reveal/regenerate kunci, trial, QRIS, site-settings, adjust kuota, assign paket, export CSV, replay DLQ |
 | owner | kelola admin saja (di atas semua) |
+
+Matriks peran Fase 3 (K40 — selaras ke sisi yang lebih ketat; aturan dasar
+"semua GET = Viewer" dengan pengecualian yang didokumentasikan, bukan
+diam-diam): site-settings GET = Manager (konfigurasi situs, bukan data);
+daftar refund-record + rekonsiliasi = Support (angka keuangan, sekeluarga
+dengan pencatatan refund — daftar/detail order biasa tetap Viewer);
+detail member = Viewer TETAPI field `google_sub` hanya untuk Manager+;
+export CSV = Manager (B23, bacaan massal 10.000 baris termasuk email);
+assign paket = Manager + cap kuota manual 10.000.000/assign (B20, sama
+dengan batas adjust).
 
 - Baris `admins` TIDAK membuka login — email baru tetap harus masuk
   `ADMIN_GOOGLE_EMAILS` dulu. Tidak boleh nonaktifkan/demot/hapus diri sendiri
@@ -241,12 +262,48 @@ di tiap handler (UI saja tidak cukup):
 - Monitor provider: `GET /v1/admin/providers/health` (guard in-memory +
   ledger 24 jam; latensi per rute = null karena validation_requests tidak
   menyimpan id rute — ditulis eksplisit, bukan ditebak).
+- Monitor stream + DLQ (Fase 3, B22/B26): `GET /v1/admin/stream-health`
+  (panjang stream + DLQ live dari Redis, breaker terbuka dari guard,
+  status pengiriman alert) + `GET /v1/admin/dlq` (daftar DLQ, terbaru
+  dulu, maks 100, tanpa target mentah) + `POST /v1/admin/dlq/:id/replay`
+  dan `POST /v1/admin/dlq/replay-all` (Manager; persist ulang lewat
+  `persist_usage_event` yang sama dengan worker sehingga idempotent —
+  INSERT IGNORE — lalu XDEL hanya bila sukses; yang gagal
+  persist/parse dipertahankan). Indikator DLQ tidak kosong + stream
+  melewati ambang 80.000 tampil di panel monitor TANPA bergantung pada
+  Telegram; worker juga meng-alert SEKALI saat DLQ bertransisi kosong →
+  tidak kosong (bukan tiap menit).
+- Status alert (Fase 3, K35): `GET /v1/admin/alerts/status` melaporkan
+  kesehatan pengiriman NYATA proses API (`delivery_state`:
+  `never_attempted` = belum pernah mengirim sejak proses berjalan —
+  panel menulis ini eksplisit, bukan "aktif" yang menyesatkan;
+  `last_sent` / `last_failed` + waktu + judul upaya terakhir). Upaya
+  kirim proses worker tidak tercakup di sini (restart proses
+  mengosongkan rekaman) — tetapi indikator stream/DLQ panel dibaca
+  langsung dari Redis, jadi tidak ada yang hilang.
 - Export CSV: `GET /v1/admin/export/:kind` (orders/usage/members, cap 10.000
-  baris + header penanda terpotong; tanpa key/plaintext).
+  baris + header penanda terpotong; tanpa key/plaintext). Minimal
+  Manager sejak Fase 3 (B23, D2); percobaan Viewer yang ditolak tercatat
+  di log aktivitas (jejak probing peran).
 - Site settings: `GET/PUT /v1/admin/site-settings` (pengumuman maks 2000
   karakter, sakelar maintenance). Maintenance default TIDAK memblokir;
-  bila `maintenance_block_validations` = "1", gate di puncak validasi
-  mengembalikan 503 sebelum kuota tersentuh.
+  bila `maintenance_block_validations` = "1"/"true" (case-insensitive,
+  K42), gate di puncak validasi mengembalikan 503 sebelum kuota
+  tersentuh. Penyimpanan LIMA kunci kini SATU transaksi (K42): gagal di
+  tengah = tidak ada yang terapan. Nilai flag tak dikenal yang tak
+  kosong dicatat sebagai peringatan (bukan diam-diam nonaktif).
+  Tester admin JUGA diblokir saat maintenance aktif (K41); resolve
+  order dan grant webhook tetap berjalan (bukan validasi — uang yang
+  sudah dibayar harus tetap bisa di-grant).
+- Revokasi sesi fail-CLOSED (Fase 3, B19/D1): bila Redis terkonfigurasi
+  tapi pemeriksaan revocasi tidak bisa dipastikan, token admin DAN
+  member DITOLAK (503) — login mati saat Redis down, demi keamanan.
+  Tanpa URL Redis sama sekali (mode memory-only/dev), revocasi tidak
+  ada sehingga pemeriksaan melaporkan jelas (bukan fail-closed palsu).
+- Reveal satu-kali (Fase 3, K33): `POST /v1/member/reveal-key` dengan
+  token di body JSON — GET query URL DIHAPUS (token tidak lagi muncul
+  di log akses/proxy). Portal member mengirim POST; kontrak member
+  lain tidak berubah.
 - Status publik: `GET /status` (HTML) + `GET /v1/status` (JSON, tanpa login):
   overall operational/degraded + per produk, tanpa nama provider.
 - Detail member: `GET /v1/admin/members/:id/detail` (profil, semua kunci,
@@ -274,6 +331,8 @@ di tiap handler (UI saja tidak cukup):
   stabil `rajacek-worker-1`.
 - Persist ledger gagal → retry maks 5x → DLQ + ACK (tidak menyumbat ledger).
   Probe liveness `SELECT 1` membedakan DB mati vs event beracun.
+  DLQ bisa dilihat + di-replay dari panel monitor (Fase 3, B26) dan
+  worker meng-alert sekali saat DLQ bertransisi kosong → tidak kosong.
 - Alert fire-and-forget (timeout HTTP 3 detik, tidak memblokir jalur utama):
   needs_review, circuit breaker baru terbuka, XLEN ≥ 80.000. Bila
   `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` belum di-set, alert jatuh ke log

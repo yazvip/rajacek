@@ -339,7 +339,7 @@
     if (view === "admins") loadAdminAccounts().catch(handleApiError);
     if (view === "orders") loadOrders().catch(handleApiError);
     if (view === "analytics") loadAnalytics().catch(handleApiError);
-    if (view === "providers") loadProviderHealth().catch(handleApiError);
+    if (view === "providers") { loadProviderHealth().catch(handleApiError); loadStreamHealth().catch(handleApiError); loadDlq().catch(handleApiError); }
     if (view === "settings") { loadQrisSettings().catch(handleApiError); loadSiteSettings().catch(handleApiError); }
     window.scrollTo({ top: 0, behavior: "smooth" });
     document.body.classList.remove("menu-open");
@@ -1326,13 +1326,88 @@
   }
 
   // AREA 3: status alert Telegram (hanya boolean env ter-set, tanpa secret).
+  // K35 (Fase 3): teks kesehatan pengiriman NYATA, bukan sekadar
+  // "env ter-set". "Belum pernah mengirim" ditulis eksplisit — panel
+  // tidak boleh menampilkan "aktif" yang menyesatkan untuk kondisi itu.
+  function alertDeliveryText(data) {
+    if (!data) return "";
+    const when = data.last_attempt_at ? formatDate(data.last_attempt_at) : "";
+    if (data.delivery_state === "never_attempted") return "Belum pernah mengirim (sejak proses berjalan).";
+    if (data.delivery_state === "last_failed") return `Pengiriman terakhir GAGAL${when ? ` pada ${when}` : ""}${data.last_attempt_title ? ` (${data.last_attempt_title})` : ""} — periksa token/chat Telegram.`;
+    return `Pengiriman terakhir berhasil${when ? ` pada ${when}` : ""}.`;
+  }
+
   async function loadAlertStatus() {
     const el = $("#alert-status");
     if (!el) return;
     const data = await api("/v1/admin/alerts/status");
     el.textContent = data.enabled
-      ? "Alert Telegram: aktif (bot + chat terkonfigurasi)."
-      : "Alert Telegram: nonaktif (env bot/chat belum ter-set; kejadian hanya dicatat di log + aktivitas admin).";
+      ? `Alert Telegram: terkonfigurasi. ${alertDeliveryText(data)}`
+      : `Alert Telegram: nonaktif (env bot/chat belum ter-set; kejadian hanya dicatat di log + aktivitas admin). ${alertDeliveryText(data)}`;
+  }
+
+  // B22/B26 (Fase 3): monitor stream + DLQ di panel — operator tahu
+  // breaker terbuka, stream melewati ambang, dan DLQ tidak kosong
+  // tanpa bergantung pada Telegram.
+  async function loadStreamHealth() {
+    const box = $("#stream-health-box");
+    const note = $("#stream-health-note");
+    if (!box) return;
+    const data = await api("/v1/admin/stream-health");
+    const open = data.breakers_open || [];
+    if (note) {
+      note.textContent = data.redis_available
+        ? `Stream ${data.stream_name}: ${data.stream_length == null ? "—" : formatNumber(data.stream_length)} entri (ambang alarm ${formatNumber(data.stream_warn_threshold)}) · DLQ: ${data.dlq_length == null ? "—" : formatNumber(data.dlq_length)} entri.`
+        : "Redis tidak tersedia: panjang stream/DLQ tidak dapat dibaca (angka breaker tetap live dari guard).";
+    }
+    const chips = [];
+    if (data.stream_over_threshold) chips.push(`<span class="ep-sum-chip"><b>Stream melewati ambang!</b> ${formatNumber(data.stream_length)} &gt; ${formatNumber(data.stream_warn_threshold)}</span>`);
+    if (data.dlq_non_empty) chips.push(`<span class="ep-sum-chip"><b>DLQ tidak kosong!</b> ${formatNumber(data.dlq_length)} event menunggu replay di bawah.</span>`);
+    if (open.length) chips.push(`<span class="ep-sum-chip"><b>Breaker terbuka:</b> ${open.map((item) => escapeHtml(item.endpoint_id)).join(", ")}</span>`);
+    if (!chips.length) chips.push(`<span class="ep-sum-chip"><b>Stream &amp; breaker normal</b>${data.redis_available ? ` · ${formatNumber(data.stream_length)} entri stream · DLQ kosong` : " · Redis tidak tersedia"}</span>`);
+    chips.push(`<span class="ep-sum-chip"><b>Alert:</b> ${escapeHtml(alertDeliveryText(data.alerts))}</span>`);
+    box.innerHTML = chips.join("");
+  }
+
+  async function loadDlq() {
+    const table = $("#dlq-table");
+    const note = $("#dlq-note");
+    if (!table) return;
+    const entries = await api("/v1/admin/dlq");
+    if (note) note.textContent = entries.length
+      ? `${entries.length} entri DLQ terbaru (maks 100). Replay bersifat idempotent: replay ganda tidak menggandakan riwayat/ledger. Entri yang gagal persist/parse dipertahankan.`
+      : "DLQ kosong — tidak ada event yang kehilangan bukti riwayat.";
+    table.innerHTML = entries.length ? entries.map((entry) => `<tr>
+      <td><strong>${escapeHtml(entry.id)}</strong><br /><small>${escapeHtml(entry.reason || "—")}</small></td>
+      <td>${escapeHtml(entry.product || "—")}<br /><small>${escapeHtml(entry.outcome || "—")}</small></td>
+      <td>${escapeHtml(entry.api_key_prefix || "—")}<br /><small>${escapeHtml(entry.target_masked || "—")}</small></td>
+      <td>${escapeHtml(entry.event_id || entry.source_id || "—")}</td>
+      <td><button class="table-action" type="button" data-action="dlq-replay" data-id="${escapeHtml(entry.id)}">Replay</button></td>
+    </tr>`).join("") : `<tr><td colspan="5" class="empty-state">DLQ kosong.</td></tr>`;
+  }
+
+  async function replayDlq(id) {
+    if (!window.confirm(`Replay entri DLQ "${id}"? Event akan dipersist ulang (idempotent) lalu dihapus dari DLQ bila sukses.`)) return;
+    try {
+      const result = await api(`/v1/admin/dlq/${encodeURIComponent(id)}/replay`, { method: "POST" });
+      showToast(`Event ${result.event_id} berhasil di-replay dari DLQ.`, "success");
+      await loadDlq();
+      await loadStreamHealth();
+    } catch (error) {
+      handleApiError(error);
+    }
+  }
+
+  async function replayAllDlq() {
+    if (!window.confirm("Replay SEMUA entri DLQ (maks 100)? Entri yang gagal persist/parse akan dipertahankan, bukan dihapus.")) return;
+    try {
+      const result = await api("/v1/admin/dlq/replay-all", { method: "POST" });
+      showToast(`Replay massal DLQ: ${result.replayed} di-replay, ${result.kept} dipertahankan (dari ${result.attempted}).`, "success");
+      await loadDlq();
+      await loadStreamHealth();
+    } catch (error) {
+      handleApiError(error);
+    }
   }
 
   // AREA 3: daftar + form pencatatan refund untuk satu order.
@@ -2879,6 +2954,8 @@
     $("#refresh-provider-health")?.addEventListener("click", async () => {
       try {
         await loadProviderHealth();
+        await loadStreamHealth();
+        await loadDlq();
         showToast("Kesehatan rute berhasil dimuat ulang.", "success");
       } catch (error) {
         handleApiError(error);
@@ -3072,6 +3149,8 @@
       if (action === "delete-provider") deleteProvider(id);
       if (action === "toggle-provider") toggleProvider(actionElement);
       if (action === "health-toggle-provider") toggleHealthProvider(id);
+      if (action === "dlq-replay") replayDlq(id);
+      if (action === "dlq-replay-all") replayAllDlq();
       if (action === "toggle-provider-detail") {
         const row = actionElement.closest(".ep-row");
         const detail = row ? row.querySelector(".ep-detail") : null;

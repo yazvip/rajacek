@@ -4,18 +4,24 @@
 //! valid until expiry (8 h admin / 12 h member). Revoked token ids live in
 //! Redis with a TTL equal to the token's remaining lifetime.
 //!
-//! Fail-open by design (kept deliberately, audit flow 2026-10-25 B5):
-//! if Redis is unavailable, checks pass and a warning is logged, so a
-//! Redis outage cannot log every user out. Revocation is a second layer
-//! on top of expiry, not a replacement for it. The fail-open is made
-//! honest instead of silent: `revoke` now reports success, and both
-//! logout handlers surface a failed revoke to the caller (a `warning`
-//! field) instead of answering a quiet 204. Fail-closed was considered
-//! for sensitive endpoints (reveal, sandbox, purchase) and deliberately
-//! NOT applied: a Redis outage would then lock every member out of the
-//! portal, while the exposure window of a stolen session is bounded by
-//! the 12 h expiry and, since the member/auth fix, by key binding (a
-//! regenerated key invalidates old member sessions, B3).
+//! Fail-CLOSED since audit flow 2026-10-26, Fase 3 (B19, keputusan D1):
+//! when a Redis URL is configured but the revocation check cannot be
+//! completed (connection lost, command error), the token is REJECTED —
+//! login dies while Redis is down, by design, so a stolen token cannot
+//! ride out a Redis outage until expiry. The old fail-open (checks pass
+//! + warn) is gone from every authentication gate; gates MUST use
+//! [`SessionRevocation::check_revoked`], never the legacy
+//! [`SessionRevocation::is_revoked`] boolean.
+//!
+//! Two deliberate boundaries of the fail-closed rule:
+//! - When NO Redis URL is configured at all (memory-only/dev mode),
+//!   revocation simply does not exist, so the check reports `Clear` —
+//!   there is no Redis to be "down". Production always configures a
+//!   Redis URL, so this branch never weakens a production gate.
+//! - `revoke` (logout) still reports success honestly: a failed revoke
+//!   is surfaced to the caller as a `warning` instead of a quiet
+//!   success, exactly as before — logout honesty is unchanged, only
+//!   the verification side turned fail-closed.
 //!
 //! Reconnect (audit flow B5): a failed connection at boot used to leave
 //! revocation a permanent no-op until process restart. The Redis URL is
@@ -139,22 +145,104 @@ impl SessionRevocation {
         }
     }
 
-    /// True when the token id is on the blocklist. Fail-open on Redis
-    /// errors (warned), so revocation never becomes a login outage.
-    pub async fn is_revoked(&self, jti: &str) -> bool {
+    /// Outcome of a revocation check (B19 fail-closed, Fase 3).
+    /// - `Clear`: the token id is not on the blocklist, OR no Redis URL
+    ///   is configured (revocation absent by design, dev/memory-only).
+    /// - `Revoked`: the token id is on the blocklist — reject it.
+    /// - `Unavailable`: a Redis URL IS configured but the check could
+    ///   not be completed — gates MUST reject the token (fail-closed),
+    ///   never treat this as "not revoked".
+    pub async fn check_revoked(&self, jti: &str) -> RevocationCheck {
+        if self.redis_url.is_none() {
+            return RevocationCheck::Clear;
+        }
         let Some(mut connection) = self.connection().await else {
-            return false;
+            return RevocationCheck::Unavailable;
         };
         match redis::cmd("EXISTS")
             .arg(block_key(jti))
             .query_async::<i64>(&mut connection)
             .await
         {
-            Ok(count) => count > 0,
+            Ok(count) => {
+                if count > 0 {
+                    RevocationCheck::Revoked
+                } else {
+                    RevocationCheck::Clear
+                }
+            }
             Err(error) => {
-                tracing::warn!(?error, "Pemeriksaan revocasi sesi gagal (fail-open)");
-                false
+                tracing::warn!(?error, "Pemeriksaan revocasi sesi gagal (fail-closed)");
+                RevocationCheck::Unavailable
             }
         }
+    }
+
+    /// Legacy boolean view: true only when positively revoked. Kept for
+    /// non-gate callers; authentication gates MUST use
+    /// [`SessionRevocation::check_revoked`] instead, because this
+    /// boolean cannot distinguish "not revoked" from "check failed".
+    pub async fn is_revoked(&self, jti: &str) -> bool {
+        matches!(
+            self.check_revoked(jti).await,
+            RevocationCheck::Revoked
+        )
+    }
+}
+
+/// Hasil pemeriksaan revocasi sesi (lihat
+/// [`SessionRevocation::check_revoked`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevocationCheck {
+    Clear,
+    Revoked,
+    Unavailable,
+}
+
+impl RevocationCheck {
+    /// True only for a positively confirmed non-revoked token. Gates
+    /// reject on anything else (revoked OR unavailable).
+    pub fn is_clear(self) -> bool {
+        matches!(self, RevocationCheck::Clear)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RevocationCheck, SessionRevocation};
+
+    #[tokio::test]
+    async fn no_redis_url_means_revocation_absent_not_unavailable() {
+        // Memory-only/dev mode: no URL configured -> Clear, so local
+        // tests and dev servers keep working without a Redis.
+        let revocation = SessionRevocation::new(None).await;
+        assert_eq!(
+            revocation.check_revoked("jti-apa-pun").await,
+            RevocationCheck::Clear
+        );
+    }
+
+    #[tokio::test]
+    async fn unreachable_configured_redis_is_unavailable_not_clear() {
+        // B19 trigger: Redis configured but unusable -> the gate must
+        // see Unavailable, never a silent Clear. The URL uses an
+        // unknown scheme on purpose: `Client::open` fails FAST on it,
+        // while a refused TCP connection would make the connection
+        // manager retry in the background (that path is exercised by
+        // production reconnects, not by this unit test).
+        let revocation =
+            SessionRevocation::new(Some("bogus-scheme://127.0.0.1:9/")).await;
+        assert_eq!(
+            revocation.check_revoked("jti-apa-pun").await,
+            RevocationCheck::Unavailable
+        );
+        assert!(!revocation.is_revoked("jti-apa-pun").await);
+    }
+
+    #[test]
+    fn only_clear_passes_the_gate() {
+        assert!(RevocationCheck::Clear.is_clear());
+        assert!(!RevocationCheck::Revoked.is_clear());
+        assert!(!RevocationCheck::Unavailable.is_clear());
     }
 }

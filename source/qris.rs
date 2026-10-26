@@ -910,6 +910,12 @@ pub struct PackageOrderRow {
     pub last_error: Option<String>,
     pub created_at: NaiveDateTime,
     pub updated_at: NaiveDateTime,
+    /// Fase 3 (B15/D3): 1 bila order ini dibatalkan kill switch saat
+    /// masih waiting dan belum dibayar. Re-check terminal (B10) TIDAK
+    /// boleh auto-grant order bertanda ini; pembayaran telanjur masuk
+    /// ditangani resolve-berbukti admin (K26). Kolom ini internal dan
+    /// tidak pernah diserialisasi ke view member/admin.
+    pub kill_switch_canceled: i8,
 }
 
 /// Tampilan order untuk member: TANPA token/QRIS string/URL Cutiezy.
@@ -968,7 +974,8 @@ impl PackageOrderRow {
 const ORDER_COLUMNS: &str = "id, member_id, key_id, package_id, package_name, \
     price_idr, quota_hits, rate_limit_per_minute, valid_days, amount_idr, status, \
     qris_token, qris_string, qris_image_url, qris_expires_at, paid_at, granted_at, \
-    granted_quota, granted_expires_at, mutation_ref, last_error, created_at, updated_at";
+    granted_quota, granted_expires_at, mutation_ref, last_error, created_at, updated_at, \
+    kill_switch_canceled";
 
 pub async fn get_order(
     pool: &MySqlPool,
@@ -1921,6 +1928,129 @@ async fn set_order_status(
 }
 
 // ---------------------------------------------------------------------------
+// Kill switch (audit flow 2026-10-26, B15, keputusan D3, Fase 3)
+// ---------------------------------------------------------------------------
+
+/// Keputusan murni gerbang kill switch untuk satu order waiting:
+/// batalkan HANYA bila order masih waiting, belum terbukti dibayar
+/// (`paid_at` kosong), dan kill switch sedang off. Order yang sudah
+/// terbayar (status `paid`/`granted`, atau `paid_at` terisi) TIDAK
+/// PERNAH dibatalkan dari sini — perlindungan uang mengalahkan
+/// pembatalan.
+pub fn kill_switch_cancels_waiting(status: &str, paid: bool, qris_enabled: bool) -> bool {
+    status == "waiting_payment" && !paid && !qris_enabled
+}
+
+/// Keputusan murni re-check terminal: order yang dibatalkan kill switch
+/// TIDAK boleh auto-grant lewat re-check B10, sekalipun Cutiezy
+/// kemudian melaporkan Paid. Pembayaran telanjur masuk untuk order
+/// seperti ini ditangani jalur resolve-berbukti admin (K26), bukan
+/// sweep/verify otomatis. Order `canceled` TANPA tanda ini (batal
+/// member, batal manual lain) tetap mengikuti perilaku B10.
+pub fn kill_switch_blocks_terminal_recheck(status: &str, kill_switch_canceled: bool) -> bool {
+    status == "canceled" && kill_switch_canceled
+}
+
+/// Batalkan SATU order waiting atas nama kill switch. QR Cutiezy
+/// dibatalkan best-effort (endpoint cancel Cutiezy DIDUKUNG — lihat
+/// `QrisClient::cancel`, dipakai jalur yang sama dengan QR yatim):
+/// gagal cancel di Cutiezy TIDAK menggagalkan pembatalan lokal, karena
+/// tanda `kill_switch_canceled` sudah memblokir auto-grant berikutnya;
+/// QR yang masih bisa dibayar setelah itu hanya bisa di-grant lewat
+/// resolve-berbukti admin. CAS `waiting_payment + paid_at IS NULL ->
+/// canceled` menjaga balapan: order yang keburu lunas/grant di antara
+/// pembacaan dan UPDATE ini tidak tersentuh (mengembalikan false).
+/// Mengembalikan true bila baris ini yang dibatalkan.
+pub async fn cancel_waiting_order_for_kill_switch(
+    pool: &MySqlPool,
+    api_key: Option<&str>,
+    base_url: &str,
+    order: &PackageOrderRow,
+) -> Result<bool, AppError> {
+    // Prasyarat yang sama dengan kill_switch_cancels_waiting, tanpa
+    // parameter enabled (pemanggil sudah memutuskan kill switch off).
+    if order.status != "waiting_payment" || order.paid_at.is_some() {
+        return Ok(false);
+    }
+    // Best-effort: batalkan QR di Cutiezy dulu agar tidak bisa dibayar
+    // setelah pembatalan lokal. Tanpa api_key (belum dikonfigurasi)
+    // atau bila cancel gagal, pembatalan lokal tetap jalan — tanda
+    // kill_switch_canceled yang menjaga dari auto-grant, bukan QR.
+    if let (Some(api_key), Some(token)) = (api_key, order.qris_token.as_deref()) {
+        match QrisClient::new(base_url) {
+            Ok(client) => {
+                if let Err(cancel_error) = client.cancel(api_key, token).await {
+                    tracing::warn!(?cancel_error, order_id = %order.id, "Cancel QR Cutiezy untuk kill switch gagal (best-effort); pembatalan lokal tetap jalan, auto-grant diblokir tanda kill_switch_canceled");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(?error, order_id = %order.id, "Klien QRIS untuk cancel kill switch tidak dapat dibuat; pembatalan lokal tetap jalan");
+            }
+        }
+    }
+    let updated = sqlx::query(
+        "UPDATE package_orders SET status = 'canceled', kill_switch_canceled = 1, \
+         last_error = 'Dibatalkan kill switch: order belum dibayar saat QRIS dinonaktifkan', \
+         updated_at = UTC_TIMESTAMP(6) \
+         WHERE id = ? AND status = 'waiting_payment' AND paid_at IS NULL",
+    )
+    .bind(&order.id)
+    .execute(pool)
+    .await
+    .map_err(|_| AppError::internal("Order tidak dapat dibatalkan"))?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Batalkan SEMUA order waiting yang belum dibayar saat kill switch
+/// dimatikan (dipanggil handler pengaturan QRIS setelah save).
+/// Mengembalikan (dibatalkan, terlewat-karena-balapan). Kegagalan DB
+/// per order dicatat dan dilewati — pembatalan yang terlewat tetap
+/// tertangkap gerbang `verify_and_grant` saat order itu diverifikasi
+/// berikutnya, jadi tidak ada order waiting yang lolos permanen.
+pub(crate) async fn cancel_all_waiting_orders(
+    pool: &MySqlPool,
+    config: &AppConfig,
+    cipher: &crate::provider_config::CredentialCipher,
+) -> (usize, usize) {
+    let api_key = match load_qris_settings(pool).await {
+        Ok(settings) => settings
+            .api_key_ciphertext
+            .as_deref()
+            .and_then(|ciphertext| cipher.decrypt(ciphertext).ok()),
+        Err(error) => {
+            tracing::warn!(?error, "Gagal membaca pengaturan QRIS untuk cancel kill switch; cancel QR Cutiezy dilewati, pembatalan lokal tetap jalan");
+            None
+        }
+    };
+    let rows = match sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders \
+         WHERE status = 'waiting_payment' AND paid_at IS NULL ORDER BY created_at ASC"
+    ))
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(?error, "Gagal membaca order waiting untuk cancel kill switch");
+            return (0, 0);
+        }
+    };
+    let mut canceled = 0usize;
+    let mut skipped = 0usize;
+    for order in &rows {
+        match cancel_waiting_order_for_kill_switch(pool, api_key.as_deref(), &config.qris_base_url, order).await {
+            Ok(true) => canceled += 1,
+            Ok(false) => skipped += 1,
+            Err(error) => {
+                tracing::warn!(?error, order_id = %order.id, "Cancel kill switch gagal untuk order ini; gerbang verify akan menangkapnya bila diverifikasi");
+                skipped += 1;
+            }
+        }
+    }
+    (canceled, skipped)
+}
+
+// ---------------------------------------------------------------------------
 // Orkestrasi: create / verify_and_grant / sweep
 // ---------------------------------------------------------------------------
 
@@ -2213,6 +2343,8 @@ fn verdict_for_status(status: &str) -> VerifyOutcome {
 }
 
 /// Re-check satu order terminal (`expired`/`canceled`) — B10.
+/// Pengecualian B15 (Fase 3): order `canceled` bertanda kill switch
+/// TIDAK di-re-check sama sekali — pulang `Canceled` apa adanya.
 /// Order yang ditandai expired oleh sweep lokal bisa ternyata lunas di
 /// Cutiezy (bayar telat / settlement lag): dulu verify langsung pulang
 /// `Expired`/`Canceled` tanpa re-check, dan sweep rutin tidak pernah
@@ -2246,6 +2378,15 @@ async fn verify_terminal_order(
     match store.member_by_id(member_uuid).await? {
         Some(member) if member.status == "active" => {}
         _ => return Ok((view, original)),
+    }
+    // B15 (Fase 3, D3): order yang dibatalkan kill switch TIDAK
+    // auto-grant di sini, sekalipun Cutiezy kemudian melaporkan Paid.
+    // Pembayaran telanjur masuk untuk order seperti ini hanya bisa
+    // di-grant lewat resolve-berbukti admin (K26) — bukan sweep,
+    // webhook, atau tombol member. Order `canceled` tanpa tanda ini
+    // tetap mengikuti re-check B10 di bawah.
+    if kill_switch_blocks_terminal_recheck(&order.status, order.kill_switch_canceled != 0) {
+        return Ok((view, original));
     }
     let Some(token) = order.qris_token.clone() else {
         return Ok((view, original));
@@ -2336,6 +2477,52 @@ pub async fn verify_and_grant(
             return verify_terminal_order(store, config, &order).await;
         }
         _ => {}
+    }
+    // B15 (Fase 3, D3): kill switch off membatalkan order waiting yang
+    // BELUM dibayar — termasuk yang lolos dari cancel massal saat
+    // toggle dimatikan (mis. pengaturan diubah langsung di DB, atau
+    // cancel massal gagal untuk order ini). Gerbang ini berjalan di
+    // SEMUA jalur verify (tombol member, sweep, webhook) karena
+    // ketiganya bermuara di sini. Order yang sudah `paid`/`granted`
+    // tidak pernah sampai ke cabang ini (pulang lebih dulu di atas),
+    // dan order waiting yang `paid_at`-nya terisi tidak dibatalkan
+    // (CAS di cancel_waiting_order_for_kill_switch mensyaratkan
+    // paid_at IS NULL) — pengecualian keras "sudah terbayar tetap
+    // grant" terjaga di kedua lapis.
+    if order.status == "waiting_payment" {
+        match load_qris_settings(&pool).await {
+            Ok(settings) if !settings.enabled => {
+                let cipher = crate::provider_config::CredentialCipher::new(
+                    config.api_key_encryption_key.as_deref(),
+                );
+                let api_key = settings
+                    .api_key_ciphertext
+                    .as_deref()
+                    .and_then(|ciphertext| cipher.decrypt(ciphertext).ok());
+                let _ = cancel_waiting_order_for_kill_switch(
+                    &pool,
+                    api_key.as_deref(),
+                    &config.qris_base_url,
+                    &order,
+                )
+                .await;
+                // Re-read adalah otoritas hasil akhir: bila CAS kalah
+                // karena order keburu lunas/grant, verdict mengikuti
+                // status baru itu (grant untuk yang sudah lunas),
+                // bukan `canceled` palsu.
+                let row = get_order(&pool, &order_id).await?.unwrap_or(order);
+                return Ok(match row.status.as_str() {
+                    "granted" => (view(&row), VerifyOutcome::AlreadyGranted),
+                    "paid" => grant_row(store, &pool, &row).await?,
+                    "canceled" => (view(&row), VerifyOutcome::Canceled),
+                    _ => (view(&row), verdict_for_status(&row.status)),
+                });
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(?error, "Gagal membaca pengaturan QRIS untuk gerbang kill switch; lanjut verifikasi normal (tidak ada grant tanpa pembayaran)");
+            }
+        }
     }
     let member_uuid = Uuid::parse_str(&order.member_id)
         .map_err(|_| AppError::internal("Member order tidak valid"))?;
@@ -2557,6 +2744,11 @@ pub async fn verify_and_grant(
 /// kunci non-aktif (revoked/disabled) membuat grant_row mengembalikan
 /// order ke `needs_review` alih-alih grant — perilaku itu kini benar
 /// ditegakkan grant_package_order, bukan sekadar klaim komentar.
+///
+/// B15 (Fase 3, D3): jalur ini adalah SATU-SATUNYA jalan grant bagi
+/// order `canceled` bertanda kill switch yang ternyata dibayar
+/// (pembayaran telanjur masuk) — admin yang memverifikasi bukti dan
+/// menekan Grant ulang, bukan auto-grant sweep/verify.
 pub async fn resolve_needs_review_order(
     store: &AdminStore,
     config: &AppConfig,
@@ -3055,6 +3247,32 @@ async fn sweep_process_candidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_switch_cancels_only_unpaid_waiting_orders() {
+        // B15/D3: waiting + belum dibayar + switch off -> batal.
+        assert!(kill_switch_cancels_waiting("waiting_payment", false, false));
+        // Pengecualian keras: sudah terbayar tidak pernah dibatalkan.
+        assert!(!kill_switch_cancels_waiting("waiting_payment", true, false));
+        assert!(!kill_switch_cancels_waiting("paid", false, false));
+        assert!(!kill_switch_cancels_waiting("granted", false, false));
+        assert!(!kill_switch_cancels_waiting("expired", false, false));
+        assert!(!kill_switch_cancels_waiting("canceled", false, false));
+        // Switch masih on -> tidak ada pembatalan.
+        assert!(!kill_switch_cancels_waiting("waiting_payment", false, true));
+    }
+
+    #[test]
+    fn kill_switch_blocks_only_flagged_canceled_rechecks() {
+        // B15/D3: canceled bertanda kill switch tidak auto-grant.
+        assert!(kill_switch_blocks_terminal_recheck("canceled", true));
+        // Canceled biasa tetap ikut re-check B10.
+        assert!(!kill_switch_blocks_terminal_recheck("canceled", false));
+        // Tanda pada status lain tidak memblokir apa pun (tanda hanya
+        // pernah ditulis bersama status canceled).
+        assert!(!kill_switch_blocks_terminal_recheck("expired", true));
+        assert!(!kill_switch_blocks_terminal_recheck("waiting_payment", true));
+    }
 
     #[test]
     fn check_status_amount_accepts_string_and_float() {

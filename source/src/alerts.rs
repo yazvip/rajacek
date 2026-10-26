@@ -110,11 +110,43 @@ pub(crate) async fn send_telegram_message(
     }
 }
 
+/// Hasil upaya kirim terakhir di PROSES ini (K35, Fase 3): pengiriman
+/// bersifat fire-and-forget, jadi satu-satunya rekaman hasil yang bisa
+/// dibaca panel adalah yang ditulis task latar ke memori proses ini.
+/// Restart proses mengosongkannya kembali (status lalu melaporkan
+/// `never_attempted` lagi — itu jujur: tidak ada upaya yang tercatat
+/// di proses yang sedang berjalan). Panggilan tanpa env Telegram
+/// BUKAN upaya kirim dan tidak dicatat di sini; `enabled: false`
+/// sudah menyatakan Telegram belum dikonfigurasi.
+#[derive(Clone, Debug)]
+pub struct AlertAttempt {
+    /// "sent" atau "failed".
+    pub outcome: &'static str,
+    pub title: String,
+    pub attempted_at: chrono::DateTime<chrono::Utc>,
+}
+
+static LAST_ALERT_ATTEMPT: std::sync::Mutex<Option<AlertAttempt>> =
+    std::sync::Mutex::new(None);
+
+/// Catat hasil satu upaya kirim (dipakai task latar `alert`, dan tes).
+pub fn record_alert_attempt(outcome: &'static str, title: &str) {
+    let attempt = AlertAttempt {
+        outcome,
+        title: title.to_owned(),
+        attempted_at: chrono::Utc::now(),
+    };
+    if let Ok(mut slot) = LAST_ALERT_ATTEMPT.lock() {
+        *slot = Some(attempt);
+    }
+}
+
 /// Kirim alert secara fire-and-forget. Fungsi ini KEMBALI SEGERA dalam
 /// semua kondisi: tanpa env ia hanya menulis log; dengan env ia
 /// men-spawn task latar dan langsung kembali tanpa menunggu hasil.
 /// Tidak pernah panic dan tidak pernah mengembalikan error ke pemanggil
-/// (kegagalan kirim hanya menjadi log di task latar).
+/// (kegagalan kirim hanya menjadi log di task latar + rekaman upaya
+/// terakhir untuk panel, lihat [`AlertAttempt`]).
 pub fn alert(title: &str, detail: &str) {
     let title = title.to_owned();
     let detail = detail.to_owned();
@@ -136,8 +168,14 @@ pub fn alert(title: &str, detail: &str) {
     let text = build_alert_text(&title, &detail);
     tokio::spawn(async move {
         match send_telegram_message(&base_url, &token, &chat_id, &text).await {
-            Ok(()) => tracing::info!(title = %title, "Alert Telegram terkirim"),
-            Err(error) => tracing::warn!(title = %title, error = %error, "Alert Telegram gagal terkirim"),
+            Ok(()) => {
+                tracing::info!(title = %title, "Alert Telegram terkirim");
+                record_alert_attempt("sent", &title);
+            }
+            Err(error) => {
+                tracing::warn!(title = %title, error = %error, "Alert Telegram gagal terkirim");
+                record_alert_attempt("failed", &title);
+            }
         }
     });
 }
@@ -166,22 +204,59 @@ pub async fn alert_with_store(store: &AdminStore, title: &str, detail: &str) {
         .await;
 }
 
-/// Status alert untuk panel admin: aktif hanya bila kedua env ter-set.
-/// Tidak pernah mengembalikan nilai env apa pun.
+/// Status alert untuk panel admin (K35, Fase 3): BUKAN lagi sekadar
+/// "env ter-set". `delivery_state` melaporkan kesehatan pengiriman
+/// NYATA di proses ini:
+/// - "never_attempted": belum pernah ada upaya kirim sejak proses
+///   berjalan (jangan tampilkan "aktif" yang menyesatkan untuk kondisi
+///   ini — panel wajib menulis "belum pernah mengirim" secara eksplisit).
+/// - "last_sent": upaya terakhir berhasil.
+/// - "last_failed": upaya terakhir gagal (token/chat salah, jaringan
+///   putus, dsb.) — panel wajib menampilkan peringatan persisten.
+/// Tidak pernah mengembalikan nilai env apa pun; judul upaya terakhir
+/// adalah judul tetap pemanggil (tanpa secret/detail).
 #[derive(serde::Serialize)]
 pub struct AlertStatus {
     pub enabled: bool,
+    pub delivery_state: &'static str,
+    pub last_attempt_outcome: Option<&'static str>,
+    pub last_attempt_title: Option<String>,
+    pub last_attempt_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Perakit murni status dari nilai env + upaya terakhir, agar bisa
+/// dites tanpa menyentuh env global maupun memori statis proses.
+pub fn alert_status_from(enabled: bool, last: Option<&AlertAttempt>) -> AlertStatus {
+    match last {
+        None => AlertStatus {
+            enabled,
+            delivery_state: "never_attempted",
+            last_attempt_outcome: None,
+            last_attempt_title: None,
+            last_attempt_at: None,
+        },
+        Some(attempt) => AlertStatus {
+            enabled,
+            delivery_state: if attempt.outcome == "sent" {
+                "last_sent"
+            } else {
+                "last_failed"
+            },
+            last_attempt_outcome: Some(attempt.outcome),
+            last_attempt_title: Some(attempt.title.clone()),
+            last_attempt_at: Some(attempt.attempted_at),
+        },
+    }
 }
 
 pub fn alert_status() -> AlertStatus {
-    AlertStatus {
-        enabled: alerts_enabled(),
-    }
+    let last = LAST_ALERT_ATTEMPT.lock().ok().and_then(|slot| slot.clone());
+    alert_status_from(alerts_enabled(), last.as_ref())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{alerts_enabled_from, build_alert_text, send_telegram_message, alert};
+    use super::{alert_status_from, alerts_enabled_from, build_alert_text, send_telegram_message, alert, AlertAttempt};
     use std::time::Instant;
 
     #[test]
@@ -239,6 +314,35 @@ mod tests {
         std::env::remove_var("TELEGRAM_BOT_TOKEN");
         std::env::remove_var("TELEGRAM_CHAT_ID");
         std::env::remove_var("TELEGRAM_API_BASE_URL");
+    }
+
+    #[test]
+    fn alert_status_reports_real_delivery_not_just_env_presence() {
+        // K35: tanpa upaya apa pun, status jujur "belum pernah
+        // mengirim" — bahkan bila env ter-set (enabled saja bukan bukti
+        // pengiriman berhasil).
+        let never = alert_status_from(true, None);
+        assert_eq!(never.delivery_state, "never_attempted");
+        assert!(never.last_attempt_at.is_none());
+        let failed = alert_status_from(
+            true,
+            Some(&AlertAttempt {
+                outcome: "failed",
+                title: "Circuit breaker provider terbuka".to_owned(),
+                attempted_at: chrono::Utc::now(),
+            }),
+        );
+        assert_eq!(failed.delivery_state, "last_failed");
+        assert_eq!(failed.last_attempt_outcome, Some("failed"));
+        let sent = alert_status_from(
+            false,
+            Some(&AlertAttempt {
+                outcome: "sent",
+                title: "Order perlu tinjauan".to_owned(),
+                attempted_at: chrono::Utc::now(),
+            }),
+        );
+        assert_eq!(sent.delivery_state, "last_sent");
     }
 
     #[tokio::test]

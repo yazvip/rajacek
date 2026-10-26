@@ -142,8 +142,21 @@ async fn member_session_claims(
     {
         return Err(AppError::unauthorized("Sesi member tidak valid"));
     }
-    if !claims.jti.is_empty() && state.session_revocation.is_revoked(&claims.jti).await {
-        return Err(AppError::unauthorized("Sesi member tidak valid"));
+    // B19 fail-closed (Fase 3, D1): revoked -> 401, dan pemeriksaan yang
+    // tidak bisa dipastikan (Redis terkonfigurasi tapi tak terhubung)
+    // -> 503, bukan lolos diam-diam seperti dulu.
+    if !claims.jti.is_empty() {
+        match state.session_revocation.check_revoked(&claims.jti).await {
+            crate::session_revocation::RevocationCheck::Revoked => {
+                return Err(AppError::unauthorized("Sesi member tidak valid"));
+            }
+            crate::session_revocation::RevocationCheck::Unavailable => {
+                return Err(AppError::service_unavailable(
+                    "Pemeriksaan sesi tidak tersedia (Redis tidak terhubung); coba lagi sesaat lagi.",
+                ));
+            }
+            crate::session_revocation::RevocationCheck::Clear => {}
+        }
     }
     Ok(claims)
 }
@@ -1147,8 +1160,12 @@ fn stash_key_reveal(
     token
 }
 
+/// Body POST /v1/member/reveal-key (K33, Fase 3): token satu-kali
+/// dikirim di body JSON, BUKAN query URL — query URL tersimpan di log
+/// akses/proxy sebelum `replaceState` sempat menghapusnya dari address
+/// bar. Struct query lama dihapus bersama rute GET-nya.
 #[derive(Deserialize)]
-pub struct RevealQuery {
+pub struct RevealBody {
     token: String,
 }
 
@@ -1275,7 +1292,7 @@ async fn record_one_time_reveal_activity(state: &AppState, session: &MemberSessi
 pub async fn reveal_key(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<RevealQuery>,
+    Json(body): Json<RevealBody>,
 ) -> Result<Json<RevealResponse>, AppError> {
 
     // A valid member session is required, the token is single-use, and it
@@ -1288,7 +1305,7 @@ pub async fn reveal_key(
             .lock()
             .map_err(|_| AppError::internal("Tabel reveal tidak dapat diakses"))?;
         table.retain(|_, (_, expires, _, _)| *expires > Instant::now());
-        let owned = table.get(&query.token).is_some_and(|(_, _, owner_member, owner_prefix)| {
+        let owned = table.get(&body.token).is_some_and(|(_, _, owner_member, owner_prefix)| {
             session.member.as_ref().is_some_and(|member| member.id == *owner_member)
                 && session.prefix == *owner_prefix
         });
@@ -1298,7 +1315,7 @@ pub async fn reveal_key(
             ));
         }
         table
-            .remove(&query.token)
+            .remove(&body.token)
             .map(|(plaintext, _, _, _)| plaintext)
             .ok_or_else(|| {
                 AppError::not_found("Tautan tampilkan kunci tidak valid atau sudah dipakai")

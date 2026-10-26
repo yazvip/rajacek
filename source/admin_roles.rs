@@ -66,13 +66,34 @@
 //! manager (2) < owner (3).
 //!
 //! Pemetaan endpoint yang sudah ada (lihat `api.rs`):
-//! * GET/read-only -> viewer (termasuk GET /v1/admin/activity).
-//! * grant/resolve order, ubah status member, assign paket member,
-//!   rate-limit member -> support.
+//! * GET/read-only -> viewer (termasuk GET /v1/admin/activity,
+//!   kesehatan provider, kesehatan stream, daftar DLQ).
+//! * grant/resolve order, ubah status member, rate-limit member,
+//!   refund-record, rekonsiliasi keuangan -> support.
 //! * paket/produk/pengaturan (rate-limit default, trial, provider
 //!   guard, endpoint provider, tester), kunci API member
-//!   (buat/cabut/reveal/regenerate), pengaturan QRIS -> manager.
+//!   (buat/cabut/reveal/regenerate), pengaturan QRIS, assign paket
+//!   member (Fase 3, B20), export CSV (Fase 3, B23), replay DLQ
+//!   (Fase 3, B26), site-settings -> manager.
 //! * kelola admin (list/tambah/ubah peran/nonaktifkan/hapus) -> owner.
+//!
+//! Matriks peran Fase 3 (K40 — selaras ke sisi yang lebih ketat):
+//! aturan dasarnya "semua GET = Viewer", dengan pengecualian
+//! BERPOKOK yang didokumentasikan di sini, bukan diam-diam:
+//! - Site-settings GET = Manager: bukan data operasional, melainkan
+//!   konfigurasi situs (pengumuman, banner, sakelar blokir) — baca
+//!   dan tulisnya satu paket.
+//! - Daftar refund-record per order = Support, rekonsiliasi = Support:
+//!   keduanya angka KEUANGAN (uang kembali / nominal per status),
+//!   sekeluarga dengan pencatatan refund (Support) — sementara
+//!   daftar/detail order biasa tetap Viewer (bacaan operasional).
+//! - Detail member = Viewer, TETAPI field `google_sub` (pengenal
+//!   login stabil) hanya diserialisasi untuk Manager+.
+//! - Export CSV = Manager (B23): bacaan massal 10.000 baris termasuk
+//!   email bukan "baca saja" biasa.
+//! - Assign paket = Manager + cap kuota manual 10.000.000 (B20):
+//!   memberi/menghapus kuota adalah mutasi keuangan, bukan dukungan
+//!   pelanggan biasa.
 
 use std::{
     collections::HashMap,

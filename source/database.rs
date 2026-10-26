@@ -58,6 +58,14 @@ impl Database {
         &self.pool
     }
 
+    /// Bungkus pool yang sudah ada (dipakai jalur admin DLQ replay,
+    /// Fase 3/B26: API tidak memegang `Database`, hanya pool store —
+    /// replay memakai `persist_usage_event` yang sama dengan worker
+    /// sehingga idempotensinya identik, bukan INSERT tiruan).
+    pub fn from_pool(pool: MySqlPool) -> Self {
+        Self { pool }
+    }
+
     pub async fn migrate(&self) -> Result<()> {
         sqlx::migrate!("./migrations")
             .run(&self.pool)

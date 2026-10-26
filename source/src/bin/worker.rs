@@ -1,4 +1,9 @@
-use std::{env, time::Duration, time::Instant};
+use std::{
+    env,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
+    time::Instant,
+};
 
 use anyhow::{Context, Result};
 use rajacek_api::{config::AppConfig, database::Database, models::UsageEvent};
@@ -171,6 +176,12 @@ async fn run_consumer_session(
             // Alarm B14: XLEN O(1) sekali per menit di siklus yang sudah
             // ada; tidak ditambahkan ke jalur enqueue yang panas.
             warn_if_stream_too_long(&mut connection, stream_name).await;
+            // B26 (Fase 3): alarm DLQ di siklus yang sama — panel
+            // membaca panjang DLQ langsung dari Redis, jadi alert
+            // Telegram di sini hanya saluran kedua, bukan satu-satunya
+            // jejak. Berbasis transisi (kosong -> tidak kosong) agar
+            // DLQ yang menetap tidak membanjiri chat tiap menit.
+            warn_if_dlq_non_empty(&mut connection, &dead_letter_stream).await;
         }
         // Retry messages still pending for this named consumer before accepting new work. A
         // stable WORKER_CONSUMER_NAME preserves these retries through ordinary restarts.
@@ -592,6 +603,47 @@ async fn warn_if_stream_too_long(connection: &mut ConnectionManager, stream_name
         Ok(_) => {}
         Err(error) => {
             tracing::warn!(?error, "Gagal membaca XLEN untuk alarm panjang stream");
+        }
+    }
+}
+
+/// Status alert DLQ terakhir di proses worker ini: true bila alert
+/// "DLQ tidak kosong" sudah dikirim sejak DLQ terakhir kosong. Reset
+/// saat DLQ kembali kosong, sehingga pengisian berikutnya meng-alert
+/// lagi tepat sekali. Murni transisi — bukan penghitung.
+static DLQ_ALERT_SENT: AtomicBool = AtomicBool::new(false);
+
+/// Alarm B26: alert SEKALI saat DLQ bertransisi kosong -> tidak kosong
+/// (sekali per menit di siklus yang sudah ada, XLEN O(1)). Panel
+/// menampilkan DLQ secara live dari Redis; alert ini hanya saluran
+/// kedua. DLQ yang menetap tidak mengulang alert sampai ia sempat
+/// kosong lagi.
+async fn warn_if_dlq_non_empty(connection: &mut ConnectionManager, dead_letter_stream: &str) {
+    let length: redis::RedisResult<i64> = redis::cmd("XLEN")
+        .arg(dead_letter_stream)
+        .query_async(connection)
+        .await;
+    match length {
+        Ok(length) if length > 0 => {
+            if !DLQ_ALERT_SENT.swap(true, Ordering::SeqCst) {
+                tracing::warn!(
+                    stream = %dead_letter_stream,
+                    length,
+                    "Dead-letter tidak kosong; operator dapat me-replay dari panel monitor"
+                );
+                rajacek_api::alerts::alert(
+                    "Antrean dead-letter tidak kosong",
+                    &format!(
+                        "Dead-letter {dead_letter_stream} berisi {length} event; buka panel monitor untuk melihat dan me-replay."
+                    ),
+                );
+            }
+        }
+        Ok(_) => {
+            DLQ_ALERT_SENT.store(false, Ordering::SeqCst);
+        }
+        Err(error) => {
+            tracing::warn!(?error, "Gagal membaca XLEN DLQ untuk alarm");
         }
     }
 }

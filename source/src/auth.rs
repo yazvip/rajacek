@@ -643,14 +643,16 @@ pub fn session_token_from_headers(
 }
 
 /// Session endpoint with the revocation check applied: a logged-out token
-/// reports unauthenticated even before its expiry.
+/// reports unauthenticated even before its expiry. Fail-closed (B19,
+/// Fase 3): a token whose revocation status cannot be confirmed also
+/// reports unauthenticated, never a live session.
 pub async fn auth_session_response_checked(
     config: &AppConfig,
     headers: &HeaderMap,
     revocation: &crate::session_revocation::SessionRevocation,
 ) -> AuthSessionResponse {
     if let Some((jti, _)) = session_token_from_headers(config, headers) {
-        if revocation.is_revoked(&jti).await {
+        if !revocation.check_revoked(&jti).await.is_clear() {
             return fallback_session_response(config, headers);
         }
     }

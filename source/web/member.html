@@ -1486,7 +1486,9 @@
         if (!token) return;
         history.replaceState({}, '', location.pathname);
         try {
-          const res = await fetch('/v1/member/reveal-key?token=' + encodeURIComponent(token), { credentials: 'same-origin' });
+          // K33 (Fase 3): token dikirim di body POST, BUKAN query URL —
+          // query URL tersimpan di log akses/proxy sebelum replaceState.
+          const res = await fetch('/v1/member/reveal-key', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
           if (!res.ok) return;
           const d = await res.json();
           $('revealKey').textContent = d.api_key;

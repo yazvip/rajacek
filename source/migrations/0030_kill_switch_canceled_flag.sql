@@ -1,0 +1,18 @@
+-- Fase 3 (audit flow 2026-10-26, B15, keputusan D3): penanda order yang
+-- dibatalkan kill switch.
+--
+-- Kill switch off membatalkan order waiting yang BELUM dibayar. Order
+-- yang sudah terbayar TETAP di-grant (pengecualian keras), dan
+-- pembayaran yang telanjur masuk untuk order yang dibatalkan
+-- ditangani jalur resolve-berbukti admin (K26, Fase 1) — BUKAN
+-- auto-grant sweep/verify. Tanpa penanda ini, re-check order terminal
+-- (B10) tidak bisa membedakan "canceled biasa" (boleh auto-grant bila
+-- terbukti lunas) dari "canceled oleh kill switch" (tidak boleh
+-- auto-grant, karena justru itulah yang hendak dihentikan kill switch).
+-- Kolom ini HANYA internal: tidak masuk MemberOrderView/AdminOrderView.
+--
+-- Idempotensi (seperti migrasi 0029): sqlx::migrate! mencatat versi di
+-- _sqlx_migrations sehingga migrasi tidak berjalan dua kali. Jangan
+-- jalankan ALTER ini manual di luar migrasi (pelajaran migrasi 0011:
+-- ALTER manual + file migrasi = duplicate column).
+ALTER TABLE package_orders ADD COLUMN kill_switch_canceled TINYINT(1) NOT NULL DEFAULT 0;

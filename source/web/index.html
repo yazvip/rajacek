@@ -210,6 +210,7 @@
             <article class="security-banner"><span class="security-banner-icon">✓</span><div><strong>Perlindungan SSRF dan secret aktif</strong><p>Hanya HTTPS ke host yang diizinkan · redirect dimatikan · API key terenkripsi.</p></div></article>
             <article class="panel provider-contract-summary" id="provider-contract-summary"><span class="section-kicker">Kontrak aktif</span><h2>Memuat konfigurasi Tukangcek...</h2><p>Mode request, URL produk, dan header autentikasi akan ditampilkan di sini.</p></article>
             <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Kesehatan rute · 24 jam terakhir</span><h2>Monitor rute &amp; failover</h2></div><button class="button button-secondary" id="refresh-provider-health" type="button">Muat ulang</button></div><p class="tester-audit-note">Status circuit breaker dibaca live dari guard (tidak di-cache). Latensi per rute tidak tersedia — ledger tidak menyimpan id rute — jadi latensi, p95, dan success rate ditampilkan per produk. Tombol failover memakai saklar aktif/nonaktif yang sama dengan daftar server di bawah; setiap aksi tercatat di audit admin.</p><p class="tester-audit-note" id="provider-health-note"></p><div id="provider-health-products" class="ep-sum"></div><div class="table-scroll"><table><thead><tr><th>Rute</th><th>Produk</th><th>Aktif</th><th>Circuit</th><th>Gagal beruntun</th><th>Failover</th></tr></thead><tbody id="provider-health-table"></tbody></table></div></article>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Stream &amp; antrean · live dari Redis</span><h2>Monitor stream &amp; dead-letter</h2></div></div><p class="tester-audit-note">Panjang stream dan DLQ dibaca live dari Redis — operator tahu breaker terbuka, stream melewati ambang (80.000), atau DLQ tidak kosong tanpa bergantung pada Telegram. Replay DLQ bersifat idempotent (tidak menggandakan riwayat/ledger) dan hanya untuk peran Manager.</p><p class="tester-audit-note" id="stream-health-note"></p><div id="stream-health-box" class="ep-sum"></div><p class="tester-audit-note" id="dlq-note"></p><div class="table-scroll"><table><thead><tr><th>Entri DLQ</th><th>Produk</th><th>Kunci / Target tersamar</th><th>Event</th><th>Aksi</th></tr></thead><tbody id="dlq-table"></tbody></table></div><div class="form-actions"><button class="button button-secondary" type="button" data-action="dlq-replay-all">Replay semua DLQ</button></div></article>
             <div class="product-grid" id="provider-grid"></div>
           </section>
 
@@ -395,6 +396,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261026-20" defer></script>
+    <script src="/app.js?v=20261026-21" defer></script>
   </body>
 </html>

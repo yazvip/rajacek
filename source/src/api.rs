@@ -101,13 +101,14 @@ pub fn build_router(state: AppState) -> Router {
             get(crate::member::google_callback),
         )
         .route("/v1/member/login", post(crate::member::login))
-        .route("/v1/member/reveal-key", get(crate::member::reveal_key))
-        // K31: reveal is a POST, not a GET, so it falls under the
-        // global CSRF origin check (which only inspects POST/PUT/
-        // PATCH/DELETE). The one-time /v1/member/reveal-key stays a
-        // GET by design: it needs a single-use token, not just the
-        // session cookie, and a cross-site trigger could at most burn
-        // the token, never read the key (same-origin response).
+        // K33 (Fase 3): token reveal satu-kali TIDAK LAGI lewat query
+        // URL GET — token dikirim di body POST JSON, sehingga tidak
+        // tersimpan di log akses/proxy. (Alasan GET lama — "pemicu
+        // lintas-situs paling jauh hanya membakar token" — tidak lagi
+        // diterima: token tetap tidak boleh muncul di URL.) Sebagai
+        // POST, endpoint ini juga jatuh di bawah cek origin CSRF
+        // global, seperti reveal_own_key di bawah.
+        .route("/v1/member/reveal-key", post(crate::member::reveal_key))
         .route(
             "/v1/member/api-key/reveal",
             post(crate::member::reveal_own_key),
@@ -267,6 +268,14 @@ pub fn build_router(state: AppState) -> Router {
             post(resolve_orphan_qr_order),
         )
         .route("/v1/admin/alerts/status", get(get_alert_status))
+        // B22/B26 (Fase 3): kesehatan stream + perkakas DLQ untuk panel
+        // monitor — operator tidak lagi bergantung pada Telegram
+        // untuk tahu breaker terbuka, stream melewati ambang, atau
+        // DLQ tidak kosong.
+        .route("/v1/admin/stream-health", get(get_stream_health))
+        .route("/v1/admin/dlq", get(list_dlq_entries))
+        .route("/v1/admin/dlq/replay-all", post(replay_all_dlq_entries))
+        .route("/v1/admin/dlq/:id/replay", post(replay_dlq_entry))
         .route("/", get(public_landing))
         .with_state(state.clone());
 
@@ -862,13 +871,31 @@ struct PublicStatus {
     maintenance_blocks_validations: bool,
 }
 
-/// "1" (tepat) berarti aktif; nilai lain — termasuk kunci yang hilang
-/// — berarti nonaktif. Fail-closed ke arah TIDAK memblokir.
+/// Normalisasi flag situs (K42, Fase 3): "1" atau "true" (case-insensitive,
+/// di-trim) berarti aktif; sisanya — termasuk "0", "false", kunci yang
+/// hilang, dan nilai tak dikenal — berarti nonaktif. Nilai tak dikenal
+/// yang tak kosong (mis. salah ketik dari edit DB manual, dulu diam-diam
+/// mematikan blokir) DICATAT sebagai peringatan agar tidak lagi
+/// membingungkan: fail-closed-nya kini eksplisit, bukan diam-diam.
+/// Arti flag yang sudah ada tidak berubah: "1" tetap aktif, "0" tetap
+/// nonaktif; yang berubah hanya "true" (dulu nonaktif, kini aktif —
+/// sesuai perintah normalisasi K42) dan keterlihatan nilai tak dikenal.
 fn parse_active_flag(value: Option<String>) -> bool {
-    value
-        .as_deref()
-        .map(str::trim)
-        .is_some_and(|value| value == "1")
+    let Some(raw) = value.as_deref() else {
+        return false;
+    };
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "1" | "true" => true,
+        "0" | "false" | "" => false,
+        other => {
+            tracing::warn!(
+                value = %other,
+                "Nilai flag situs tidak dikenal — diperlakukan nonaktif; perbaiki nilainya menjadi 1/true atau 0/false"
+            );
+            false
+        }
+    }
 }
 
 /// Agregasi status satu produk dari circuit breaker in-memory.
@@ -1054,29 +1081,42 @@ async fn maintenance_blocks_validations(state: &AppState) -> bool {
     )
 }
 
-/// Menyimpan satu kunci runtime_settings beserta `updated_by` (email
-/// admin). Mengembalikan false bila database tidak terpasang atau
-/// tulis gagal — pemanggil memutuskan apakah itu fatal.
-async fn save_site_setting(
+/// Menyimpan SEMUA kunci site-settings dalam SATU transaksi (K42,
+/// Fase 3): gagal di tengah = rollback total, tidak ada yang terapan
+/// setengah-setengah seperti dulu (pengumuman tersimpan, sakelar
+/// blokir tidak). Mengembalikan false bila database tidak terpasang
+/// atau tulis/commit gagal — pemanggil memutuskan apakah itu fatal.
+async fn save_site_settings_atomic(
     state: &AppState,
-    key: &str,
-    value: &str,
+    entries: &[(&str, &str)],
     updated_by: &str,
 ) -> bool {
     let Some(pool) = state.store.pool() else {
         return false;
     };
-    sqlx::query(
-        "INSERT INTO runtime_settings (setting_key, setting_value, updated_by) \
-         VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), \
-         updated_by = VALUES(updated_by)",
-    )
-    .bind(key)
-    .bind(value)
-    .bind(updated_by)
-    .execute(&pool)
-    .await
-    .is_ok()
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return false,
+    };
+    for (key, value) in entries {
+        let written = sqlx::query(
+            "INSERT INTO runtime_settings (setting_key, setting_value, updated_by) \
+             VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), \
+             updated_by = VALUES(updated_by)",
+        )
+        .bind(key)
+        .bind(value)
+        .bind(updated_by)
+        .execute(&mut *tx)
+        .await
+        .is_ok();
+        if !written {
+            // `tx` di-drop tanpa commit -> rollback otomatis; tidak
+            // satu pun kunci dari batch ini yang terapan.
+            return false;
+        }
+    }
+    tx.commit().await.is_ok()
 }
 
 // AUTHZ-ROLE: Manager
@@ -1141,12 +1181,11 @@ async fn update_site_settings(
             },
         ),
     ];
-    for (key, value) in entries {
-        if !save_site_setting(&state, key, value, &email).await {
-            return Err(AppError::service_unavailable(
-                "Pengaturan situs gagal disimpan.",
-            ));
-        }
+    // K42: satu transaksi — gagal = tidak ada yang terapan.
+    if !save_site_settings_atomic(&state, &entries, &email).await {
+        return Err(AppError::service_unavailable(
+            "Pengaturan situs gagal disimpan (tidak ada perubahan yang diterapkan).",
+        ));
     }
     // Sakelar blokir WAJIB tercatat di audit; perubahan nilainya
     // mendapat judul sendiri agar mudah dicari di jejak audit.
@@ -2561,6 +2600,19 @@ async fn admin_provider_tester(
             "Tester admin tidak mengizinkan provider demo. Aktifkan PROVIDER_MODE=http dan konfigurasi endpoint pihak ketiga terlebih dahulu.",
         ));
     }
+    // K41 (Fase 3): tester JUGA diblokir saat maintenance aktif —
+    // komentar lama "semua jalur validasi terblokir" kini benar-benar
+    // berlaku untuk tester. Tester tetap Manager-only, tercatat di
+    // audit, dan tanpa potong kuota di luar maintenance. Pengecualian
+    // yang disengaja dan BUKAN pelanggaran: resolve order dan grant
+    // webhook tetap berjalan saat maintenance (itu bukan validasi —
+    // uang yang sudah dibayar harus tetap bisa di-grant). Bila user
+    // membalikkan keputusan ini, hapus blok ini saja (satu kata).
+    if maintenance_blocks_validations(&state).await {
+        return Err(AppError::service_unavailable(
+            "Maintenance aktif: tester validasi diblokir selama blokir validasi aktif.",
+        ));
+    }
     let endpoint_id = input.endpoint_id;
     let request = normalize_admin_tester_request(input)?;
     let (outcome, upstream_response) = match endpoint_id {
@@ -3051,10 +3103,14 @@ async fn assign_member_package(
     Path(id): Path<Uuid>,
     Json(input): Json<AssignMemberPackageInput>,
 ) -> Result<Json<AdminMemberView>, AppError> {
+    // B20 (Fase 3): assign paket minimal Manager — disamakan dengan
+    // adjust yang sudah Manager + dibatasi. Support tidak boleh lagi
+    // memberi kuota manual tak terbatas atau menghapus kuota berbayar
+    // member lewat assign-replace.
     let principal = require_admin_role_at(
         &state,
         &headers,
-        Role::Support,
+        Role::Manager,
         "POST /v1/admin/members/:id/assign-package",
     )
     .await?;
@@ -3102,6 +3158,16 @@ async fn assign_member_package(
             .quota_hits
             .filter(|hits| *hits > 0)
             .ok_or_else(|| AppError::bad_request("Jumlah hit paket manual wajib diisi"))?;
+        // B20 (Fase 3): kuota manual dibatasi sama dengan batas adjust
+        // (MAX_QUOTA_ADJUST_DELTA) — assign manual tidak lagi bisa
+        // memberi kuota nyaris tak terbatas dalam satu aksi. Paket
+        // katalog tidak dibatasi di sini (nilainya sudah ditetapkan
+        // admin saat paket dibuat, jalur Manager juga).
+        if hits > crate::store::MAX_QUOTA_ADJUST_DELTA as u64 {
+            return Err(AppError::bad_request(
+                "Jumlah hit paket manual maks 10.000.000 per assign (sama dengan batas adjust)",
+            ));
+        }
         (hits, input.rate_limit_per_minute, None, "manual")
     };
     if let Some(rate) = rate_limit {
@@ -3453,7 +3519,13 @@ struct MemberDailyUsageView {
 struct MemberDetailMemberView {
     id: Uuid,
     member_code: Option<String>,
-    google_sub: String,
+    /// Pengenal login stabil member. K40 (Fase 3): HANYA Manager+
+    /// yang menerima field ini — Viewer yang membaca detail member
+    /// tidak mendapatkannya (field dihilangkan dari JSON, bukan
+    /// dikosongkan). Handler mengosongkannya untuk peran < Manager
+    /// setelah `From` (yang selalu mengisi).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    google_sub: Option<String>,
     email: String,
     name: Option<String>,
     picture_url: Option<String>,
@@ -3468,7 +3540,7 @@ impl From<&crate::models::MemberAccount> for MemberDetailMemberView {
         Self {
             id: member.id,
             member_code: member.member_code.clone(),
-            google_sub: member.google_sub.clone(),
+            google_sub: Some(member.google_sub.clone()),
             email: member.email.clone(),
             name: member.name.clone(),
             picture_url: member.picture_url.clone(),
@@ -3547,7 +3619,12 @@ async fn get_member_detail(
     Path(id): Path<Uuid>,
     Query(query): Query<MemberDetailQuery>,
 ) -> Result<Json<MemberDetailResponse>, AppError> {
-    require_admin_role(&state, &headers, Role::Viewer).await?;
+    // K40 (Fase 3): peran teresolusi dibutuhkan untuk menyaring
+    // `google_sub` (Manager+ saja) — require_admin_role membuang
+    // peran, jadi gerbang ditulis eksplisit di sini (sesi + peran,
+    // urutan cek sama).
+    let principal = require_admin(&state, &headers).await?;
+    let role = admin_roles::require_role(&state.store, &principal, Role::Viewer).await?;
     let member = state
         .store
         .member_by_id(id)
@@ -3588,8 +3665,13 @@ async fn get_member_detail(
         .await;
     let usage = fill_usage_days(wib_day, days, &sparse);
     let usage_total_charged = usage.iter().map(|day| day.charged_hits).sum();
+    // K40: google_sub (pengenal stabil) hanya untuk Manager+.
+    let mut member_view = MemberDetailMemberView::from(&member);
+    if !role.satisfies(Role::Manager) {
+        member_view.google_sub = None;
+    }
     Ok(Json(MemberDetailResponse {
-        member: MemberDetailMemberView::from(&member),
+        member: member_view,
         keys,
         orders,
         orders_limit: limit,
@@ -3817,11 +3899,25 @@ async fn update_trial_settings(
 
 async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<AdminPrincipal, AppError> {
     let principal = auth::require_admin(&state.config, headers)?;
-    // Server-side revocation (audit 2026-10-25, B8): a logged-out token is
-    // rejected even before its expiry. The dev-token principal carries no
-    // JWT id and skips this check (it only exists outside production).
-    if !principal.jti.is_empty() && state.session_revocation.is_revoked(&principal.jti).await {
-        return Err(AppError::unauthorized("Sesi admin tidak valid"));
+    // Server-side revocation (audit 2026-10-25, B8; fail-CLOSED since
+    // audit flow 2026-10-26 Fase 3, B19/D1): a logged-out token is
+    // rejected even before its expiry, AND a token whose revocation
+    // status cannot be confirmed (configured Redis unreachable) is
+    // rejected too — login dies while Redis is down, by design. The
+    // dev-token principal carries no JWT id and skips this check (it
+    // only exists outside production).
+    if !principal.jti.is_empty() {
+        match state.session_revocation.check_revoked(&principal.jti).await {
+            crate::session_revocation::RevocationCheck::Revoked => {
+                return Err(AppError::unauthorized("Sesi admin tidak valid"));
+            }
+            crate::session_revocation::RevocationCheck::Unavailable => {
+                return Err(AppError::service_unavailable(
+                    "Pemeriksaan sesi tidak tersedia (Redis tidak terhubung); coba lagi sesaat lagi.",
+                ));
+            }
+            crate::session_revocation::RevocationCheck::Clear => {}
+        }
     }
     Ok(principal)
 }
@@ -4659,6 +4755,30 @@ async fn update_qris_settings(
         ),
     )
     .await;
+    // B15 (Fase 3, D3): mematikan kill switch MEMBATALKAN order waiting
+    // yang belum dibayar — saat itu juga, bukan saat diverifikasi.
+    // Order yang sudah terbayar tidak tersentuh (cancel massal hanya
+    // menyasar waiting + paid_at NULL; yang keburu lunas di antara
+    // pembacaan dan UPDATE lolos lewat CAS). Kegagalan cancel massal
+    // TIDAK menggagalkan save pengaturan: gerbang verify_and_grant
+    // menangkap order yang terlewat saat diverifikasi berikutnya.
+    // Tombol beli yang hilang saat switch off (perilaku lama) tetap
+    // jalan lewat portal member yang membaca `enabled` ini.
+    if !view.enabled {
+        let (canceled, skipped) =
+            crate::qris::cancel_all_waiting_orders(&pool, &state.config, &cipher).await;
+        if canceled > 0 || skipped > 0 {
+            record_admin_activity(
+                &state,
+                &principal,
+                "Order waiting dibatalkan kill switch",
+                format!(
+                    "QRIS dinonaktifkan: {canceled} order waiting belum dibayar dibatalkan (QR Cutiezy dibatalkan best-effort), {skipped} terlewat karena balapan status — gerbang verify menangkap sisanya. Order yang sudah terbayar tidak dibatalkan."
+                ),
+            )
+            .await;
+        }
+    }
     Ok(Json(view))
 }
 
@@ -5088,7 +5208,18 @@ async fn export_admin_csv(
     Path(kind): Path<String>,
     Query(query): Query<AdminExportQuery>,
 ) -> Result<Response, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Viewer).await?;
+    // B23 (Fase 3, D2): export minimal Manager — Viewer tidak boleh
+    // lagi menyedot 10.000 baris data member/order/pemakaian (termasuk
+    // email) sekaligus. Varian `_at` dipakai agar percobaan Viewer
+    // yang ditolak TERCATAT di log aktivitas (jejak probing peran),
+    // bukan hanya 403 diam-diam.
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "GET /v1/admin/export/:kind",
+    )
+    .await?;
     // Validasi filter DULU (400) sebelum menyentuh database/audit.
     let filters = parse_admin_list_filters(
         query.q,
@@ -5357,18 +5488,19 @@ struct ReconciliationResponse {
     summary: crate::qris::ReconciliationSummary,
 }
 
-// Peran: Viewer (ditegakkan server-side via require_admin_role).
-// Ringkasan rekonsiliasi untuk SATU rentang tanggal yang wajib diisi
-// (from + to, maks 366 hari — aturan yang sama dengan filter daftar).
-// Filter status TIDAK diterapkan di sini: ringkasan memecah SEMUA
-// status dalam rentang itu, sehingga total per status dapat dicocokkan
-// dengan jumlah baris daftar pada rentang yang sama.
+// Peran: Support (Fase 3, K40 — diselaraskan ke sisi yang lebih
+// ketat). Rekonsiliasi adalah ringkasan KEUANGAN (nominal per status
+// per rentang), sekeluarga dengan daftar refund-record yang sudah
+// Support — sementara daftar/detail order biasa tetap Viewer karena
+// itu bacaan operasional, bukan angka uang. Lihat matriks peran di
+// admin_roles.rs dan FLOW.md §4.
+// Ditegakkan server-side via require_admin_role.
 async fn get_orders_reconciliation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<ReconciliationQuery>,
 ) -> Result<Json<ReconciliationResponse>, AppError> {
-    require_admin_role(&state, &headers, Role::Viewer).await?;
+    require_admin_role(&state, &headers, Role::Support).await?;
     let pool = qris_pool(&state).await?;
     let (from, to) = match crate::qris::validate_order_date_range(
         query.from.as_deref(),
@@ -5521,14 +5653,475 @@ async fn resolve_orphan_qr_order(
 }
 
 // Peran: Viewer (ditegakkan server-side via require_admin_role).
-// Status alert: aktif hanya bila env Telegram ter-set. Respons ini
-// TIDAK PERNAH memuat nilai env apa pun, hanya boolean.
+// Status alert (K35, Fase 3): BUKAN lagi sekadar "env ter-set" —
+// lihat `alerts::AlertStatus`: enabled + delivery_state (never_
+// attempted / last_sent / last_failed) + upaya terakhir. Respons ini
+// TIDAK PERNAH memuat nilai env apa pun.
 async fn get_alert_status(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<crate::alerts::AlertStatus>, AppError> {
     require_admin_role(&state, &headers, Role::Viewer).await?;
     Ok(Json(crate::alerts::alert_status()))
+}
+
+// ===========================================================================
+// B22/B26 (Fase 3): kesehatan stream + perkakas DLQ untuk panel monitor.
+// ===========================================================================
+//
+// Prinsip: panel TIDAK bergantung pada Telegram untuk tahu ada masalah.
+// Angka-angka di sini dibaca LIVE (breaker dari guard proses API,
+// panjang stream/DLQ dari Redis) — bila Telegram belum di-set atau
+// pengirimannya gagal, panel tetap menampilkan breaker terbuka,
+// stream melewati ambang, dan DLQ yang tidak kosong. Satu batasan
+// yang didokumentasikan: `alerts` di bawah merekam upaya kirim
+// PROSES API saja; upaya kirim proses worker (alarm XLEN/DLQ)
+// tidak terlihat di sini — tetapi indikator DLQ/stream-nya sendiri
+// dibaca langsung dari Redis, jadi tidak ada yang hilang.
+
+/// Ambang alarm panjang stream — HARUS sama dengan
+/// `STREAM_LENGTH_WARN_THRESHOLD` di src/bin/worker.rs (80.000).
+/// Duplikasi disengaja: worker adalah binari terpisah, bukan lib.
+const STREAM_LENGTH_WARN_THRESHOLD: u64 = 80_000;
+
+/// Sufiks stream dead-letter — HARUS sama dengan `DEAD_LETTER_SUFFIX`
+/// di src/bin/worker.rs.
+const DEAD_LETTER_SUFFIX: &str = ":dead-letter";
+
+/// Cap daftar DLQ panel (bukan cap retensi Redis — itu 10.000 di worker).
+const DLQ_LIST_LIMIT: i64 = 100;
+
+#[derive(Serialize)]
+struct BreakerOpenView {
+    endpoint_id: String,
+    product: String,
+    product_label: String,
+    consecutive_failures: u32,
+}
+
+#[derive(Serialize)]
+struct StreamHealthResponse {
+    stream_name: String,
+    redis_available: bool,
+    stream_length: Option<u64>,
+    dlq_length: Option<u64>,
+    stream_warn_threshold: u64,
+    stream_over_threshold: bool,
+    dlq_non_empty: bool,
+    breakers_open: Vec<BreakerOpenView>,
+    alerts: crate::alerts::AlertStatus,
+}
+
+/// Baca XLEN stream utama + DLQ. Gagal baca apa pun -> (false, None,
+/// None): panel menampilkan "Redis tidak tersedia", bukan angka palsu.
+async fn redis_stream_lengths(state: &AppState) -> (bool, Option<u64>, Option<u64>) {
+    let Some(url) = state.config.redis_url.as_deref() else {
+        return (false, None, None);
+    };
+    let client = match redis::Client::open(url) {
+        Ok(client) => client,
+        Err(_) => return (false, None, None),
+    };
+    let mut connection = match tokio::time::timeout(
+        Duration::from_secs(3),
+        redis::aio::ConnectionManager::new(client),
+    )
+    .await
+    {
+        Ok(Ok(connection)) => connection,
+        _ => return (false, None, None),
+    };
+    let stream = state.config.event_stream_name.clone();
+    let dlq = format!("{stream}{DEAD_LETTER_SUFFIX}");
+    let main: redis::RedisResult<i64> = redis::cmd("XLEN")
+        .arg(&stream)
+        .query_async(&mut connection)
+        .await;
+    let dead: redis::RedisResult<i64> = redis::cmd("XLEN")
+        .arg(&dlq)
+        .query_async(&mut connection)
+        .await;
+    match (main, dead) {
+        (Ok(main), Ok(dead)) => (
+            true,
+            Some(main.max(0) as u64),
+            Some(dead.max(0) as u64),
+        ),
+        _ => (false, None, None),
+    }
+}
+
+// Peran: Viewer (bacaan saja).
+async fn get_stream_health(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<StreamHealthResponse>, AppError> {
+    require_admin_role(&state, &headers, Role::Viewer).await?;
+    let breakers_open = match &state.provider_guard {
+        Some(guard) => guard
+            .endpoint_snapshot()
+            .await
+            .into_iter()
+            .filter(|entry| entry.circuit == "open")
+            .map(|entry| BreakerOpenView {
+                endpoint_id: entry.endpoint_id,
+                product: entry.product.as_str().to_owned(),
+                product_label: entry.product.label_id().to_owned(),
+                consecutive_failures: entry.consecutive_failures,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+    let (redis_available, stream_length, dlq_length) =
+        redis_stream_lengths(&state).await;
+    Ok(Json(StreamHealthResponse {
+        stream_name: state.config.event_stream_name.clone(),
+        redis_available,
+        stream_length,
+        dlq_length,
+        stream_warn_threshold: STREAM_LENGTH_WARN_THRESHOLD,
+        stream_over_threshold: stream_length
+            .is_some_and(|length| length > STREAM_LENGTH_WARN_THRESHOLD),
+        dlq_non_empty: dlq_length.is_some_and(|length| length > 0),
+        breakers_open,
+        alerts: crate::alerts::alert_status(),
+    }))
+}
+
+/// Satu entri DLQ mentah dari XRANGE/XREVRANGE (diparse dari
+/// `redis::Value` agar tidak bergantung pada bentuk StreamRangeReply).
+struct DlqRawEntry {
+    id: String,
+    source_stream: String,
+    source_id: String,
+    reason: String,
+    payload: String,
+}
+
+fn redis_value_to_string(value: &redis::Value) -> Option<String> {
+    match value {
+        redis::Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+        redis::Value::SimpleString(text) => Some(text.clone()),
+        redis::Value::Int(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+/// Parse jawaban XRANGE/XREVRANGE menjadi entri DLQ. Murni agar bisa
+/// dites tanpa Redis. Field yang hilang -> string kosong (bukan gagal
+/// total): satu entri korup tidak boleh menyembunyikan entri lain.
+fn parse_dlq_range(value: redis::Value) -> Vec<DlqRawEntry> {
+    let mut entries = Vec::new();
+    let redis::Value::Array(rows) = value else {
+        return entries;
+    };
+    for row in rows {
+        let redis::Value::Array(parts) = row else {
+            continue;
+        };
+        if parts.len() < 2 {
+            continue;
+        }
+        let Some(id) = redis_value_to_string(&parts[0]) else {
+            continue;
+        };
+        let redis::Value::Array(fields) = &parts[1] else {
+            continue;
+        };
+        let mut map = std::collections::HashMap::new();
+        for pair in fields.chunks(2) {
+            if pair.len() == 2 {
+                if let (Some(key), Some(val)) = (
+                    redis_value_to_string(&pair[0]),
+                    redis_value_to_string(&pair[1]),
+                ) {
+                    map.insert(key, val);
+                }
+            }
+        }
+        entries.push(DlqRawEntry {
+            id,
+            source_stream: map.get("source_stream").cloned().unwrap_or_default(),
+            source_id: map.get("source_id").cloned().unwrap_or_default(),
+            reason: map.get("reason").cloned().unwrap_or_default(),
+            payload: map.get("payload").cloned().unwrap_or_default(),
+        });
+    }
+    entries
+}
+
+#[derive(Serialize)]
+struct DlqEntryView {
+    id: String,
+    source_stream: String,
+    source_id: String,
+    reason: String,
+    /// Ringkasan event untuk identifikasi operator — TANPA target
+    /// mentah (payload DLQ bisa memuat target_raw; panel hanya perlu
+    /// yang tersamar + prefix + id event untuk mencocokkan).
+    event_id: Option<String>,
+    product: Option<String>,
+    outcome: Option<String>,
+    occurred_at: Option<String>,
+    api_key_prefix: Option<String>,
+    target_masked: Option<String>,
+}
+
+fn dlq_entry_view(entry: &DlqRawEntry) -> DlqEntryView {
+    let payload: serde_json::Value =
+        serde_json::from_str(&entry.payload).unwrap_or(serde_json::Value::Null);
+    let text = |key: &str| {
+        payload
+            .get(key)
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
+    };
+    DlqEntryView {
+        id: entry.id.clone(),
+        source_stream: entry.source_stream.clone(),
+        source_id: entry.source_id.clone(),
+        reason: entry.reason.clone(),
+        event_id: text("event_id"),
+        product: text("product"),
+        outcome: text("status"),
+        occurred_at: text("occurred_at"),
+        api_key_prefix: text("api_key_prefix"),
+        target_masked: text("target_masked"),
+    }
+}
+
+/// Buka koneksi Redis singkat untuk perkakas DLQ (admin-only, frekuensi
+/// rendah — bukan jalur panas). Gagal -> 503 yang jujur.
+async fn dlq_connection(state: &AppState) -> Result<redis::aio::ConnectionManager, AppError> {
+    let url = state.config.redis_url.as_deref().ok_or_else(|| {
+        AppError::service_unavailable("Redis tidak dikonfigurasi; perkakas DLQ tidak tersedia.")
+    })?;
+    let client = redis::Client::open(url).map_err(|_| {
+        AppError::service_unavailable("Konfigurasi Redis tidak valid.")
+    })?;
+    tokio::time::timeout(
+        Duration::from_secs(3),
+        redis::aio::ConnectionManager::new(client),
+    )
+    .await
+    .map_err(|_| {
+        AppError::service_unavailable("Redis tidak dapat dihubungi (timeout).")
+    })?
+    .map_err(|_| AppError::service_unavailable("Redis tidak dapat dihubungi."))
+}
+
+fn dlq_stream_name(state: &AppState) -> String {
+    format!(
+        "{}{}",
+        state.config.event_stream_name, DEAD_LETTER_SUFFIX
+    )
+}
+
+async fn read_dlq_entries(
+    connection: &mut redis::aio::ConnectionManager,
+    stream: &str,
+    start: &str,
+    end: &str,
+    count: Option<i64>,
+    newest_first: bool,
+) -> Result<Vec<DlqRawEntry>, AppError> {
+    // Daftar: XREVRANGE (terbaru dulu). Replay tunggal/massal: XRANGE
+    // biasa dengan rentang eksplisit (urutan tidak penting di sana).
+    let mut command = if newest_first {
+        let mut command = redis::cmd("XREVRANGE");
+        command.arg(stream).arg("+").arg("-");
+        command
+    } else {
+        let mut command = redis::cmd("XRANGE");
+        command.arg(stream).arg(start).arg(end);
+        command
+    };
+    if let Some(count) = count {
+        command.arg("COUNT").arg(count);
+    }
+    let value: redis::Value = command
+        .query_async(connection)
+        .await
+        .map_err(|_| AppError::service_unavailable("Gagal membaca DLQ dari Redis."))?;
+    Ok(parse_dlq_range(value))
+}
+
+// Peran: Viewer (bacaan saja; entri terbaru dulu).
+async fn list_dlq_entries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<DlqEntryView>>, AppError> {
+    require_admin_role(&state, &headers, Role::Viewer).await?;
+    let mut connection = dlq_connection(&state).await?;
+    let stream = dlq_stream_name(&state);
+    let entries =
+        read_dlq_entries(&mut connection, &stream, "-", "+", Some(DLQ_LIST_LIMIT), true).await?;
+    Ok(Json(
+        entries.iter().map(dlq_entry_view).collect(),
+    ))
+}
+
+/// Replay SATU entri DLQ: persist ulang lewat `persist_usage_event`
+/// yang sama dengan worker (INSERT IGNORE di kedua tabel -> idempotent:
+/// replay ganda tidak menggandakan riwayat maupun ledger), lalu XDEL
+/// HANYA bila persist sukses. Gagal persist/parse -> entri dipertahankan
+/// dan error dilaporkan — tidak ada penghapusan buta.
+async fn replay_dlq_entry(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "POST /v1/admin/dlq/:id/replay",
+    )
+    .await?;
+    let pool = state.store.pool().ok_or_else(|| {
+        AppError::service_unavailable("Database tidak terpasang; replay DLQ tidak tersedia.")
+    })?;
+    let mut connection = dlq_connection(&state).await?;
+    let stream = dlq_stream_name(&state);
+    let entries = read_dlq_entries(&mut connection, &stream, &id, &id, None, false).await?;
+    let entry = entries.into_iter().find(|entry| entry.id == id).ok_or_else(|| {
+        AppError::not_found("Entri DLQ tidak ditemukan (mungkin sudah di-replay).")
+    })?;
+    let event: crate::models::UsageEvent = serde_json::from_str(&entry.payload).map_err(|_| {
+        AppError::bad_request("Payload DLQ tidak dapat diparse sebagai event; entri dipertahankan untuk investigasi manual.")
+    })?;
+    let event_id = event.event_id.to_string();
+    let product = event.product.as_str().to_owned();
+    crate::database::Database::from_pool(pool.clone())
+        .persist_usage_event(&event)
+        .await
+        .map_err(|_| {
+            AppError::service_unavailable("Persist ulang gagal; entri DLQ dipertahankan.")
+        })?;
+    let deleted: redis::RedisResult<i64> = redis::cmd("XDEL")
+        .arg(&stream)
+        .arg(&id)
+        .query_async(&mut connection)
+        .await;
+    if deleted.unwrap_or(0) < 1 {
+        tracing::warn!(dlq_id = %id, event_id = %event_id, "Replay DLQ sukses persist tetapi XDEL tidak menghapus entri (balapan replay ganda?)");
+    }
+    record_admin_activity(
+        &state,
+        &principal,
+        "Event DLQ di-replay",
+        format!("Event {event_id} (produk {product}) dari DLQ {id} berhasil dipersist ulang dan dihapus dari DLQ."),
+    )
+    .await;
+    Ok(Json(serde_json::json!({
+        "replayed": true,
+        "dlq_id": id,
+        "event_id": event_id,
+    })))
+}
+
+#[derive(Serialize)]
+struct DlqReplayAllResponse {
+    attempted: usize,
+    replayed: usize,
+    kept: usize,
+}
+
+#[cfg(test)]
+mod dlq_parse_tests {
+    use super::parse_dlq_range;
+
+    fn bulk(text: &str) -> redis::Value {
+        redis::Value::BulkString(text.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn dlq_range_parses_fields_and_ignores_malformed_rows() {
+        let value = redis::Value::Array(vec![
+            redis::Value::Array(vec![
+                bulk("1729-0"),
+                redis::Value::Array(vec![
+                    bulk("source_stream"),
+                    bulk("validation-events"),
+                    bulk("source_id"),
+                    bulk("1728-0"),
+                    bulk("reason"),
+                    bulk("persist gagal"),
+                    bulk("payload"),
+                    bulk("{\"event_id\":\"abc\"}"),
+                ]),
+            ]),
+            // Baris korup: bukan array -> dilewati, bukan gagal total.
+            bulk("bukan-array"),
+        ]);
+        let entries = parse_dlq_range(value);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "1729-0");
+        assert_eq!(entries[0].source_stream, "validation-events");
+        assert_eq!(entries[0].source_id, "1728-0");
+        assert_eq!(entries[0].reason, "persist gagal");
+        assert_eq!(entries[0].payload, "{\"event_id\":\"abc\"}");
+        assert!(parse_dlq_range(redis::Value::Nil).is_empty());
+    }
+}
+
+/// Replay massal yang aman: tiap entri independen — yang gagal persist
+/// /parse dipertahankan dan dihitung di `kept`, tidak menggagalkan
+/// yang lain. Idempotent seperti replay tunggal.
+async fn replay_all_dlq_entries(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<DlqReplayAllResponse>, AppError> {
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "POST /v1/admin/dlq/replay-all",
+    )
+    .await?;
+    let pool = state.store.pool().ok_or_else(|| {
+        AppError::service_unavailable("Database tidak terpasang; replay DLQ tidak tersedia.")
+    })?;
+    let mut connection = dlq_connection(&state).await?;
+    let stream = dlq_stream_name(&state);
+    let entries = read_dlq_entries(&mut connection, &stream, "-", "+", Some(DLQ_LIST_LIMIT), false).await?;
+    let database = crate::database::Database::from_pool(pool.clone());
+    let mut replayed = 0usize;
+    let mut kept = 0usize;
+    for entry in &entries {
+        let parsed: Result<crate::models::UsageEvent, _> =
+            serde_json::from_str(&entry.payload);
+        let persisted = match parsed {
+            Ok(event) => database.persist_usage_event(&event).await.is_ok(),
+            Err(_) => false,
+        };
+        if persisted {
+            let deleted: redis::RedisResult<i64> = redis::cmd("XDEL")
+                .arg(&stream)
+                .arg(&entry.id)
+                .query_async(&mut connection)
+                .await;
+            if deleted.unwrap_or(0) >= 1 {
+                replayed += 1;
+            } else {
+                kept += 1;
+            }
+        } else {
+            kept += 1;
+        }
+    }
+    record_admin_activity(
+        &state,
+        &principal,
+        "Replay massal DLQ",
+        format!("DLQ: {replayed} entri di-replay, {kept} dipertahankan (gagal persist/parse)."),
+    )
+    .await;
+    Ok(Json(DlqReplayAllResponse {
+        attempted: entries.len(),
+        replayed,
+        kept,
+    }))
 }
 
 async fn get_admin_order(
@@ -6124,12 +6717,18 @@ mod site_status_tests {
     }
 
     #[test]
-    fn only_exact_one_activates_a_flag() {
+    fn truthy_flag_normalization_k42() {
+        // K42 (Fase 3): "1" DAN "true" (case-insensitive) = aktif;
+        // sisanya nonaktif, termasuk nilai tak dikenal seperti "yes".
         assert!(parse_active_flag(Some("1".to_owned())));
+        assert!(parse_active_flag(Some("true".to_owned())));
+        assert!(parse_active_flag(Some("True".to_owned())));
+        assert!(parse_active_flag(Some(" TRUE ".to_owned())));
         assert!(!parse_active_flag(Some("0".to_owned())));
+        assert!(!parse_active_flag(Some("false".to_owned())));
+        assert!(!parse_active_flag(Some("False".to_owned())));
         assert!(!parse_active_flag(None));
         assert!(!parse_active_flag(Some(String::new())));
-        assert!(!parse_active_flag(Some("true".to_owned())));
         assert!(!parse_active_flag(Some("yes".to_owned())));
     }
 
@@ -6844,6 +7443,20 @@ mod admin_export_tests {
         let plain = serde_json::to_string(&account).expect("serialize account");
         assert!(!plain.contains("member_code"));
         assert!(!plain.contains("RC000007"));
+    }
+
+    #[test]
+    fn admin_detail_view_omits_google_sub_when_blanked_for_low_roles() {
+        // K40 (Fase 3): Manager+ menerima google_sub; peran di
+        // bawahnya menerima respons TANPA field itu sama sekali
+        // (skip_serializing, bukan string kosong).
+        let account = member_fixture("member-gsub@example.test", None, "active", 20);
+        let mut view = MemberDetailMemberView::from(&account);
+        let serialized = serde_json::to_string(&view).expect("serialize");
+        assert!(serialized.contains("google_sub"));
+        view.google_sub = None;
+        let serialized = serde_json::to_string(&view).expect("serialize");
+        assert!(!serialized.contains("google_sub"));
     }
 }
 
