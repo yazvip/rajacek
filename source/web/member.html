@@ -377,6 +377,20 @@
         .snippet-copy { font-size:11.5px; padding:4px 8px; }
       }
       #sbBtn { width:100%; }
+/* ===== AUDIT GRUP D 2026-10-26 - TIER 1 (append-only) ===== */
+.kv dd { overflow-wrap:break-word; }
+.key-box code { white-space:normal; overflow-wrap:break-word; }
+.sb-stats strong { overflow-wrap:break-word; }
+.buy-confirm-delta { white-space:nowrap; }
+.pager, .ord-nav { flex-wrap:wrap; }
+@media (max-width:640px) {
+  .kv > div { flex-direction:column; align-items:stretch; }
+  .kv dd { text-align:left; }
+  .chart { overflow-x:auto; }
+  .bar-col { flex:0 0 38px; }
+  .pager { padding-left:14px; padding-right:14px; }
+  .buy-banner > div:last-child { text-align:left !important; }
+}
       .login-wrap form button { width:100%; }
     </style>
   </head>
@@ -1391,7 +1405,7 @@
               <div>${badge(d.status)}</div>
               <div class="sb-stats">
                 ${nameBox}
-                <div><span>Provider</span><strong>${fmtNum(d.meta.provider_latency_ms)} ms</strong></div>
+                <div><span>Latensi provider</span><strong>${fmtNum(d.meta.provider_latency_ms)} ms</strong></div>
                 <div><span>Percobaan</span><strong>${d.meta.attempts > 1 ? 'Ke-' + d.meta.attempts : 'Pertama'}</strong></div>
                 <div><span>Sisa kuota</span><strong>${fmtNum(d.meta.remaining_quota)}</strong></div>
               </div>

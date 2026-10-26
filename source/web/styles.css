@@ -2038,3 +2038,471 @@ td.empty-state { display: table-cell; }
   #view-api-keys #api-key-table td[colspan] { padding-left: 12px; text-align: center; }
   #view-api-keys #api-key-table td[colspan]::before { content: none; }
 }
+
+/* ==========================================================================
+   PATCH GRUP A — audit UI/UX 2026-10-26 (Overview, Analitik, Providers,
+   Tester). APPEND ke akhir styles.css. HANYA tampilan; tidak ada warna
+   tema baru, tidak ada id/data-action yang diubah, tidak ada perilaku
+   filter/tab/pagination yang diubah. Nilai jarak memakai token tema
+   yang sudah ada (12/16/20px).
+   ========================================================================== */
+
+/* --- A1: token tidak lagi patah per huruf (anywhere -> break-word).
+   break-word membungkus di spasi dulu dan hanya memaksa patah bila satu
+   token benar-benar melebihi baris. Mencakup: angka KPI, detail layanan
+   & aktivitas Overview, nilai hasil Tester, nama server / chip ringkasan /
+   URL detail Provider, dan sel tabel Pendapatan & Per produk Analitik
+   (tabel Volume harian sudah nowrap dan tabel rute Provider sudah
+   break-word — keduanya tidak disentuh di sini). --- */
+#view-overview .metric-card strong,
+#view-analytics .metric-card strong { overflow-wrap: break-word; }
+#view-overview .service-info strong,
+#view-overview .service-info small,
+#view-overview .activity-copy strong,
+#view-overview .activity-copy span { overflow-wrap: break-word; }
+#view-tester .tester-result dd { overflow-wrap: break-word; }
+#view-providers .ep-name { overflow-wrap: break-word; }
+#view-providers .ep-sum-chip { overflow-wrap: break-word; }
+#view-providers .ep-detail code { overflow-wrap: break-word; }
+#analytics-revenue-table td,
+#analytics-product-table td { overflow-wrap: break-word; }
+
+/* --- A2: grafik volume Overview di HP — jangan digepengkan.
+   SVG viewBox 720px dipaksa ke ±280px (preserveAspectRatio="none") membuat
+   label tidak terbaca. Pola yang sama dengan tabel: lebar minimum + geser
+   horizontal. Desktop (>560px) tidak berubah karena width: 100% tetap. --- */
+#view-overview .chart-wrap { overflow-x: auto; }
+#view-overview .traffic-svg { min-width: 560px; }
+
+/* --- A3: chip meta Periode Analitik terpotong di HP (data-panel
+   overflow: hidden + chip nowrap ±284px > ±252px lebar heading di 320px).
+   Preseden yang sama sudah ada untuk Settings. Di desktop tidak berubah. --- */
+#view-analytics .panel-heading .count-chip { white-space: normal; overflow-wrap: break-word; }
+
+/* --- A4: celah antar-seksi di bawah 16px -> 16px (token tema).
+   - .ep-sum: 12px -> 16px (ringkasan kontrak + chip produk Monitor rute).
+   - Catatan kedua panel Monitor rute: 12px -> 16px.
+   - Pesan galat dashboard -> grid KPI: tambah margin-bottom 16px
+     (tidak berpengaruh saat hidden).
+   - Status Respons Asli Tester -> tab di atasnya: 12px -> 16px.
+   - Tombol teks Overview: area ketuk 0 -> 8px 6px (hanya di Overview;
+     kedua .text-button hanya ada di view ini). --- */
+#view-providers .ep-sum { margin-top: 16px; }
+#view-providers .data-panel > .tester-audit-note + .tester-audit-note { margin-top: 16px; }
+#dashboard-load-error { margin-bottom: 16px; }
+#tester-panel-raw > .tester-audit-note { margin-top: 16px; }
+#view-overview .text-button { padding: 8px 6px; }
+
+/* --- A5: empty-state yang tidak di tengah.
+   - Hasil Tester kosong/menunggu: teks di tengah kotak 290px (hanya saat
+     kelas empty-state aktif; layout hasil tidak berubah karena app.js
+     melepas kelas itu begitu hasil datang).
+   - Grafik batang Pendapatan kosong: teks di tengah area grafik (hanya
+     saat elemen .empty-state dirender di dalam chart; saat ada data
+     aturan ini tidak berpengaruh). --- */
+#view-tester .tester-result.empty-state { display: grid; place-items: center; }
+#analytics-revenue-chart > .empty-state { flex: 1; align-self: center; }
+
+/* --- A6: kartu "Per produk" Analitik di HP (<=767px) — pola PERSIS kartu
+   Riwayat/Kunci API: thead disembunyikan, tiap <tr> jadi kartu, tiap <td>
+   jadi baris berlabel via ::before dari data-label (dipasang di app.js,
+   lihat §6). Desktop/tablet (>767px) tidak tersentuh: blok ini hanya hidup
+   di media query ini, dan tabel scroll 560px+ tetap berlaku di atasnya.
+   Label terpanjang ("Sukses (valid + belum KYC)", ±24 karakter) aman
+   karena semua nilai kartu ini pendek (angka/persen/"… ms", rata kanan).
+   Baris colspan (empty-state) dikecualikan dari label. --- */
+@media (max-width: 767px) {
+  #analytics-tab-products .table-scroll { overflow: visible; }
+  #analytics-tab-products .table-scroll table { display: block; min-width: 0; }
+  #analytics-tab-products .table-scroll thead { display: none; }
+  #analytics-tab-products .table-scroll tbody { display: block; }
+  #analytics-tab-products #analytics-product-table tr {
+    display: block;
+    margin: 0 16px 12px;
+    padding: 6px 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+  }
+  #analytics-tab-products #analytics-product-table td {
+    position: relative;
+    display: block;
+    padding: 7px 12px 7px 112px;
+    border-top: 1px solid var(--line-soft);
+    text-align: right;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  #analytics-tab-products #analytics-product-table td:first-child { border-top: 0; }
+  #analytics-tab-products #analytics-product-table td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 12px;
+    top: 7px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: left;
+  }
+  #analytics-tab-products #analytics-product-table td[colspan] { padding-left: 12px; text-align: center; }
+  #analytics-tab-products #analytics-product-table td[colspan]::before { content: none; }
+}
+
+/* ==========================================================================
+   AUDIT GRUP B 2026-10-26 — BLOK 1: token, harga, empty-state, catatan.
+   Scoped ke view Grup B saja. Aturan lama yang dipertahankan (tidak
+   disentuh): min-width tabel providers/history/analytics, kartu
+   Riwayat/Kunci API, .row-actions, padding sel 10px 20px.
+   --------------------------------------------------------------------------
+   - P1/K1: `anywhere` -> `break-word` (token hanya patah bila meluber).
+   - P2: nama/deskripsi kartu satu kata panjang tidak lagi meluber.
+   - P3: target sentuh `Kelola` ~20px -> ~44px (padding vertikal 12px).
+   - P4/K3: empty-state grid membentang penuh (1 / -1).
+   - P5: gap kartu 10px -> token 12px; nilai detail produk rata kanan.
+   - K2: harga paket satu baris (`Rp` tidak terpisah dari angka).
+   - R2: catatan rate bawaan tidak lagi menempel border bawah panel.
+   - V2: judul/detail aktivitas `anywhere` -> `break-word`. */
+#view-products .product-card h2, #view-products .product-card p,
+#view-packages .package-card h2, #view-packages .package-card p {
+  overflow-wrap: break-word;
+}
+#view-products .product-detail code { overflow-wrap: break-word; }
+#view-packages .package-list li { overflow-wrap: break-word; }
+#view-products .product-detail > :last-child { text-align: right; }
+#view-products .price-row .card-action { padding: 12px 2px; }
+#view-products .product-grid > .empty-state,
+#view-packages .package-grid > .empty-state { grid-column: 1 / -1; }
+#view-products .product-card, #view-packages .package-card { gap: 12px; }
+#view-packages .package-price { white-space: nowrap; }
+#view-rate-limits #rate-default-note { padding-bottom: 20px; }
+#view-activity .activity-copy strong,
+#view-activity .activity-copy span { overflow-wrap: break-word; }
+
+/* ==========================================================================
+   AUDIT GRUP B 2026-10-26 — BLOK 2: tabel desktop/tablet.
+   Sengaja dibungkus `@media (min-width: 768px)`: kartu HP (≤767px)
+   memakai media yang disjoin, jadi aturan ini TIDAK PERNAH bersaing
+   dengan aturan kartu — khususnya kartu API-KEYS yang sudah benar.
+   Pola mengikuti preseden: providers 720px, analytics 560px,
+   history 1180px — tabel menggeser horizontal di .table-scroll
+   alih-alih menjepit kolom sampai token patah per huruf.
+   - RATE-LIMITS 900px: Nama/Target membungkus (break-word);
+     Limit/Burst/Konkurensi/Status/Aksi nowrap; badge scope nowrap.
+   - API-KEYS 1100px: Nama/Pemilik/Scope membungkus; Prefix (code),
+     Rate/Terakhir/Status/Aksi nowrap.
+   - ADMINS 880px: Email membungkus (break-word); Status/Dibuat/Aksi
+     nowrap (kedua tombol aksi tetap sebaris). */
+@media (min-width: 768px) {
+  #view-rate-limits .table-scroll table { min-width: 900px; }
+  #view-rate-limits #rate-limit-table td { overflow-wrap: break-word; }
+  #view-rate-limits #rate-limit-table td:nth-child(4),
+  #view-rate-limits #rate-limit-table td:nth-child(5),
+  #view-rate-limits #rate-limit-table td:nth-child(6),
+  #view-rate-limits #rate-limit-table td:nth-child(7),
+  #view-rate-limits #rate-limit-table td:nth-child(8) { white-space: nowrap; }
+  #view-rate-limits #rate-limit-table td .scope-badge { white-space: nowrap; }
+
+  #view-api-keys .table-scroll table { min-width: 1100px; }
+  #view-api-keys #api-key-table td { overflow-wrap: break-word; }
+  #view-api-keys #api-key-table td:nth-child(2) code { white-space: nowrap; }
+  #view-api-keys #api-key-table td:nth-child(5),
+  #view-api-keys #api-key-table td:nth-child(6),
+  #view-api-keys #api-key-table td:nth-child(7),
+  #view-api-keys #api-key-table td:nth-child(8) { white-space: nowrap; }
+
+  #view-admins .table-scroll table { min-width: 880px; }
+  #view-admins #admins-table td { overflow-wrap: break-word; }
+  #view-admins #admins-table td:nth-child(3),
+  #view-admins #admins-table td:nth-child(4),
+  #view-admins #admins-table td:nth-child(5) { white-space: nowrap; }
+}
+
+/* ==========================================================================
+   AUDIT GRUP B 2026-10-26 — BLOK 3: kartu mobile RATE-LIMITS + ADMINS.
+   Pola disalin persis dari kartu Kunci API (~L2004-2036): thead
+   disembunyikan; tiap <tr> jadi kartu (margin 0 16px 12px, border +
+   radius token tema); tiap <td> jadi baris berlabel via ::before
+   dari data-label yang dipasang di app.js (R1/M1); .table-scroll
+   dibuat overflow: visible HANYA untuk kedua tabel ini.
+   Tambahan kecil di dalam kartu (bukan perubahan struktur):
+   - tombol aksi kartu: padding 8x12 (~37px, dari ~33px);
+   - row-actions rate-limits rata kanan (nilai kartu lain rata kanan);
+   - select peran admins selebar isi sel kartu (target ~42px). */
+@media (max-width: 767px) {
+  #view-rate-limits .table-scroll, #view-admins .table-scroll { overflow: visible; }
+  #view-rate-limits .table-scroll table, #view-admins .table-scroll table {
+    display: block; min-width: 0;
+  }
+  #view-rate-limits .table-scroll thead, #view-admins .table-scroll thead { display: none; }
+  #view-rate-limits .table-scroll tbody, #view-admins .table-scroll tbody { display: block; }
+  #view-rate-limits #rate-limit-table tr, #view-admins #admins-table tr {
+    display: block;
+    margin: 0 16px 12px;
+    padding: 6px 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+  }
+  #view-rate-limits #rate-limit-table td, #view-admins #admins-table td {
+    position: relative;
+    display: block;
+    padding: 7px 12px 7px 112px;
+    border-top: 1px solid var(--line-soft);
+    text-align: right;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  #view-rate-limits #rate-limit-table td:first-child,
+  #view-admins #admins-table td:first-child { border-top: 0; }
+  #view-rate-limits #rate-limit-table td::before,
+  #view-admins #admins-table td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 12px;
+    top: 7px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    text-align: left;
+  }
+  #view-rate-limits #rate-limit-table td[colspan],
+  #view-admins #admins-table td[colspan] { padding-left: 12px; text-align: center; }
+  #view-rate-limits #rate-limit-table td[colspan]::before,
+  #view-admins #admins-table td[colspan]::before { content: none; }
+  #view-rate-limits #rate-limit-table td .row-actions { justify-content: flex-end; }
+  #view-rate-limits #rate-limit-table td .table-action,
+  #view-admins #admins-table td .table-action { padding: 8px 12px; }
+  #view-admins #admins-table td .admin-role-select {
+    width: 100%; min-width: 0; max-width: 100%;
+  }
+}
+
+/* ==========================================================================
+   AUDIT GRUP B 2026-10-26 — BLOK 4.
+   (a) API-KEYS, di dalam kartu saja — struktur kartu TIDAK disentuh:
+       A2: badge scope rata kanan (nilai kartu lain rata kanan);
+       A3: tombol `Cabut` kartu padding 8x12 (~37px, dari ~33px).
+   (b) ACTIVITY, HP saja (V1, scoped #view-activity — feed overview
+       tidak tersentuh): baris feed membungkus; waktu pindah ke
+       baris kedua di bawah cerita, rata kiri sejajar teks cerita
+       (padding-left 40px = simbol 28px + gap 12px), membungkus di
+       spasi — cerita HP naik dari ~82px menjadi ~212px. */
+@media (max-width: 767px) {
+  #view-api-keys #api-key-table td .scope-list { justify-content: flex-end; }
+  #view-api-keys #api-key-table td .table-action { padding: 8px 12px; }
+  #view-activity .activity-row { flex-wrap: wrap; }
+  #view-activity .activity-time {
+    flex: 1 1 100%;
+    padding-left: 40px;
+    text-align: left;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+}
+
+/* ==========================================================================
+   GRUP C — AUDIT UI/UX 2026-10-26 (append di akhir styles.css)
+   Scope: history, members (+manage/detail/bucket/adjust), orders
+   (+detail/rekon/refund), settings (+guard/latensi), sidebar+header.
+   Prinsip: token tidak patah per huruf (break-word, bukan anywhere);
+   tabel yang tidak muat di HP menjadi kartu berlabel (pola yang sama
+   dengan kartu Riwayat dan kartu Kunci API yang sudah ada); jarak
+   memakai token yang sudah ada (12/16/20px). Tidak ada warna tema
+   yang diubah. Aturan desktop dibungkus min-width:768px supaya tidak
+   berkonflik dengan kartu HP max-width:767px di bawah.
+   ========================================================================== */
+
+/* --- 5.1 Desktop/tablet: lebar minimum tabel + token tidak patah --- */
+@media (min-width: 768px) {
+  /* Daftar member (9 kolom) dan daftar order (6 kolom): tanpa ini
+     tabel width:100% menjepit kolom di layar menengah dan
+     overflow-wrap:anywhere menghancurkan token. Tanggal sengaja
+     TIDAK di-nowrap (membungkus di spasi) agar min-width tidak
+     membengkak oleh formatDate lengkap yang memakai detik. */
+  #view-members .data-panel .table-scroll table { min-width: 1080px; }
+  #view-orders > .data-panel .table-scroll table { min-width: 820px; }
+  /* Detail member: dasar 720px untuk kedua tabel; tabel kunci
+     (kolom adjust ~400px) 1080px lewat :has(), dengan fallback
+     720px bila :has() tidak didukung. */
+  #member-detail-panel .table-scroll table { min-width: 720px; }
+  #member-detail-panel .table-scroll:has(#member-detail-keys) table { min-width: 1080px; }
+  /* Ganti anywhere -> break-word di tabel grup C (menimpa aturan
+     #view-members/#view-orders/#member-detail-panel td lama karena
+     blok ini lebih akhir di file). */
+  #view-members td, #view-orders td, #member-detail-panel td { overflow-wrap: break-word; }
+  #members-table td code, #member-detail-keys td code { overflow-wrap: break-word; }
+  #members-table td .tester-audit-note, #member-detail-keys td .tester-audit-note { overflow-wrap: break-word; }
+  /* Kolom token pendek: tidak boleh patah sama sekali. */
+  #members-table td:nth-child(2),
+  #members-table td:nth-child(5),
+  #members-table td:nth-child(7) { white-space: nowrap; }
+  #orders-table td:nth-child(4) { white-space: nowrap; }
+  #member-detail-keys td:nth-child(3),
+  #member-detail-keys td:nth-child(5),
+  #member-detail-keys td:nth-child(6) { white-space: nowrap; }
+  #member-detail-orders td:nth-child(3),
+  #member-detail-orders td:nth-child(5) { white-space: nowrap; }
+  /* Baris empty-state rata tengah (desktop); di kartu HP sudah
+     rata tengah lewat aturan td[colspan] kartu. */
+  #history-table td[colspan],
+  #member-detail-keys td[colspan],
+  #member-detail-orders td[colspan] { text-align: center; }
+}
+
+/* --- 5.2 Kartu mobile <=767px: members, orders, detail member ---
+   Pola persis kartu Riwayat/Kunci API: thead hilang, tr jadi kartu,
+   td jadi baris berlabel (::before dari data-label app.js).
+   Label ::before diberi width 96px (di dalam padding kiri 112px)
+   supaya label panjang ("Gratis invalid hari ini",
+   "Adjust kuota manual") membungkus sendiri tanpa menabrak nilai.
+   Panel daftar adalah .data-panel (padding 0) -> kartu margin
+   0 16px seperti riwayat; panel detail adalah .panel (padding
+   20px) -> kartu margin 0 0 12px supaya tidak inset ganda. */
+@media (max-width: 767px) {
+  #view-members .data-panel .table-scroll,
+  #view-orders > .data-panel .table-scroll { overflow: visible; }
+  #view-members .data-panel .table-scroll table,
+  #view-orders > .data-panel .table-scroll table { display: block; min-width: 0; }
+  #view-members .data-panel .table-scroll thead,
+  #view-orders > .data-panel .table-scroll thead { display: none; }
+  #view-members .data-panel .table-scroll tbody,
+  #view-orders > .data-panel .table-scroll tbody { display: block; }
+  #view-members #members-table tr,
+  #view-orders #orders-table tr {
+    display: block;
+    margin: 0 16px 12px;
+    padding: 6px 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+  }
+  #view-members #members-table td,
+  #view-orders #orders-table td {
+    position: relative;
+    display: block;
+    padding: 7px 12px 7px 112px;
+    border-top: 1px solid var(--line-soft);
+    text-align: right;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  #view-members #members-table td:first-child,
+  #view-orders #orders-table td:first-child { border-top: 0; }
+  #view-members #members-table td::before,
+  #view-orders #orders-table td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 12px;
+    top: 7px;
+    width: 96px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: left;
+  }
+  #view-members #members-table td .tester-audit-note { overflow-wrap: break-word; }
+  /* Tombol aksi kartu member: flex container tidak ikut text-align
+     kanan induknya, jadi diratakan kanan eksplisit. */
+  #view-members #members-table td .row-actions { justify-content: flex-end; }
+  /* Detail member: kartu di dalam .panel (padding 20px). */
+  #member-detail-panel .table-scroll { overflow: visible; }
+  #member-detail-panel .table-scroll table { display: block; min-width: 0; }
+  #member-detail-panel .table-scroll thead { display: none; }
+  #member-detail-panel .table-scroll tbody { display: block; }
+  #member-detail-panel #member-detail-keys tr,
+  #member-detail-panel #member-detail-orders tr {
+    display: block;
+    margin: 0 0 12px;
+    padding: 6px 0;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .05);
+  }
+  #member-detail-panel #member-detail-keys td,
+  #member-detail-panel #member-detail-orders td {
+    position: relative;
+    display: block;
+    padding: 7px 12px 7px 112px;
+    border-top: 1px solid var(--line-soft);
+    text-align: right;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+  #member-detail-panel #member-detail-keys td:first-child,
+  #member-detail-panel #member-detail-orders td:first-child { border-top: 0; }
+  #member-detail-panel #member-detail-keys td::before,
+  #member-detail-panel #member-detail-orders td::before {
+    content: attr(data-label);
+    position: absolute;
+    left: 12px;
+    top: 7px;
+    width: 96px;
+    color: var(--muted);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.35;
+    text-align: left;
+  }
+  #member-detail-panel #member-detail-keys td[colspan],
+  #member-detail-panel #member-detail-orders td[colspan] { padding-left: 12px; text-align: center; }
+  #member-detail-panel #member-detail-keys td[colspan]::before,
+  #member-detail-panel #member-detail-orders td[colspan]::before { content: none; }
+  #member-detail-panel #member-detail-keys td .tester-audit-note { overflow-wrap: break-word; }
+  /* Form adjust di kartu: menumpuk penuh supaya tetap terpakai. */
+  #member-detail-panel .member-adjust-form input[type="number"] { width: 100%; }
+  #member-detail-panel .member-adjust-form input[type="text"] { flex: 1 1 100%; }
+}
+
+/* --- 5.3 Panel manage/detail member: kunci utuh + jarak seksi --- */
+#member-manage-panel .member-key-row code {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-wrap: normal;
+  white-space: nowrap;
+}
+#member-manage-panel .member-key-row .button { flex: none; }
+#member-detail-buckets, #member-detail-usage { margin-top: 12px; }
+.member-usage-row > span:first-child, .member-usage-row > strong { white-space: nowrap; }
+
+/* --- 5.4 Detail order + pagination riwayat: token + jarak --- */
+#order-detail .order-hero-id, #order-detail .order-hero-id code { overflow-wrap: break-word; }
+#order-detail .order-field-value { overflow-wrap: break-word; }
+#order-detail .order-callout, #order-detail #order-refunds ul li { overflow-wrap: break-word; }
+#view-history .data-panel > .form-actions { padding-top: 16px; }
+
+/* --- 5.5 Kartu HP riwayat: anywhere -> break-word (konsisten
+   dengan kartu Kunci API). Desktop tidak berubah. --- */
+@media (max-width: 767px) {
+  #view-history #history-table td { overflow-wrap: break-word; }
+  #view-history #history-table td code { overflow-wrap: break-word; }
+}
+
+/* --- 5.6 Settings: deklarasi ulang aturan yang mati karena
+   tersarang di dalam blok .settings-status (lihat C-S1). Aturan
+   tersarang lama tidak pernah cocok, jadi aturan top-level ini
+   langsung berlaku tanpa edit tengah file. --- */
+#view-settings .panel > form.form-grid { margin-top: 16px; }
+#view-settings .panel-heading .count-chip { white-space: normal; }
+
+/* --- 5.7 Sidebar HP: backdrop off-canvas (lihat C-T2). Dasar
+   display:none di semua lebar; hanya tampil saat body.menu-open
+   dan hanya di <=1023px (di desktop sidebar selalu terlihat dan
+   backdrop tidak pernah dipakai). z 65: di bawah sidebar (70),
+   di atas topbar/konten (20); warna overlay sama dengan backdrop
+   modal. --- */
+.sidebar-backdrop { display: none; }
+@media (max-width: 1023px) {
+  body.menu-open .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 65;
+    background: rgba(15, 23, 42, .45);
+  }
+}

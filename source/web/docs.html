@@ -60,7 +60,9 @@
       .docs-body summary { cursor:pointer; font-weight:700; color:var(--ink); }
       .docs-body details p { margin:.55rem 0 0; }
       @media (max-width: 900px) { .site-header nav { display:none; } .docs-layout { grid-template-columns:1fr; padding-top:1.6rem; } .docs-toc { position:static; } .docs-body { padding:1.7rem 1.3rem 2.2rem; } .docs-body h1 { font-size:2rem; } }
-    </style>
+    /* AUDIT GRUP D 2026-10-26 - OPSIONAL docs: tabel di-scroll di HP, bukan meluber. */
+@media (max-width: 640px) { .docs-body table { display:block; overflow-x:auto; } }
+</style>
   </head>
   <body>
     <a class="skip-link" href="#content">Lewati ke konten utama</a>

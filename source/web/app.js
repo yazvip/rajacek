@@ -241,6 +241,7 @@
   function openModal(id) {
     const modal = $(`#${id}`);
     if (!modal) return;
+    document.body.classList.remove("menu-open");
     $("#modal-backdrop").hidden = false;
     modal.hidden = false;
     document.body.style.overflow = "hidden";
@@ -293,7 +294,9 @@
     const name = session?.name || "Administrator";
     const email = session?.email || "Akses belum diverifikasi";
     $("#profile-name").textContent = name;
+    $("#profile-name").title = name;
     $("#profile-email").textContent = email;
+    $("#profile-email").title = email;
     $("#profile-avatar").textContent = name.trim().slice(0, 1).toUpperCase() || "A";
 
     const google = $("#google-login-button");
@@ -850,12 +853,13 @@
       table.innerHTML = `<tr><td colspan="8"><div class="empty-state">Belum ada kebijakan rate limit.</div></td></tr>`;
       return;
     }
+    const scopeLabels = { global: "Global", api_key: "Kunci API", ip: "IP", package: "Paket", endpoint: "Endpoint" };
     table.innerHTML = state.rateLimits.map((policy) => `<tr>
-      <td><span class="table-title">${escapeHtml(policy.name)}</span><span class="table-subtitle">Diperbarui ${relativeTime(policy.updated_at)}</span></td>
-      <td><span class="scope-badge">${escapeHtml(policy.scope)}</span></td><td>${escapeHtml(policy.target)}</td>
-      <td>${formatNumber(policy.requests_per_minute)} RPM</td><td>${formatNumber(policy.burst)}</td><td>${formatNumber(policy.concurrency_limit)}</td>
-      <td>${statusBadge(policy.active ? "active" : "inactive")}</td>
-      <td><span class="row-actions"><button class="table-action" data-action="edit-rate-limit" data-id="${policy.id}" type="button">Edit</button><button class="table-action danger" data-action="delete-rate-limit" data-id="${policy.id}" type="button">Hapus</button></span></td>
+      <td data-label="Nama kebijakan"><span class="table-title">${escapeHtml(policy.name)}</span><span class="table-subtitle">Diperbarui ${relativeTime(policy.updated_at)}</span></td>
+      <td data-label="Scope"><span class="scope-badge">${escapeHtml(scopeLabels[policy.scope] || policy.scope)}</span></td><td data-label="Target">${escapeHtml(policy.target)}</td>
+      <td data-label="Limit">${formatNumber(policy.requests_per_minute)} RPM</td><td data-label="Burst">${formatNumber(policy.burst)}</td><td data-label="Konkurensi">${formatNumber(policy.concurrency_limit)}</td>
+      <td data-label="Status">${statusBadge(policy.active ? "active" : "inactive")}</td>
+      <td data-label="Aksi"><span class="row-actions"><button class="table-action" data-action="edit-rate-limit" data-id="${policy.id}" type="button">Edit</button><button class="table-action danger" data-action="delete-rate-limit" data-id="${policy.id}" type="button">Hapus</button></span></td>
     </tr>`).join("");
   }
 
@@ -946,8 +950,9 @@
     }
     $("#admins-empty").hidden = true;
     tbody.innerHTML = state.adminAccounts.map((account) => {
-      const roleOptions = ["viewer", "support", "manager", "owner"].map((role) => `<option value="${role}" ${account.role === role ? "selected" : ""}>${role}</option>`).join("");
-      return `<tr><td>${escapeHtml(account.email)}</td><td><select class="admin-role-select" data-id="${account.id}">${roleOptions}</select></td><td>${statusBadge(account.active ? "active" : "inactive")}</td><td>${formatDate(account.created_at)}</td><td><button class="table-action" type="button" data-action="admin-toggle" data-id="${account.id}" data-active="${account.active ? "1" : "0"}">${account.active ? "Nonaktifkan" : "Aktifkan"}</button><button class="table-action danger" type="button" data-action="admin-delete" data-id="${account.id}">Hapus</button></td></tr>`;
+      const roleLabels = { viewer: "Viewer", support: "Support", manager: "Manager", owner: "Owner" };
+      const roleOptions = ["viewer", "support", "manager", "owner"].map((role) => `<option value="${role}" ${account.role === role ? "selected" : ""}>${roleLabels[role]}</option>`).join("");
+      return `<tr><td data-label="Email">${escapeHtml(account.email)}</td><td data-label="Peran"><select class="admin-role-select" data-id="${account.id}">${roleOptions}</select></td><td data-label="Status">${statusBadge(account.active ? "active" : "inactive")}</td><td data-label="Dibuat">${formatDate(account.created_at)}</td><td data-label="Aksi"><button class="table-action" type="button" data-action="admin-toggle" data-id="${account.id}" data-active="${account.active ? "1" : "0"}">${account.active ? "Nonaktifkan" : "Aktifkan"}</button><button class="table-action danger" type="button" data-action="admin-delete" data-id="${account.id}">Hapus</button></td></tr>`;
     }).join("");
     $$(".admin-role-select", tbody).forEach((select) => {
       select.addEventListener("change", async () => {
@@ -1105,15 +1110,15 @@
     $("#members-count").textContent = `${formatNumber(state.members.length)} member`;
     $("#members-empty").hidden = state.members.length > 0;
     $("#members-table").innerHTML = state.members.map((member) => `<tr>
-      <td><strong>${escapeHtml(member.name || member.email)}</strong><br /><span class="tester-audit-note">${escapeHtml(member.email)}</span><br /><code>${escapeHtml(member.key_prefix || "—")}</code></td>
-      <td><strong>${escapeHtml(member.member_code || "—")}</strong></td>
-      <td>${escapeHtml(planLabel[member.plan_kind] || member.plan_kind)}</td>
-      <td><span class="status-badge ${member.status === "active" ? "valid" : "invalid"}">${member.status === "active" ? "Aktif" : "Nonaktif"}</span>${member.key_status === "revoked" ? `<br /><span class="status-badge invalid">kunci dicabut</span>` : ""}</td>
-      <td>${member.quota_remaining == null ? "—" : `${formatNumber(member.quota_remaining)} / ${formatNumber(member.quota_total)}`}</td>
-      <td>${member.expires_at ? escapeHtml(formatDate(member.expires_at)) : "—"}</td>
-      <td>${member.rate_limit_per_minute == null ? "—" : `${formatNumber(member.rate_limit_per_minute)}/mnt`}</td>
-      <td>${member.last_login_at ? escapeHtml(formatDate(member.last_login_at)) : "—"}</td>
-      <td><span class="row-actions"><button class="button button-secondary" type="button" data-member-detail="${escapeHtml(member.id)}">Detail</button><button class="button button-secondary" type="button" data-manage-member="${escapeHtml(member.id)}">Kelola</button></span></td>
+      <td data-label="Member"><strong>${escapeHtml(member.name || member.email)}</strong><br /><span class="tester-audit-note">${escapeHtml(member.email)}</span><br /><code>${escapeHtml(member.key_prefix || "—")}</code></td>
+      <td data-label="Kode member"><strong>${escapeHtml(member.member_code || "—")}</strong></td>
+      <td data-label="Plan">${escapeHtml(planLabel[member.plan_kind] || member.plan_kind)}</td>
+      <td data-label="Status"><span class="status-badge ${member.status === "active" ? "valid" : "invalid"}">${member.status === "active" ? "Aktif" : "Nonaktif"}</span>${member.key_status === "revoked" ? `<br /><span class="status-badge invalid">kunci dicabut</span>` : ""}</td>
+      <td data-label="Kuota">${member.quota_remaining == null ? "—" : `${formatNumber(member.quota_remaining)} / ${formatNumber(member.quota_total)}`}</td>
+      <td data-label="Aktif s/d">${member.expires_at ? escapeHtml(formatDate(member.expires_at)) : "—"}</td>
+      <td data-label="Rate limit">${member.rate_limit_per_minute == null ? "—" : `${formatNumber(member.rate_limit_per_minute)}/mnt`}</td>
+      <td data-label="Login terakhir">${member.last_login_at ? escapeHtml(formatDate(member.last_login_at)) : "—"}</td>
+      <td data-label="Aksi"><span class="row-actions"><button class="button button-secondary" type="button" data-member-detail="${escapeHtml(member.id)}">Detail</button><button class="button button-secondary" type="button" data-manage-member="${escapeHtml(member.id)}">Kelola</button></span></td>
     </tr>`).join("");
     $$("#members-table [data-manage-member]").forEach((button) => {
       button.addEventListener("click", () => openMemberManage(button.dataset.manageMember));
@@ -1325,12 +1330,12 @@
     if (next) next.disabled = state.orders.length < state.ordersPage.limit;
     $("#orders-empty").hidden = state.orders.length > 0;
     $("#orders-table").innerHTML = state.orders.map((order) => `<tr>
-      <td>${escapeHtml(formatDate(order.created_at))}</td>
-      <td><strong>${escapeHtml(order.member_email || "—")}</strong></td>
-      <td>${escapeHtml(order.package_name)}</td>
-      <td>${formatRupiah(order.amount_idr)}</td>
-      <td><span class="status-badge ${order.status === "granted" ? "valid" : order.status === "needs_review" ? "invalid" : ""}">${escapeHtml(statusLabel[order.status] || order.status)}</span></td>
-      <td><button class="button button-secondary" type="button" data-order-detail="${escapeHtml(order.id)}">Detail</button></td>
+      <td data-label="Waktu">${escapeHtml(formatDate(order.created_at))}</td>
+      <td data-label="Member"><strong>${escapeHtml(order.member_email || "—")}</strong></td>
+      <td data-label="Paket">${escapeHtml(order.package_name)}</td>
+      <td data-label="Nominal">${formatRupiah(order.amount_idr)}</td>
+      <td data-label="Status"><span class="status-badge ${order.status === "granted" ? "valid" : order.status === "needs_review" ? "invalid" : ""}">${escapeHtml(statusLabel[order.status] || order.status)}</span></td>
+      <td data-label="Aksi"><button class="button button-secondary" type="button" data-order-detail="${escapeHtml(order.id)}">Detail</button></td>
     </tr>`).join("");
     $$("#orders-table [data-order-detail]").forEach((button) => {
       button.addEventListener("click", () => showOrderDetail(button.dataset.orderDetail));
@@ -1462,13 +1467,13 @@
       <td>${escapeHtml(day.day)}</td><td>${formatRupiah(day.revenue_idr)}</td><td>${formatNumber(day.orders)}</td>
     </tr>`).join("") || `<tr><td colspan="3" class="empty-state">Belum ada data.</td></tr>`;
     $("#analytics-product-table").innerHTML = data.products.map((product) => `<tr>
-      <td><strong>${escapeHtml(product.product_label)}</strong></td>
-      <td>${formatNumber(product.total_hits)}</td>
-      <td>${formatNumber(product.final_hits)}</td>
-      <td>${formatNumber(product.success_hits)}</td>
-      <td>${product.success_rate_percent == null ? "—" : `${Number(product.success_rate_percent).toLocaleString("id-ID", { maximumFractionDigits: 1 })}%`}</td>
-      <td>${product.avg_latency_ms == null ? "—" : `${formatNumber(product.avg_latency_ms)} ms`}</td>
-    </tr>`).join("");
+      <td data-label="Produk"><strong>${escapeHtml(product.product_label)}</strong></td>
+      <td data-label="Total hit">${formatNumber(product.total_hits)}</td>
+      <td data-label="Hasil final">${formatNumber(product.final_hits)}</td>
+      <td data-label="Sukses (valid + belum KYC)">${formatNumber(product.success_hits)}</td>
+      <td data-label="Success rate">${product.success_rate_percent == null ? "—" : `${Number(product.success_rate_percent).toLocaleString("id-ID", { maximumFractionDigits: 1 })}%`}</td>
+      <td data-label="Rata-rata latensi">${product.avg_latency_ms == null ? "—" : `${formatNumber(product.avg_latency_ms)} ms`}</td>
+    </tr>`).join("") || `<tr><td colspan="6" class="empty-state">Belum ada data.</td></tr>`;
     const byDay = {};
     data.hits_per_day.forEach((row) => {
       if (!byDay[row.day]) byDay[row.day] = { bank_account: 0, ewallet: 0, whatsapp: 0 };
@@ -1630,13 +1635,13 @@
     $("#member-detail-panel").hidden = false;
     const statusLabel = { active: "Aktif", disabled: "Nonaktif", revoked: "Dicabut" };
     $("#member-detail-keys").innerHTML = detail.keys.length ? detail.keys.map((key) => `<tr>
-      <td><code>${escapeHtml(key.prefix)}</code><br /><span class="tester-audit-note">${escapeHtml(key.name)}</span></td>
-      <td><span class="status-badge ${key.status === "active" ? "valid" : "invalid"}">${escapeHtml(statusLabel[key.status] || key.status)}</span></td>
-      <td>${formatNumber(key.quota_remaining)} / ${formatNumber(key.quota_total)}</td>
-      <td>${key.expires_at ? escapeHtml(formatDate(key.expires_at)) : "—"}</td>
-      <td>${key.rate_limit_per_minute == null ? "—" : `${formatNumber(key.rate_limit_per_minute)}/mnt`}</td>
-      <td>${formatNumber(key.invalid_free_used_today)} / 100 hari ini</td>
-      <td>${key.status === "active" && member.status === "active" ? `<form class="member-adjust-form" data-adjust-key="${escapeHtml(key.id)}">
+      <td data-label="Kunci"><code>${escapeHtml(key.prefix)}</code><br /><span class="tester-audit-note">${escapeHtml(key.name)}</span></td>
+      <td data-label="Status"><span class="status-badge ${key.status === "active" ? "valid" : "invalid"}">${escapeHtml(statusLabel[key.status] || key.status)}</span></td>
+      <td data-label="Kuota">${formatNumber(key.quota_remaining)} / ${formatNumber(key.quota_total)}</td>
+      <td data-label="Aktif s/d">${key.expires_at ? escapeHtml(formatDate(key.expires_at)) : "—"}</td>
+      <td data-label="Rate limit">${key.rate_limit_per_minute == null ? "—" : `${formatNumber(key.rate_limit_per_minute)}/mnt`}</td>
+      <td data-label="Gratis invalid hari ini">${formatNumber(key.invalid_free_used_today)} / 100 hari ini</td>
+      <td data-label="Adjust kuota manual">${key.status === "active" && member.status === "active" ? `<form class="member-adjust-form" data-adjust-key="${escapeHtml(key.id)}">
         <input type="number" step="1" placeholder="+250 / -50" required aria-label="Delta kuota" />
         <input type="text" maxlength="500" placeholder="Alasan (min. 5 karakter)" required aria-label="Alasan adjust" />
         <button class="button button-secondary" type="submit">Adjust</button>
@@ -1662,11 +1667,11 @@
     }
     const orderLabel = { waiting_payment: "Menunggu bayar", paid: "Lunas (belum grant)", granted: "Ter-grant", expired: "Kedaluwarsa", canceled: "Dibatalkan", needs_review: "Perlu tinjauan" };
     $("#member-detail-orders").innerHTML = detail.orders.length ? detail.orders.map((order) => `<tr>
-      <td>${escapeHtml(formatDate(order.created_at))}</td>
-      <td>${escapeHtml(order.package_name)}</td>
-      <td>${formatRupiah(order.amount_idr)}</td>
-      <td><span class="status-badge ${order.status === "granted" ? "valid" : order.status === "needs_review" ? "invalid" : ""}">${escapeHtml(orderLabel[order.status] || order.status)}</span></td>
-      <td>${order.granted_quota == null ? "—" : `+${formatNumber(order.granted_quota)} hit`}</td>
+      <td data-label="Waktu">${escapeHtml(formatDate(order.created_at))}</td>
+      <td data-label="Paket">${escapeHtml(order.package_name)}</td>
+      <td data-label="Nominal">${formatRupiah(order.amount_idr)}</td>
+      <td data-label="Status"><span class="status-badge ${order.status === "granted" ? "valid" : order.status === "needs_review" ? "invalid" : ""}">${escapeHtml(orderLabel[order.status] || order.status)}</span></td>
+      <td data-label="Grant">${order.granted_quota == null ? "—" : `+${formatNumber(order.granted_quota)} hit`}</td>
     </tr>`).join("") : `<tr><td colspan="5" class="tester-audit-note">Belum ada order.</td></tr>`;
     $("#member-detail-orders-info").textContent = `Menampilkan ${formatNumber(detail.orders.length)} order${detail.orders_has_more ? " (masih ada halaman berikut)" : ""}`;
     $("#member-detail-orders-prev").disabled = detail.orders_offset <= 0;
@@ -2395,10 +2400,12 @@
     });
 
     $("#menu-button").addEventListener("click", () => document.body.classList.toggle("menu-open"));
+    $("#sidebar-backdrop")?.addEventListener("click", () => document.body.classList.remove("menu-open"));
     $("#modal-backdrop").addEventListener("click", closeAllModals);
     $$("[data-close-modal]").forEach((button) => button.addEventListener("click", () => closeAllModals()));
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape") closeAllModals();
+      if (event.key === "Escape") document.body.classList.remove("menu-open");
     });
 
     $("#guard-form")?.addEventListener("submit", submitGuard);
