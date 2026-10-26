@@ -1271,6 +1271,11 @@ pub async fn sandbox_check(
                 phone_number: input.target,
             })?
         }
+        "pln" => {
+            crate::api::normalize_pln_request(crate::models::PlnValidationRequest {
+                customer_id: input.target,
+            })?
+        }
         other => {
             return Err(AppError::bad_request(format!(
                 "Produk tidak dikenal: {other}"

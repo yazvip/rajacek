@@ -684,7 +684,8 @@
             "enum": [
               "bank_account",
               "ewallet",
-              "whatsapp"
+              "whatsapp",
+              "pln"
             ]
           },
           "label": {
@@ -883,6 +884,22 @@
             ],
             "example": "NAMA PELANGGAN"
           },
+          "tarif": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Tarif listrik pelanggan (khusus produk pln, hanya bila tersedia).",
+            "example": "R1"
+          },
+          "daya": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Daya tersambung pelanggan dalam VA (khusus produk pln, hanya bila tersedia).",
+            "example": "1300"
+          },
           "registered": {
             "type": [
               "boolean",
@@ -953,7 +970,8 @@
             "enum": [
               "bank_account",
               "ewallet",
-              "whatsapp"
+              "whatsapp",
+              "pln"
             ]
           },
           "message": {

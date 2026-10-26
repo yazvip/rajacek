@@ -742,6 +742,7 @@
                 <button type="button" class="tab active" data-product="bank_account">Rekening Bank</button>
                 <button type="button" class="tab" data-product="ewallet">E-Wallet</button>
                 <button type="button" class="tab" data-product="whatsapp">WhatsApp</button>
+                <button type="button" class="tab" data-product="pln">PLN</button>
               </div>
               <form id="sandboxForm">
                 <div class="sandbox-grid">
@@ -762,7 +763,7 @@
                     <select id="sbWallet" class="hidden"></select>
                   </div>
                   <div id="sbTargetWrap">
-                    <label>Nomor rekening / HP</label>
+                    <label id="sbTargetLabel">Nomor rekening / HP</label>
                     <input id="sbTarget" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="cth. 1234567890" required />
                   </div>
                   <button class="primary" type="submit" id="sbBtn">Cek Sekarang</button>
@@ -792,6 +793,7 @@
                     <option value="bank_account">Rekening bank</option>
                     <option value="ewallet">E-Wallet</option>
                     <option value="whatsapp">WhatsApp</option>
+                    <option value="pln">PLN</option>
                   </select>
                   <select id="filterOutcome">
                     <option value="">Semua hasil</option>
@@ -1161,7 +1163,7 @@
           pending: 'Pending' }[outcome] || outcome;
         return `<span class="badge ${cls}">${label}</span>`;
       }
-      const productLabel = (p) => ({ bank_account: 'Rekening bank', ewallet: 'E-Wallet', whatsapp: 'WhatsApp' })[p] || p;
+      const productLabel = (p) => ({ bank_account: 'Rekening bank', ewallet: 'E-Wallet', whatsapp: 'WhatsApp', pln: 'PLN' })[p] || p;
 
       async function loadHistory() {
         const params = new URLSearchParams({ limit: state.limit, offset: state.offset });
@@ -1352,6 +1354,7 @@
         $('sbBankWrap').classList.toggle('hidden', sb.product !== 'bank_account');
         $('sbWalletWrap').classList.toggle('hidden', sb.product !== 'ewallet');
         $('sbTarget').placeholder = sb.product === 'whatsapp' ? 'cth. 081234567890' : 'cth. 1234567890';
+        $('sbTargetLabel').textContent = sb.product === 'pln' ? 'ID pelanggan PLN' : sb.product === 'whatsapp' ? 'Nomor HP' : 'Nomor rekening / HP';
       }
       document.querySelectorAll('.sandbox-tabs .tab').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -1391,9 +1394,12 @@
           const d = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(d.message || 'Cek gagal dijalankan.');
           const r = d.result || {};
+          const plnExtraBox = sb.product === 'pln'
+            ? `${r.tarif ? `<div><span>Tarif</span><strong>${escHtml(r.tarif)}</strong></div>` : ''}${r.daya ? `<div><span>Daya</span><strong>${escHtml(r.daya)}</strong></div>` : ''}`
+            : '';
           const nameBox = sb.product === 'whatsapp'
             ? `<div><span>Status WA</span><strong>${typeof r.registered === 'boolean' ? (r.registered ? 'Terdaftar' : 'Tidak Terdaftar') : '–'}</strong></div>`
-            : `<div><span>Nama</span><strong>${r.account_name || '–'}</strong></div>`;
+            : `<div><span>Nama</span><strong>${r.account_name || '–'}</strong></div>${plnExtraBox}`;
           $('sbResult').innerHTML = `
             <div class="resp-tabs">
               <button type="button" class="active" data-resp-tab="html">HTML</button>

@@ -1402,6 +1402,7 @@ impl AdminStore {
                         ValidationProduct::BankAccount => "Validasi rekening bank",
                         ValidationProduct::Ewallet => "Validasi e-wallet",
                         ValidationProduct::Whatsapp => "Validasi WhatsApp",
+                        ValidationProduct::Pln => "Validasi PLN",
                     };
                     Some(ActivityItem {
                         id: Uuid::parse_str(&request_id).unwrap_or_else(|_| Uuid::new_v4()),
@@ -4241,6 +4242,7 @@ fn is_valid_scope(scope: &str) -> bool {
     matches!(
         scope,
         "validate:*" | "validate:bank_account" | "validate:ewallet" | "validate:whatsapp"
+            | "validate:pln"
     )
 }
 
@@ -4288,6 +4290,17 @@ fn sample_products(now: chrono::DateTime<Utc>) -> Vec<AdminProduct> {
             base_price_idr: 150,
             updated_at: now,
         },
+        AdminProduct {
+            id: Uuid::now_v7(),
+            code: "pln_validation".to_owned(),
+            name: "Validasi PLN".to_owned(),
+            description: "Cek nama pelanggan dan tarif/daya dari ID pelanggan PLN."
+                .to_owned(),
+            active: true,
+            provider_route: "primary-pln-id".to_owned(),
+            base_price_idr: 200,
+            updated_at: now,
+        },
     ]
 }
 
@@ -4302,7 +4315,11 @@ fn sample_packages(now: chrono::DateTime<Utc>) -> Vec<AdminPackage> {
             included_hits: 500,
             active: true,
             highlighted: false,
-            products: vec![ValidationProduct::BankAccount, ValidationProduct::Ewallet],
+            products: vec![
+                ValidationProduct::BankAccount,
+                ValidationProduct::Ewallet,
+                ValidationProduct::Pln,
+            ],
             rate_limit_per_minute: 30,
             promo_percent: 0,
             promo_ends_at: None,
@@ -4322,6 +4339,7 @@ fn sample_packages(now: chrono::DateTime<Utc>) -> Vec<AdminPackage> {
                 ValidationProduct::BankAccount,
                 ValidationProduct::Ewallet,
                 ValidationProduct::Whatsapp,
+                ValidationProduct::Pln,
             ],
             rate_limit_per_minute: 120,
             promo_percent: 0,
@@ -4342,6 +4360,7 @@ fn sample_packages(now: chrono::DateTime<Utc>) -> Vec<AdminPackage> {
                 ValidationProduct::BankAccount,
                 ValidationProduct::Ewallet,
                 ValidationProduct::Whatsapp,
+                ValidationProduct::Pln,
             ],
             rate_limit_per_minute: 600,
             promo_percent: 0,

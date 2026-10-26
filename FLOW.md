@@ -271,3 +271,32 @@ Restore dari ZIP ini:
 3. Salin file env (`/etc/rajacek/rajacek.env`) dari backup server secara
    manual — file ini TIDAK ada di ZIP demi keamanan.
 4. Jalankan worker dulu (migrasi), lalu API. Verifikasi health + login admin.
+
+---
+
+## 9. PLN (Chikamm)
+
+- Produk: kode `pln`, label `PLN`. Target = ID pelanggan PLN numerik
+  11–12 digit. Permukaan member hanya mengenal kode `pln` — nama/URL/
+  kode provider upstream tidak pernah tampil di JSON member, portal,
+  maupun docs (meta.provider tetap `Rajacek`, field provider None;
+  payload mentah hanya di Tester admin).
+- Provider: upstream Chikamm (pengetahuan admin saja). Respons upstream
+  berbentuk datar: status + success + request_id + nama; tidak ada
+  field tarif/daya terpisah.
+- Mapping hasil: `success` true → `valid`; selain itu → `invalid`
+  (defensif — bentuk gagal untuk ID tidak valid belum teramati saat
+  probe, disempurnakan setelah probe ID invalid bila perlu).
+  `request_id` upstream dipakai sebagai referensi provider.
+- Parsing tarif/daya: nama upstream menggabungkan nama pelanggan dan
+  sufiks ` - <TARIF>/<DAYA>` (mis. pola ` - R1/1300`); sufiks itu
+  dipecah menjadi field member opsional `tarif` dan `daya` (hanya
+  untuk PLN, hanya bila tersedia). Nama pelanggan tetap dinormalisasi
+  huruf besar semua seperti produk lain.
+- Billing: ikut pool penagihan yang sama dengan produk lain — valid
+  memotong 1 hit; hasil tidak-valid masuk pool gratis harian yang sama
+  (per kunci, WIB). Aturan potong/pool selengkapnya ikut §1/§3.
+- Paket: PLN bisa dipilih di form paket admin (checkbox produk),
+  sehingga paket yang memuat `pln` memberi akses produk ini; kartu
+  paket memakai label `PLN` dari `productLabel` yang sama dengan
+  riwayat, analitik, dan grup provider.

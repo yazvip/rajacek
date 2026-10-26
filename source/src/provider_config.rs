@@ -1196,6 +1196,20 @@ fn tukangcek_response_mapping(product: ValidationProduct) -> ProviderResponseMap
                 .then(|| "found".to_owned()),
             reference_path: None,
         },
+        // PLN tidak pernah lewat Tukangcek (ditolak sebelum mapping ini
+        // dipakai); arm hanya untuk exhaustiveness.
+        ValidationProduct::Pln => ProviderResponseMapping {
+            status_path: "found".to_owned(),
+            valid_values: vec!["true".to_owned()],
+            invalid_values: vec![],
+            not_found_values: vec!["false".to_owned()],
+            pending_values: vec![],
+            message_path: None,
+            account_name_path: None,
+            provider_path: None,
+            registered_path: None,
+            reference_path: None,
+        },
     }
 }
 
@@ -1278,6 +1292,8 @@ fn validate_service_code_mapping(
             .iter()
             .any(|bank| bank.code_bank.as_str() == code),
         ValidationProduct::Whatsapp => false,
+        // PLN tidak punya service-code mapping, seperti WhatsApp.
+        ValidationProduct::Pln => false,
     };
     if product == ValidationProduct::Whatsapp {
         return Err(AppError::bad_request(
@@ -1379,6 +1395,7 @@ fn parse_product(value: &str) -> Option<ValidationProduct> {
         "bank_account" => Some(ValidationProduct::BankAccount),
         "ewallet" => Some(ValidationProduct::Ewallet),
         "whatsapp" => Some(ValidationProduct::Whatsapp),
+        "pln" => Some(ValidationProduct::Pln),
         _ => None,
     }
 }

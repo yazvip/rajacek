@@ -27,6 +27,7 @@ pub enum ValidationProduct {
     BankAccount,
     Ewallet,
     Whatsapp,
+    Pln,
 }
 
 impl ValidationProduct {
@@ -35,6 +36,7 @@ impl ValidationProduct {
             Self::BankAccount => "bank_account",
             Self::Ewallet => "ewallet",
             Self::Whatsapp => "whatsapp",
+            Self::Pln => "pln",
         }
     }
 
@@ -43,6 +45,7 @@ impl ValidationProduct {
             Self::BankAccount => "Validasi rekening",
             Self::Ewallet => "Validasi e-wallet",
             Self::Whatsapp => "Validasi WhatsApp",
+            Self::Pln => "Validasi PLN",
         }
     }
 }
@@ -127,6 +130,11 @@ pub struct WhatsappValidationRequest {
     pub phone_number: String,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+pub struct PlnValidationRequest {
+    pub customer_id: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct ProviderValidationRequest {
     pub product: ValidationProduct,
@@ -158,6 +166,16 @@ pub struct ValidationResultData {
     pub bank_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_name: Option<String>,
+    /// PLN only: tariff and power parsed from the trailing
+    /// " - TARIF/DAYA" suffix of the upstream holder name (e.g. the name
+    /// suffix " - R1/1300" yields tarif "R1", daya "1300"). None for every
+    /// other product and whenever the name carries no matching suffix, so
+    /// other products' serialized responses are byte-identical to before.
+    /// The holder name itself is never stripped of its suffix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tarif: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daya: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1243,6 +1261,19 @@ mod tests {
         .expect("request lama yang masih mengirim hint harus tetap lolos parse");
         assert_eq!(parsed.bank_code, "014");
         assert_eq!(parsed.account_number, "123456");
+    }
+
+    #[test]
+    fn pln_product_code_parses_and_labels() {
+        assert_eq!(ValidationProduct::Pln.as_str(), "pln");
+        assert_eq!(ValidationProduct::Pln.label_id(), "Validasi PLN");
+        let parsed: ValidationProduct =
+            serde_json::from_str("\"pln\"").expect("pln parses like other products");
+        assert_eq!(parsed, ValidationProduct::Pln);
+        assert_eq!(
+            serde_json::to_string(&ValidationProduct::Pln).expect("serialize"),
+            "\"pln\""
+        );
     }
 
     fn dt(s: &str) -> DateTime<Utc> {

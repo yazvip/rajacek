@@ -137,6 +137,8 @@ impl ProviderAdapter for DemoProvider {
                 service_code: service_code_for(&request),
                 bank_name: bank_name_for(&request),
                 account_name: None,
+                tarif: None,
+                daya: None,
                 provider: request.provider_hint.clone(),
                 registered: Some(false),
                 reference: Some(format!("demo-{}", Uuid::now_v7().simple())),
@@ -170,6 +172,14 @@ fn demo_result(request: &ProviderValidationRequest, digest: &[u8]) -> Validation
             ))
         }
         ValidationProduct::Whatsapp => None,
+        // Demo PLN mirrors the live name shape (holder + tariff/power
+        // suffix) so the demo path exercises the same result fields.
+        ValidationProduct::Pln => Some("PELANGGAN DEMO - R1/1300".to_owned()),
+    };
+
+    let (tarif, daya) = match request.product {
+        ValidationProduct::Pln => (Some("R1".to_owned()), Some("1300".to_owned())),
+        _ => (None, None),
     };
 
     let (account_number, phone_number) = target_fields(request.product, &request.target);
@@ -179,6 +189,8 @@ fn demo_result(request: &ProviderValidationRequest, digest: &[u8]) -> Validation
         service_code: service_code_for(request),
         bank_name: bank_name_for(request),
         account_name,
+        tarif,
+        daya,
         provider: request.provider_hint.clone(),
         registered: Some(true),
         reference: Some(format!(
@@ -191,7 +203,7 @@ fn demo_result(request: &ProviderValidationRequest, digest: &[u8]) -> Validation
 
 fn target_fields(product: ValidationProduct, target: &str) -> (Option<String>, Option<String>) {
     match product {
-        ValidationProduct::BankAccount | ValidationProduct::Ewallet => {
+        ValidationProduct::BankAccount | ValidationProduct::Ewallet | ValidationProduct::Pln => {
             (Some(target.to_owned()), None)
         }
         ValidationProduct::Whatsapp => (None, Some(target.to_owned())),
@@ -214,6 +226,9 @@ fn service_code_for(request: &ProviderValidationRequest) -> Option<String> {
             request.provider_hint.clone()
         }
         ValidationProduct::Whatsapp => Some("whatsapp".to_owned()),
+        // PLN carries no provider hint (no bank code / wallet slug); the
+        // fixed product code plays the same role as "whatsapp" above.
+        ValidationProduct::Pln => Some("pln".to_owned()),
     }
 }
 
@@ -424,7 +439,7 @@ impl HttpProvider {
     ) {
         let mut provider_failure = false;
         if endpoint.request_mode == ProviderRequestMode::Cutiezy
-            && matches!(request.product, ValidationProduct::Whatsapp)
+            && matches!(request.product, ValidationProduct::Whatsapp | ValidationProduct::Pln)
         {
             return (
                 Err(AppError::service_unavailable(
@@ -739,10 +754,20 @@ impl HttpProvider {
             });
         }
 
-        let effective_mapping = match endpoint.request_mode {
-            ProviderRequestMode::Tukangcek => tukangcek_mapping(request.product),
-            ProviderRequestMode::Cutiezy => cutiezy_mapping(request.product),
-            ProviderRequestMode::Generic => endpoint.response_mapping.clone(),
+        // PLN has exactly one known upstream contract (Chikamm, flat JSON
+        // below), so its mapping is product-level, not per-endpoint: a
+        // Generic endpoint configured for PLN is always interpreted with
+        // the Chikamm contract, whatever mapping the panel stored for it.
+        // Tukangcek/Cutiezy modes never reach here for PLN (rejected
+        // above), so this override only ever replaces a Generic mapping.
+        let effective_mapping = if request.product == ValidationProduct::Pln {
+            chikamm_pln_mapping()
+        } else {
+            match endpoint.request_mode {
+                ProviderRequestMode::Tukangcek => tukangcek_mapping(request.product),
+                ProviderRequestMode::Cutiezy => cutiezy_mapping(request.product),
+                ProviderRequestMode::Generic => endpoint.response_mapping.clone(),
+            }
         };
         // capture_raw is true exactly for the admin tester (see
         // validate_for_admin / validate_for_admin_at); the public/member
@@ -959,6 +984,14 @@ fn build_provider_request(
             ValidationProduct::Whatsapp => Ok(serde_json::json!({
                 "target": request.target,
             })),
+            // PLN has no Tukangcek contract; its only known upstream is
+            // Chikamm (see `chikamm_pln_mapping`), reached via Generic
+            // endpoints. Rejecting here mirrors the Cutiezy guard above:
+            // a misconfigured endpoint fails as a neutral provider error
+            // (no charge), never as a fabricated business answer.
+            ValidationProduct::Pln => Err(AppError::service_unavailable(
+                "Mode Tukangcek untuk produk ini belum didukung",
+            )),
         },
     }
 }
@@ -1193,6 +1226,8 @@ fn normalize_provider_payload(
             // provider only as "Rajacek" (meta.provider). Raw upstream
             // payloads stay visible in the admin tester only.
             provider: None,
+            tarif: None,
+            daya: None,
             registered: None,
             reference: mapped_text(payload, mapping.reference_path.as_deref()),
         }),
@@ -1211,6 +1246,8 @@ fn normalize_provider_payload(
                 .and_then(|path| json_path(payload, path))
                 .and_then(value_as_text),
             provider: None,
+            tarif: None,
+            daya: None,
             registered: Some(registered.unwrap_or(status == ValidationStatus::Valid)),
             reference: mapping
                 .reference_path
@@ -1225,9 +1262,39 @@ fn normalize_provider_payload(
             bank_name: None,
             account_name: None,
             provider: None,
+            tarif: None,
+            daya: None,
             registered: Some(registered.unwrap_or(status == ValidationStatus::Valid)),
             reference: mapped_text(payload, mapping.reference_path.as_deref()),
         }),
+        ValidationProduct::Pln => {
+            let account_name = mapping
+                .account_name_path
+                .as_deref()
+                .and_then(|path| json_path(payload, path))
+                .and_then(value_as_text);
+            // Tarif/daya are DERIVED from the name suffix only; the name
+            // itself is kept whole (never stripped of its suffix), and
+            // the member-response uppercasing in api.rs touches only
+            // account_name, never these two fields.
+            let (tarif, daya) = parse_pln_tarif_daya(account_name.as_deref());
+            Some(ValidationResultData {
+                account_number: None,
+                phone_number: None,
+                service_code: None,
+                bank_name: None,
+                account_name,
+                tarif,
+                daya,
+                // Upstream "provider": "API" is deliberately never mapped
+                // (provider_path is None in the Chikamm mapping), exactly
+                // like every other product: members only ever see
+                // meta.provider "Rajacek".
+                provider: None,
+                registered: Some(registered.unwrap_or(status == ValidationStatus::Valid)),
+                reference: mapped_text(payload, mapping.reference_path.as_deref()),
+            })
+        }
     };
 
     // B1, e-wallet only: a placeholder/echoed name is never a holder name
@@ -1339,6 +1406,78 @@ fn json_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
     Some(current)
 }
 
+/// Chikamm PLN response contract, exactly as probed live (flat JSON, no
+/// nested `data` object):
+/// `{status: 200, success: bool, request_id, provider: "API",
+/// type: "pln", target: echo, name, nickname, created_at}`.
+/// - `success: true` → Valid (registered = true, from the status fallback
+///   in the Pln result arm); `success: false` → Invalid. There is
+///   deliberately NO Invalid-vs-NotFound split for PLN: the failure shape
+///   has never been observed, so a failed lookup is one defensive
+///   Invalid, never a guessed NotFound.
+/// - `name` is the holder name verbatim (the member path uppercases its
+///   own copy, like every other product); `nickname` is ignored — it
+///   duplicates `name` in the probed shape.
+/// - `request_id` is the provider reference.
+/// - Upstream `provider` ("API") is NEVER mapped: provider_path is None,
+///   so member responses keep provider None and meta.provider "Rajacek".
+/// - `target` (echo) and `created_at` are never mapped into the result.
+/// A missing/non-boolean `success` does NOT fall through to Invalid: no
+/// mapping list matches it, so `map_status` returns None and the call
+/// surfaces as a retryable provider error (no charge) — a malformed
+/// upstream payload must never be charged to a member as a definitive
+/// Invalid, mirroring the existing rule against remapping unverified
+/// HTTP statuses to business answers.
+fn chikamm_pln_mapping() -> crate::models::ProviderResponseMapping {
+    crate::models::ProviderResponseMapping {
+        status_path: "success".to_owned(),
+        valid_values: vec!["true".to_owned()],
+        invalid_values: vec!["false".to_owned()],
+        not_found_values: vec![],
+        pending_values: vec![],
+        message_path: None,
+        account_name_path: Some("name".to_owned()),
+        provider_path: None,
+        registered_path: None,
+        reference_path: Some("request_id".to_owned()),
+    }
+}
+
+/// PLN tariff/power suffix parser. The upstream carries no separate
+/// tariff/power fields: both ride in the holder-name suffix
+/// `" - TARIF/DAYA"` (e.g. `" - R1/1300"`). Only the suffix AFTER THE
+/// LAST `" - "` is considered, so names containing earlier `" - "`
+/// separators still parse; the suffix must then split on exactly one
+/// `/` into two non-empty parts (trimmed). Anything else — no
+/// separator, no slash, an empty side, more than one slash — yields
+/// (None, None) and the name stays whole. Values are NOT uppercased
+/// here (they already arrive uppercase/numeric); no tariff/power
+/// vocabulary is validated, so unseen-but-well-formed variants are not
+/// rejected on a guess.
+pub(crate) fn parse_pln_tarif_daya(
+    account_name: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let name = match account_name {
+        Some(name) => name,
+        None => return (None, None),
+    };
+    let separator = match name.rfind(" - ") {
+        Some(position) => position,
+        None => return (None, None),
+    };
+    let suffix = &name[separator + 3..];
+    let (tarif, daya) = match suffix.split_once('/') {
+        // Exactly one slash: a second slash in the power side means the
+        // suffix is not a TARIF/DAYA pair at all.
+        Some((tarif, daya)) if !daya.contains('/') => (tarif.trim(), daya.trim()),
+        _ => return (None, None),
+    };
+    if tarif.is_empty() || daya.is_empty() {
+        return (None, None);
+    }
+    (Some(tarif.to_owned()), Some(daya.to_owned()))
+}
+
 /// Cutiezy response contract (bank): `success` flags the outcome, the holder
 /// name lives at `data.accountname`. The provider name is never mapped into
 /// the result — public responses must not reveal which server answered.
@@ -1355,6 +1494,10 @@ fn cutiezy_mapping(product: ValidationProduct) -> crate::models::ProviderRespons
             ValidationProduct::BankAccount => Some("data.accountname".to_owned()),
             ValidationProduct::Ewallet => Some("data.nickname".to_owned()),
             ValidationProduct::Whatsapp => None,
+            // Cutiezy mode is rejected for PLN before any mapping is
+            // used (see the guard in validate_upstream_endpoint); this
+            // arm exists only for exhaustiveness.
+            ValidationProduct::Pln => None,
         },
         provider_path: None,
         registered_path: None,
@@ -1364,6 +1507,21 @@ fn cutiezy_mapping(product: ValidationProduct) -> crate::models::ProviderRespons
 
 fn tukangcek_mapping(product: ValidationProduct) -> crate::models::ProviderResponseMapping {
     match product {
+        // Tukangcek mode is rejected for PLN in build_provider_request
+        // before any mapping is consulted; this arm exists only for
+        // exhaustiveness and is never used for a real PLN call.
+        ValidationProduct::Pln => crate::models::ProviderResponseMapping {
+            status_path: "found".to_owned(),
+            valid_values: vec!["true".to_owned()],
+            invalid_values: vec![],
+            not_found_values: vec!["false".to_owned()],
+            pending_values: vec![],
+            message_path: None,
+            account_name_path: None,
+            provider_path: None,
+            registered_path: None,
+            reference_path: None,
+        },
         ValidationProduct::Whatsapp => crate::models::ProviderResponseMapping {
             status_path: "registered".to_owned(),
             valid_values: vec!["true".to_owned()],
@@ -1996,5 +2154,186 @@ mod generic_get_tests {
             "secret",
         )
         .is_err());
+    }
+}
+
+#[cfg(test)]
+mod pln_tests {
+    use super::{chikamm_pln_mapping, normalize_provider_payload, parse_pln_tarif_daya};
+    use crate::models::{ValidationProduct, ValidationStatus};
+
+    fn flat_pln_payload(success: bool) -> serde_json::Value {
+        // Flat Chikamm shape exactly as probed live: no nested `data`.
+        serde_json::json!({
+            "status": 200,
+            "success": success,
+            "request_id": "REQ-PLN-1",
+            "provider": "API",
+            "type": "pln",
+            "target": "12345678901",
+            "name": "PELANGGAN CONTOH - R1/1300",
+            "nickname": "PELANGGAN CONTOH - R1/1300",
+            "created_at": "2026-10-26T00:00:00Z"
+        })
+    }
+
+    #[test]
+    fn chikamm_success_maps_to_valid_with_tarif_and_daya() {
+        let (status, _, result) = normalize_provider_payload(
+            ValidationProduct::Pln,
+            &flat_pln_payload(true),
+            &chikamm_pln_mapping(),
+            "12345678901",
+            false,
+        )
+        .expect("success payload normalizes");
+        assert_eq!(status, ValidationStatus::Valid);
+        let result = result.expect("valid PLN carries a result");
+        // The holder name stays whole — the suffix is NOT stripped.
+        assert_eq!(
+            result.account_name.as_deref(),
+            Some("PELANGGAN CONTOH - R1/1300")
+        );
+        assert_eq!(result.tarif.as_deref(), Some("R1"));
+        assert_eq!(result.daya.as_deref(), Some("1300"));
+        assert_eq!(result.registered, Some(true));
+        assert_eq!(result.reference.as_deref(), Some("REQ-PLN-1"));
+        // Upstream "provider": "API" never reaches the member result.
+        assert_eq!(result.provider, None);
+        let serialized = serde_json::to_value(&result).expect("serialize").to_string();
+        assert!(serialized.contains("\"tarif\":\"R1\""));
+        assert!(serialized.contains("\"daya\":\"1300\""));
+        assert!(!serialized.contains("\"provider\""));
+    }
+
+    #[test]
+    fn chikamm_failure_maps_to_defensive_invalid_not_not_found() {
+        // The failure shape was never observed, so there is no
+        // Invalid-vs-NotFound split for PLN: any success=false is one
+        // defensive Invalid (which shares the free-invalid pool).
+        let mut payload = flat_pln_payload(false);
+        payload.as_object_mut().unwrap().remove("name");
+        payload.as_object_mut().unwrap().remove("nickname");
+        let (status, _, result) = normalize_provider_payload(
+            ValidationProduct::Pln,
+            &payload,
+            &chikamm_pln_mapping(),
+            "12345678901",
+            false,
+        )
+        .expect("failure payload normalizes");
+        assert_eq!(status, ValidationStatus::Invalid);
+        assert!(status.is_invalid_pool());
+        assert!(status.is_billable());
+        let result = result.expect("invalid PLN carries a result");
+        assert_eq!(result.account_name, None);
+        assert_eq!(result.tarif, None);
+        assert_eq!(result.daya, None);
+        assert_eq!(result.registered, Some(false));
+        assert_eq!(result.reference.as_deref(), Some("REQ-PLN-1"));
+    }
+
+    #[test]
+    fn chikamm_nickname_is_ignored_and_provider_label_discarded() {
+        let mut payload = flat_pln_payload(true);
+        payload["name"] = serde_json::json!("NAMA ASLI - R1/900");
+        payload["nickname"] = serde_json::json!("NICK BERBEDA");
+        let (_, _, result) = normalize_provider_payload(
+            ValidationProduct::Pln,
+            &payload,
+            &chikamm_pln_mapping(),
+            "12345678901",
+            false,
+        )
+        .expect("payload normalizes");
+        let result = result.expect("result");
+        assert_eq!(result.account_name.as_deref(), Some("NAMA ASLI - R1/900"));
+        let serialized = serde_json::to_value(&result).expect("serialize").to_string();
+        assert!(!serialized.contains("NICK BERBEDA"));
+        assert!(!serialized.contains("\"provider\""));
+    }
+
+    #[test]
+    fn chikamm_missing_success_is_a_provider_error_not_a_charged_invalid() {
+        let mut payload = flat_pln_payload(true);
+        payload.as_object_mut().unwrap().remove("success");
+        assert!(normalize_provider_payload(
+            ValidationProduct::Pln,
+            &payload,
+            &chikamm_pln_mapping(),
+            "12345678901",
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tarif_daya_parsing_rules() {
+        let cases: [(Option<&str>, Option<&str>, Option<&str>); 10] = [
+            (Some("PELANGGAN - R1/1300"), Some("R1"), Some("1300")),
+            // Only the suffix after the LAST " - " counts.
+            (Some("PT ANEKA - JAYA - R1/2200"), Some("R1"), Some("2200")),
+            // Whitespace around the parts is trimmed.
+            (Some("PELANGGAN - R1 / 1300"), Some("R1"), Some("1300")),
+            (Some("PELANGGAN TANPA SUFIKS"), None, None),
+            (Some("PELANGGAN - TANPASLASH"), None, None),
+            (Some("PELANGGAN - R1/"), None, None),
+            (Some("PELANGGAN - /1300"), None, None),
+            (Some("PELANGGAN - R1/1300/X"), None, None),
+            (Some("PELANGGAN - "), None, None),
+            (None, None, None),
+        ];
+        for (name, tarif, daya) in cases {
+            assert_eq!(
+                parse_pln_tarif_daya(name),
+                (tarif.map(str::to_owned), daya.map(str::to_owned)),
+                "name {name:?} must parse to tarif={tarif:?} daya={daya:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_products_serialize_without_tarif_or_daya() {
+        // Bank (Cutiezy), e-wallet (Tukangcek) and WhatsApp (Tukangcek)
+        // results must be byte-shape-identical to before: the new fields
+        // are skipped when None, so the keys never appear.
+        let bank = serde_json::json!({
+            "success": true,
+            "data": {"accountname": "BUDI SANTOSO"}
+        });
+        let (_, _, bank_result) = normalize_provider_payload(
+            ValidationProduct::BankAccount,
+            &bank,
+            &super::cutiezy_mapping(ValidationProduct::BankAccount),
+            "1234567890",
+            false,
+        )
+        .expect("bank normalizes");
+        let ewallet = serde_json::json!({"found": true, "name": "BUDI SANTOSO"});
+        let (_, _, ewallet_result) = normalize_provider_payload(
+            ValidationProduct::Ewallet,
+            &ewallet,
+            &super::tukangcek_mapping(ValidationProduct::Ewallet),
+            "081234567890",
+            false,
+        )
+        .expect("ewallet normalizes");
+        let whatsapp = serde_json::json!({"registered": true});
+        let (_, _, whatsapp_result) = normalize_provider_payload(
+            ValidationProduct::Whatsapp,
+            &whatsapp,
+            &super::tukangcek_mapping(ValidationProduct::Whatsapp),
+            "6281234567890",
+            false,
+        )
+        .expect("whatsapp normalizes");
+        for result in [bank_result, ewallet_result, whatsapp_result] {
+            let result = result.expect("result");
+            assert_eq!(result.tarif, None);
+            assert_eq!(result.daya, None);
+            let serialized = serde_json::to_value(&result).expect("serialize").to_string();
+            assert!(!serialized.contains("tarif"));
+            assert!(!serialized.contains("daya"));
+        }
     }
 }

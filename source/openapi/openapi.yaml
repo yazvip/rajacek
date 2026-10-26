@@ -265,7 +265,7 @@ components:
       type: object
       required: [product, label, status]
       properties:
-        product: { type: string, enum: [bank_account, ewallet, whatsapp] }
+        product: { type: string, enum: [bank_account, ewallet, whatsapp, pln] }
         label: { type: string, example: Validasi Rekening }
         status: { type: string, enum: [operational, degraded] }
     PublicStatus:
@@ -348,6 +348,8 @@ components:
         service_code: { type: [string, 'null'], description: Kode layanan yang divalidasi (kode bank 3 digit, slug e-wallet, atau whatsapp). }
         bank_name: { type: [string, 'null'], description: Nama bank sesuai katalog (khusus layanan bank). }
         account_name: { type: [string, 'null'], description: Nilai dapat dimasking oleh provider. Selalu huruf besar semua. }
+        tarif: { type: [string, 'null'], description: Tarif listrik pelanggan (khusus produk pln, hanya bila tersedia). }
+        daya: { type: [string, 'null'], description: Daya tersambung pelanggan dalam VA (khusus produk pln, hanya bila tersedia). }
         registered: { type: [boolean, 'null'] }
         reference: { type: [string, 'null'] }
     ValidationMeta:
@@ -362,7 +364,7 @@ components:
         remaining_quota: { type: integer, minimum: 0 }
     ValidationProduct:
       type: string
-      enum: [bank_account, ewallet, whatsapp]
+      enum: [bank_account, ewallet, whatsapp, pln]
     ApiError:
       type: object
       required: [code, message, request_id]

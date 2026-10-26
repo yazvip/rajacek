@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Dokumentasi API Member — Rajacek</title>
-    <meta name="description" content="Dokumentasi API Rajacek untuk member: autentikasi API key, validasi rekening bank, e-wallet, dan WhatsApp, idempotensi, rate limit, kuota, dan kode error." />
+    <meta name="description" content="Dokumentasi API Rajacek untuk member: autentikasi API key, validasi rekening bank, e-wallet, WhatsApp, dan PLN, idempotensi, rate limit, kuota, dan kode error." />
     <meta name="robots" content="index,follow" />
     <meta name="theme-color" content="#071225" />
     <link rel="canonical" href="https://www.rajacek.com/docs" />
@@ -88,6 +88,7 @@
         <a href="#validasi-bank">POST Validasi rekening</a>
         <a href="#validasi-ewallet">POST Validasi e-wallet</a>
         <a href="#validasi-whatsapp">POST Validasi WhatsApp</a>
+        <a href="#validasi-pln">Validasi PLN</a>
         <p>Referensi</p>
         <a href="#status-hasil">Status hasil</a>
         <a href="#kode-error">Kode error</a>
@@ -98,7 +99,7 @@
       <main class="docs-body" id="content">
         <p class="eyebrow">Dokumentasi API · Member &amp; Publik</p>
         <h1>Integrasi Rajacek dalam hitungan menit.</h1>
-        <p>Rajacek membantu Anda mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, dan <strong>nomor WhatsApp</strong> Indonesia lewat satu API sederhana. Pada semua contoh di halaman ini, <code>BASE_URL</code> adalah <code>https://rajacek.com</code> dan kunci yang dipakai adalah contoh <code>rv_live_CONTOH</code> — ganti dengan kunci Anda sendiri. Perlakukan kunci Anda seperti kata sandi: jangan dibagikan ke siapa pun.</p>
+        <p>Rajacek membantu Anda mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, <strong>nomor WhatsApp</strong>, dan <strong>ID pelanggan PLN</strong> Indonesia lewat satu API sederhana. Pada semua contoh di halaman ini, <code>BASE_URL</code> adalah <code>https://rajacek.com</code> dan kunci yang dipakai adalah contoh <code>rv_live_CONTOH</code> — ganti dengan kunci Anda sendiri. Perlakukan kunci Anda seperti kata sandi: jangan dibagikan ke siapa pun.</p>
         <div class="docs-actions">
           <a class="button button-primary" href="/openapi.json">Unduh OpenAPI JSON</a>
           <a class="button button-quiet" href="#mulai-cepat">Mulai cepat ↓</a>
@@ -149,7 +150,7 @@
 # atau
 Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         <ul>
-          <li>Setiap kunci punya <strong>izin (scope)</strong> per produk: <code>validate:bank_account</code>, <code>validate:ewallet</code>, <code>validate:whatsapp</code>, atau <code>validate:*</code> untuk semua produk. Kunci tanpa izin produk akan ditolak dengan kode 403.</li>
+          <li>Setiap kunci punya <strong>izin (scope)</strong> per produk: <code>validate:bank_account</code>, <code>validate:ewallet</code>, <code>validate:whatsapp</code>, <code>validate:pln</code>, atau <code>validate:*</code> untuk semua produk. Kunci tanpa izin produk akan ditolak dengan kode 403.</li>
           <li>Kunci hanya ditampilkan <strong>satu kali</strong>, saat dibuat. Sesudah itu server hanya menyimpan sidik jarinya (hash) — kunci asli tidak bisa ditampilkan lagi.</li>
           <li>Kalau kunci Anda bocor, segera hubungi kami (email apivalidasi@gmail.com atau Telegram @xyz_yaz) agar kunci tersebut dicabut. Kunci yang sudah dicabut langsung ditolak dengan kode 401.</li>
         </ul>
@@ -289,6 +290,24 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         <p>Nomor yang tidak terdaftar WhatsApp menghasilkan <code>status: "invalid"</code> dengan <code>result: { "phone_number": "...", "service_code": "whatsapp", "registered": false }</code> — bentuk field lainnya sama.</p>
         <p>Scope: <code>validate:whatsapp</code>. Gunakan layanan ini dengan bertanggung jawab — bukan untuk spam atau mengumpulkan nomor secara massal.</p>
 
+        <h2 id="validasi-pln">Validasi PLN</h2>
+        <p>Produk <code>pln</code> memeriksa <strong>ID pelanggan PLN</strong> — 11–12 digit numerik. Di portal member, pilih tab <strong>PLN</strong> di <strong>Coba Cek Live</strong> lalu masukkan ID pelanggan; lewat API, produk ini memakai kode produk <code>pln</code> dan scope <code>validate:pln</code> (atau <code>validate:*</code>).</p>
+        <p>Hasil valid (HTTP 200) menampilkan nama pelanggan (<code>account_name</code>, selalu huruf besar semua) dan, bila tersedia, <code>tarif</code> serta <code>daya</code>:</p>
+        <pre><code>{
+  "status": "valid",
+  "valid": true,
+  "product": "pln",
+  "result": {
+    "account_name": "NAMA PELANGGAN",
+    "tarif": "R1",
+    "daya": "1300"
+  },
+  "meta": {
+    "provider": "Rajacek"
+  }
+}</code></pre>
+        <p><code>tarif</code> dan <code>daya</code> hanya ada untuk PLN dan hanya bila tersedia pada hasil valid; produk lain tidak membawa field ini. <code>meta.provider</code> tetap <code>"Rajacek"</code> — nama provider upstream tidak pernah ditampilkan di permukaan member.</p>
+
         <h2 id="status-hasil">Status hasil (respons 200)</h2>
         <table>
           <tr><th><code>status</code></th><th>Arti</th><th>Tertagih</th></tr>
@@ -298,7 +317,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
           <tr><td><code>not_kyc</code></td><td>Khusus e-wallet: nomor terdaftar, tetapi akun belum KYC — jawaban upstream hanya berupa penanda "belum premium" atau gema nomor itu sendiri, bukan nama pemilik, jadi <code>account_name</code> tidak ditampilkan dan <code>registered</code> bernilai <code>false</code>.</td><td>Ya</td></tr>
           <tr><td><code>pending</code></td><td>Hasil akhir belum tersedia; coba lagi nanti.</td><td>Tidak</td></tr>
         </table>
-        <p>Isi <code>result</code> selalu memuat <strong>nomor yang Anda cek</strong> (<code>account_number</code> untuk bank &amp; e-wallet, <code>phone_number</code> untuk WhatsApp) dan <strong>kode layanannya</strong> (<code>service_code</code>: kode bank 3 digit, nama e-wallet seperti <code>dana</code>, atau <code>whatsapp</code>). Untuk bank ada juga <code>bank_name</code> — nama banknya, misalnya BCA atau BRI. Bila tersedia, hasil dilengkapi <code>account_name</code> (nama pemilik, selalu huruf besar semua), <code>registered</code> (terdaftar atau tidak), dan <code>reference</code>.</p>
+        <p>Isi <code>result</code> selalu memuat <strong>nomor yang Anda cek</strong> (<code>account_number</code> untuk bank &amp; e-wallet, <code>phone_number</code> untuk WhatsApp) dan <strong>kode layanannya</strong> (<code>service_code</code>: kode bank 3 digit, nama e-wallet seperti <code>dana</code>, atau <code>whatsapp</code>). Untuk bank ada juga <code>bank_name</code> — nama banknya, misalnya BCA atau BRI. Untuk PLN, hasil valid dilengkapi <code>tarif</code> dan <code>daya</code> bila tersedia. Bila tersedia, hasil dilengkapi <code>account_name</code> (nama pemilik, selalu huruf besar semua), <code>registered</code> (terdaftar atau tidak), dan <code>reference</code>.</p>
 
         <h2 id="kode-error">Kode error</h2>
         <p>Kalau request gagal, responsnya selalu berbentuk <code>{ "code", "message", "request_id" }</code>. Simpan <code>request_id</code> itu — sertakan saat menghubungi kami agar masalah Anda cepat ditelusuri. Contoh respons saat kena rate limit (429):</p>

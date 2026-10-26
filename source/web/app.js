@@ -193,6 +193,7 @@
       bank_account: "Rekening",
       ewallet: "E-wallet",
       whatsapp: "WhatsApp",
+      pln: "PLN",
     }[product] || product;
   }
 
@@ -616,7 +617,7 @@
       const servers = state.providers.filter((endpoint) => endpoint.product === product && endpoint.active);
       endpointSelect.innerHTML = `<option value="">Semua server aktif (balapan)</option>` + servers.map((endpoint) => `<option value="${endpoint.id}">${escapeHtml(endpoint.name)}</option>`).join("");
     }
-    const label = product === "bank_account" ? "Nomor rekening" : product === "ewallet" ? "Nomor e-wallet" : "Nomor WhatsApp";
+    const label = product === "bank_account" ? "Nomor rekening" : product === "ewallet" ? "Nomor e-wallet" : product === "pln" ? "ID pelanggan PLN" : "Nomor WhatsApp";
     $("#tester-target-label").textContent = label;
     $("#tester-target").placeholder = product === "whatsapp" ? "081234567890" : "1234567890";
   }
@@ -652,7 +653,7 @@
     const container = $("#tester-result");
     const safeResult = result.result || {};
     container.className = "tester-result";
-    container.innerHTML = `<div class="tester-result-status">${statusBadge(result.status)}</div><div class="latency-grid"><div><span>Provider</span><strong>${formatNumber(result.provider_latency_ms)} ms</strong></div><div><span>Proses Rajacek</span><strong>${formatNumber(result.rajacek_processing_ms)} ms</strong></div><div><span>Total</span><strong>${formatNumber(result.total_latency_ms)} ms</strong></div></div><dl>${testerRow("Layanan", productLabel(result.product))}${testerRow("Provider", result.provider)}${testerRow("Percobaan", result.attempts > 1 ? `Ke-${result.attempts} (setelah ${result.attempts - 1}× coba ulang)` : "Pertama (tanpa coba ulang)")}${testerRow("Valid", result.valid ? "Ya" : "Tidak")}${testerRow("Pesan", result.message)}${safeResult.account_name ? testerRow(result.product === "bank_account" ? "Nama rekening" : "Nama akun", safeResult.account_name) : ""}${safeResult.provider ? testerRow("Provider hasil", safeResult.provider) : ""}${typeof safeResult.registered === "boolean" ? testerRow("Terdaftar", safeResult.registered ? "Ya" : "Tidak") : ""}${safeResult.reference ? testerRow("Referensi", safeResult.reference) : ""}</dl>`;
+    container.innerHTML = `<div class="tester-result-status">${statusBadge(result.status)}</div><div class="latency-grid"><div><span>Provider</span><strong>${formatNumber(result.provider_latency_ms)} ms</strong></div><div><span>Proses Rajacek</span><strong>${formatNumber(result.rajacek_processing_ms)} ms</strong></div><div><span>Total</span><strong>${formatNumber(result.total_latency_ms)} ms</strong></div></div><dl>${testerRow("Layanan", productLabel(result.product))}${testerRow("Provider", result.provider)}${testerRow("Percobaan", result.attempts > 1 ? `Ke-${result.attempts} (setelah ${result.attempts - 1}× coba ulang)` : "Pertama (tanpa coba ulang)")}${testerRow("Valid", result.valid ? "Ya" : "Tidak")}${testerRow("Pesan", result.message)}${safeResult.account_name ? testerRow(result.product === "bank_account" ? "Nama rekening" : "Nama akun", safeResult.account_name) : ""}${safeResult.tarif ? testerRow("Tarif", safeResult.tarif) : ""}${safeResult.daya ? testerRow("Daya", safeResult.daya) : ""}${safeResult.provider ? testerRow("Provider hasil", safeResult.provider) : ""}${typeof safeResult.registered === "boolean" ? testerRow("Terdaftar", safeResult.registered ? "Ya" : "Tidak") : ""}${safeResult.reference ? testerRow("Referensi", safeResult.reference) : ""}</dl>`;
     $("#tester-json").textContent = JSON.stringify(result, null, 2);
     renderTesterRaw(result.upstream_response);
   }
@@ -714,7 +715,7 @@
     const summary = $("#provider-contract-summary");
     const activeCount = state.providers.filter((endpoint) => endpoint.active).length;
     if (summary) {
-      const chips = ["bank_account", "ewallet", "whatsapp"].map((product) => {
+      const chips = ["bank_account", "ewallet", "whatsapp", "pln"].map((product) => {
         const servers = state.providers.filter((endpoint) => endpoint.product === product);
         const active = servers.filter((endpoint) => endpoint.active);
         const names = active.map((endpoint) => escapeHtml(endpoint.name)).join(" + ");
@@ -723,7 +724,7 @@
       summary.classList.remove("is-tukangcek");
       summary.innerHTML = `<span class="section-kicker">Server aktif</span><h2>${activeCount} dari ${state.providers.length} server aktif</h2><div class="ep-sum">${chips}</div>`;
     }
-    const products = ["bank_account", "ewallet", "whatsapp"];
+    const products = ["bank_account", "ewallet", "whatsapp", "pln"];
     container.innerHTML = products.map((product) => {
       const servers = state.providers.filter((endpoint) => endpoint.product === product);
       const activeServers = servers.filter((endpoint) => endpoint.active);
@@ -1467,7 +1468,7 @@
       <td>${escapeHtml(day.day)}</td><td>${formatRupiah(day.revenue_idr)}</td><td>${formatNumber(day.orders)}</td>
     </tr>`).join("") || `<tr><td colspan="3" class="empty-state">Belum ada data.</td></tr>`;
     $("#analytics-product-table").innerHTML = data.products.map((product) => `<tr>
-      <td data-label="Produk"><strong>${escapeHtml(product.product_label)}</strong></td>
+      <td data-label="Produk"><strong>${escapeHtml(product.product_label === product.product ? productLabel(product.product) : product.product_label)}</strong></td>
       <td data-label="Total hit">${formatNumber(product.total_hits)}</td>
       <td data-label="Hasil final">${formatNumber(product.final_hits)}</td>
       <td data-label="Sukses (valid + belum KYC)">${formatNumber(product.success_hits)}</td>
@@ -1476,14 +1477,14 @@
     </tr>`).join("") || `<tr><td colspan="6" class="empty-state">Belum ada data.</td></tr>`;
     const byDay = {};
     data.hits_per_day.forEach((row) => {
-      if (!byDay[row.day]) byDay[row.day] = { bank_account: 0, ewallet: 0, whatsapp: 0 };
+      if (!byDay[row.day]) byDay[row.day] = { bank_account: 0, ewallet: 0, whatsapp: 0, pln: 0 };
       if (byDay[row.day][row.product] !== undefined) byDay[row.day][row.product] += Number(row.hits || 0);
     });
     $("#analytics-hits-table").innerHTML = Object.keys(byDay).sort().map((day) => {
       const row = byDay[day];
-      const total = row.bank_account + row.ewallet + row.whatsapp;
-      return `<tr><td>${escapeHtml(day)}</td><td>${formatNumber(row.bank_account)}</td><td>${formatNumber(row.ewallet)}</td><td>${formatNumber(row.whatsapp)}</td><td><strong>${formatNumber(total)}</strong></td></tr>`;
-    }).join("") || `<tr><td colspan="5" class="empty-state">Belum ada data.</td></tr>`;
+      const total = row.bank_account + row.ewallet + row.whatsapp + row.pln;
+      return `<tr><td>${escapeHtml(day)}</td><td>${formatNumber(row.bank_account)}</td><td>${formatNumber(row.ewallet)}</td><td>${formatNumber(row.whatsapp)}</td><td>${formatNumber(row.pln)}</td><td><strong>${formatNumber(total)}</strong></td></tr>`;
+    }).join("") || `<tr><td colspan="6" class="empty-state">Belum ada data.</td></tr>`;
   }
 
   // AREA 2: kesehatan rute — selalu live (breaker tidak di-cache).
@@ -1506,10 +1507,10 @@
       ? `Jendela ${data.window_hours} jam terakhir · data breaker live.`
       : `Jendela ${data.window_hours} jam terakhir · agregat ledger tidak tersedia (data breaker tetap live).`;
     const productsEl = $("#provider-health-products");
-    if (productsEl) productsEl.innerHTML = data.products.map((product) => `<span class="ep-sum-chip"><b>${escapeHtml(product.product_label)}</b> ${formatNumber(product.total_hits)} hit · ${product.success_rate_percent == null ? "—" : `${Number(product.success_rate_percent).toLocaleString("id-ID", { maximumFractionDigits: 1 })}% sukses`} · rata-rata ${product.avg_latency_ms == null ? "—" : `${formatNumber(product.avg_latency_ms)} ms`} · p95 ${product.p95_latency_ms == null ? "—" : `${formatNumber(product.p95_latency_ms)} ms`} · ${formatNumber(product.provider_errors)} error</span>`).join("");
+    if (productsEl) productsEl.innerHTML = data.products.map((product) => `<span class="ep-sum-chip"><b>${escapeHtml(product.product_label === product.product ? productLabel(product.product) : product.product_label)}</b> ${formatNumber(product.total_hits)} hit · ${product.success_rate_percent == null ? "—" : `${Number(product.success_rate_percent).toLocaleString("id-ID", { maximumFractionDigits: 1 })}% sukses`} · rata-rata ${product.avg_latency_ms == null ? "—" : `${formatNumber(product.avg_latency_ms)} ms`} · p95 ${product.p95_latency_ms == null ? "—" : `${formatNumber(product.p95_latency_ms)} ms`} · ${formatNumber(product.provider_errors)} error</span>`).join("");
     $("#provider-health-table").innerHTML = data.routes.length ? data.routes.map((route) => `<tr>
       <td><strong>${escapeHtml(route.route_label)}</strong><br /><small>${escapeHtml(route.endpoint_id)}</small></td>
-      <td>${escapeHtml(route.product_label)}</td>
+      <td>${escapeHtml(route.product_label === route.product ? productLabel(route.product) : route.product_label)}</td>
       <td>${route.active ? "Aktif" : "Nonaktif"}</td>
       <td><span class="status-badge ${route.circuit === "open" ? "inactive" : route.circuit === "half_open" ? "demo" : "active"}">${escapeHtml(circuitLabel(route.circuit))}</span></td>
       <td>${formatNumber(route.consecutive_failures)}</td>

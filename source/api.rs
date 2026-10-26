@@ -41,7 +41,8 @@ use crate::{
         AdminProviderTesterResponse, AdminValidationHistoryItem, BankAccountValidationRequest,
         CreateApiKeyRequest,
         CreatePackageRequest, CreateRateLimitPolicyRequest, EwalletValidationRequest,
-        GoogleCallbackQuery, HealthResponse, LocalLoginRequest, ProviderEndpoint,
+        GoogleCallbackQuery, HealthResponse, LocalLoginRequest, PlnValidationRequest,
+        ProviderEndpoint,
         ProviderEndpointTestResponse, ProviderValidationRequest, UpdatePackageRequest,
         UpdateProductRequest, UpdateProviderEndpointRequest, UpdateRateLimitPolicyRequest,
         UsageEvent, ValidationHistoryFilters, ValidationHistoryItem, ValidationMeta,
@@ -122,6 +123,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/validate/bank-account", post(validate_bank_account))
         .route("/v1/validate/ewallet", post(validate_ewallet))
         .route("/v1/validate/whatsapp", post(validate_whatsapp))
+        .route("/v1/validate/pln", post(validate_pln))
         .route("/v1/admin/overview", get(admin_overview))
         .route("/v1/admin/analytics", get(admin_analytics))
         .route("/v1/admin/providers/health", get(admin_providers_health))
@@ -837,6 +839,7 @@ fn public_product_label(product: ValidationProduct) -> &'static str {
         ValidationProduct::BankAccount => "Validasi Rekening",
         ValidationProduct::Ewallet => "Validasi E-Wallet",
         ValidationProduct::Whatsapp => "Validasi WhatsApp",
+        ValidationProduct::Pln => "Validasi PLN",
     }
 }
 
@@ -881,11 +884,12 @@ fn build_public_status(
     guard_statuses: Option<Vec<GuardProductStatus>>,
     settings: &SiteSettings,
 ) -> PublicStatus {
-    let mut products = Vec::with_capacity(3);
+    let mut products = Vec::with_capacity(4);
     for product in [
         ValidationProduct::BankAccount,
         ValidationProduct::Ewallet,
         ValidationProduct::Whatsapp,
+        ValidationProduct::Pln,
     ] {
         let status = match &guard_statuses {
             Some(statuses) => statuses
@@ -1404,6 +1408,17 @@ async fn validate_whatsapp(
     Json(input): Json<WhatsappValidationRequest>,
 ) -> Result<Response, AppError> {
     let request = normalize_whatsapp_request(input)?;
+    validate(state, headers, address, request, request_started).await
+}
+
+async fn validate_pln(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
+    Extension(RequestStart(request_started)): Extension<RequestStart>,
+    Json(input): Json<PlnValidationRequest>,
+) -> Result<Response, AppError> {
+    let request = normalize_pln_request(input)?;
     validate(state, headers, address, request, request_started).await
 }
 
@@ -2204,6 +2219,7 @@ async fn admin_validation_history(
         Some("bank_account") => Some(ValidationProduct::BankAccount),
         Some("ewallet") => Some(ValidationProduct::Ewallet),
         Some("whatsapp") => Some(ValidationProduct::Whatsapp),
+        Some("pln") => Some(ValidationProduct::Pln),
         Some(other) => {
             return Err(AppError::bad_request(format!(
                 "Produk tidak dikenal: {other}"
@@ -2392,6 +2408,9 @@ fn normalize_admin_tester_request(
         }),
         ValidationProduct::Whatsapp => normalize_whatsapp_request(WhatsappValidationRequest {
             phone_number: input.target,
+        }),
+        ValidationProduct::Pln => normalize_pln_request(PlnValidationRequest {
+            customer_id: input.target,
         }),
     }
 }
@@ -3850,6 +3869,7 @@ fn provider_product_from_path(value: &str) -> Result<ValidationProduct, AppError
         "bank_account" => Ok(ValidationProduct::BankAccount),
         "ewallet" => Ok(ValidationProduct::Ewallet),
         "whatsapp" => Ok(ValidationProduct::Whatsapp),
+        "pln" => Ok(ValidationProduct::Pln),
         _ => Err(AppError::bad_request("Produk provider tidak dikenal")),
     }
 }
@@ -3895,6 +3915,24 @@ pub(crate) fn normalize_ewallet_request(
         product: ValidationProduct::Ewallet,
         provider_hint: Some(provider),
         target: account_number,
+    })
+}
+
+/// PLN customer-ID normalization: exactly the bank/e-wallet numeric
+/// pattern (`normalize_numeric`, which trims and strips spaces/dashes),
+/// but with the PLN length window 11–12 digits. Runs in the handler,
+/// before authentication-adjacent pipeline work, so a malformed ID is a
+/// plain 400 that never reaches quota reserve or the provider — and
+/// therefore never charges. No provider hint: PLN has no bank code or
+/// wallet slug.
+pub(crate) fn normalize_pln_request(
+    input: PlnValidationRequest,
+) -> Result<ProviderValidationRequest, AppError> {
+    let customer_id = normalize_numeric(&input.customer_id, 11, 12, "ID pelanggan PLN")?;
+    Ok(ProviderValidationRequest {
+        product: ValidationProduct::Pln,
+        provider_hint: None,
+        target: customer_id,
     })
 }
 
@@ -3977,7 +4015,7 @@ fn fingerprint_hash(
 
 fn mask_target(product: ValidationProduct, target: &str) -> String {
     let visible = match product {
-        ValidationProduct::BankAccount | ValidationProduct::Ewallet => 4,
+        ValidationProduct::BankAccount | ValidationProduct::Ewallet | ValidationProduct::Pln => 4,
         ValidationProduct::Whatsapp => 3,
     };
     let suffix = target
@@ -4565,6 +4603,7 @@ async fn export_admin_csv(
                 Some("bank_account") => Some(crate::models::ValidationProduct::BankAccount),
                 Some("ewallet") => Some(crate::models::ValidationProduct::Ewallet),
                 Some("whatsapp") => Some(crate::models::ValidationProduct::Whatsapp),
+                Some("pln") => Some(crate::models::ValidationProduct::Pln),
                 Some(other) => {
                     return Err(AppError::bad_request(format!(
                         "Produk tidak dikenal: {other}"
@@ -5036,6 +5075,8 @@ mod account_name_tests {
             service_code: None,
             bank_name: None,
             account_name: name.map(str::to_owned),
+            tarif: None,
+            daya: None,
             provider: None,
             registered: None,
             reference: None,
@@ -5066,6 +5107,56 @@ mod account_name_tests {
         let mut result: Option<crate::models::ValidationResultData> = None;
         uppercase_account_name(&mut result);
         assert!(result.is_none());
+    }
+}
+
+#[cfg(test)]
+mod pln_target_tests {
+    use super::*;
+
+    fn normalized(customer_id: &str) -> Result<ProviderValidationRequest, AppError> {
+        normalize_pln_request(PlnValidationRequest {
+            customer_id: customer_id.to_owned(),
+        })
+    }
+
+    #[test]
+    fn eleven_and_twelve_digit_ids_are_accepted() {
+        for id in ["12345678901", "123456789012"] {
+            let request = normalized(id).expect("11-12 digit PLN ID must be accepted");
+            assert_eq!(request.product, ValidationProduct::Pln);
+            assert_eq!(request.target, id);
+            assert_eq!(request.provider_hint, None);
+        }
+    }
+
+    #[test]
+    fn short_long_and_non_digit_ids_are_rejected() {
+        // Too short (10), too long (13), non-digit, and empty: all 400s
+        // before any quota or provider work, exactly like the bank and
+        // e-wallet numeric normalizers.
+        for id in ["1234567890", "1234567890123", "1234567890A", "", "12345 6789"] {
+            assert!(
+                normalized(id).is_err(),
+                "{id:?} must be rejected as an invalid PLN customer ID"
+            );
+        }
+    }
+
+    #[test]
+    fn spaces_and_dashes_are_stripped_like_bank_and_ewallet_targets() {
+        let request = normalized("1234 5678-901").expect("separators are stripped");
+        assert_eq!(request.target, "12345678901");
+    }
+
+    #[test]
+    fn mask_and_product_path_accept_pln() {
+        assert_eq!(mask_target(ValidationProduct::Pln, "12345678901"), "••••••8901");
+        assert_eq!(
+            provider_product_from_path("pln").expect("pln path parses"),
+            ValidationProduct::Pln
+        );
+        assert_eq!(public_product_label(ValidationProduct::Pln), "Validasi PLN");
     }
 }
 
@@ -5424,7 +5515,7 @@ mod site_status_tests {
     fn no_guard_means_operational_not_invented_outage() {
         let status = build_public_status(None, &test_settings());
         assert_eq!(status.overall, "operational");
-        assert_eq!(status.products.len(), 3);
+        assert_eq!(status.products.len(), 4);
         assert!(status
             .products
             .iter()
@@ -5435,6 +5526,8 @@ mod site_status_tests {
         assert_eq!(status.products[1].label, "Validasi E-Wallet");
         assert_eq!(status.products[2].product, "whatsapp");
         assert_eq!(status.products[2].label, "Validasi WhatsApp");
+        assert_eq!(status.products[3].product, "pln");
+        assert_eq!(status.products[3].label, "Validasi PLN");
         assert!(status.announcement.is_none());
         assert!(status.maintenance_banner.is_none());
         assert!(!status.maintenance_blocks_validations);
