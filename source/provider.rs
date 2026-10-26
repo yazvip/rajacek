@@ -139,8 +139,9 @@ impl ProviderAdapter for DemoProvider {
                 account_name: None,
                 tarif: None,
                 daya: None,
-                provider: request.provider_hint.clone(),
+                provider: None,
                 registered: Some(false),
+
                 reference: Some(format!("demo-{}", Uuid::now_v7().simple())),
             }),
             _ => None,
@@ -191,8 +192,9 @@ fn demo_result(request: &ProviderValidationRequest, digest: &[u8]) -> Validation
         account_name,
         tarif,
         daya,
-        provider: request.provider_hint.clone(),
+        provider: None,
         registered: Some(true),
+
         reference: Some(format!(
             "demo-{}-{}",
             request.product.as_str(),
@@ -441,9 +443,15 @@ impl HttpProvider {
         if endpoint.request_mode == ProviderRequestMode::Cutiezy
             && matches!(request.product, ValidationProduct::Whatsapp | ValidationProduct::Pln)
         {
+            // Detail mode hanya di log admin; pesan ke member generik.
+            tracing::warn!(
+                endpoint = %endpoint.name,
+                product = %request.product.as_str(),
+                "Penolakan mode Cutiezy untuk produk ini (pesan member digeneralisasi)"
+            );
             return (
                 Err(AppError::service_unavailable(
-                    "Mode Cutiezy untuk produk ini belum didukung",
+                    "Provider validasi sedang tidak tersedia. Silakan ulangi beberapa saat lagi.",
                 )),
                 false,
             );
@@ -508,8 +516,17 @@ impl HttpProvider {
                 // breaker outcome stays neutral (provider_failure remains
                 // false).
                 let pace_started = Instant::now();
-                self.guard.pace(&pace_host).await?;
+                if let Err(error) = self.guard.pace(&pace_host).await {
+                    // A pacing rejection is our own backpressure, not a
+                    // provider failure: even when a previous attempt
+                    // already set provider_failure, the retry's pacer
+                    // failure must NOT be recorded against the breaker
+                    // (K36 — the old `?` leaked the stale flag).
+                    provider_failure = false;
+                    return Err(error);
+                }
                 pace_wait += pace_started.elapsed();
+
                 match self
                     .call_provider(
                         endpoint,
@@ -989,9 +1006,16 @@ fn build_provider_request(
             // endpoints. Rejecting here mirrors the Cutiezy guard above:
             // a misconfigured endpoint fails as a neutral provider error
             // (no charge), never as a fabricated business answer.
-            ValidationProduct::Pln => Err(AppError::service_unavailable(
-                "Mode Tukangcek untuk produk ini belum didukung",
-            )),
+            ValidationProduct::Pln => {
+                // Detail mode hanya di log admin; pesan ke member generik.
+                tracing::warn!(
+                    product = %request.product.as_str(),
+                    "Penolakan mode Tukangcek untuk produk ini (pesan member digeneralisasi)"
+                );
+                Err(AppError::service_unavailable(
+                    "Provider validasi sedang tidak tersedia. Silakan ulangi beberapa saat lagi.",
+                ))
+            }
         },
     }
 }
@@ -1852,6 +1876,131 @@ mod mapping_tests {
 }
 
 #[cfg(test)]
+mod mode_rejection_tests {
+    use super::{build_provider_request, map_provider_http_error, HttpProvider};
+    use crate::config::{AppConfig, Environment, ProviderMode};
+    use crate::models::{
+        ProviderRequestMode, ProviderResponseMapping, ProviderValidationRequest,
+        ValidationProduct,
+    };
+    use crate::provider_config::ProviderConfigStore;
+    use crate::provider_guard::{ProviderGuard, ProviderGuardConfig};
+    use std::sync::Arc;
+
+    /// Pesan generik yang SUDAH ADA (map_provider_http_error, lengan
+    /// catch-all). Bukan kata-kata baru: kedua penolakan mode harus
+    /// memakai persis string ini di permukaan member.
+    const GENERIC_PROVIDER_FAILURE: &str =
+        "Provider validasi sedang tidak tersedia. Silakan ulangi beberapa saat lagi.";
+
+    #[test]
+    fn tukangcek_pln_rejection_uses_generic_member_message() {
+        let error = build_provider_request(
+            &ProviderValidationRequest {
+                product: ValidationProduct::Pln,
+                provider_hint: None,
+                target: "12345678901".to_owned(),
+            },
+            ProviderRequestMode::Tukangcek,
+            &std::collections::HashMap::new(),
+        )
+        .expect_err("Tukangcek untuk PLN harus ditolak");
+        assert_eq!(error.message, GENERIC_PROVIDER_FAILURE);
+        assert_eq!(
+            error.status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    #[tokio::test]
+    async fn cutiezy_pln_rejection_uses_generic_member_message() {
+        // Guard mode mengembalikan error SEBELUM verifikasi tujuan /
+        // jaringan apa pun, jadi tidak perlu server lokal.
+        let config = AppConfig {
+            environment: Environment::Test,
+            bind_address: "127.0.0.1:0".to_owned(),
+            database_url: None,
+            redis_url: None,
+            provider_mode: ProviderMode::Http,
+            provider_base_url: None,
+            provider_api_key: None,
+            provider_credential_key: None,
+            api_key_encryption_key: None,
+            provider_allowed_hosts: Vec::new(),
+            request_timeout_seconds: 8,
+            default_rate_limit_per_minute: 60,
+            provider_max_concurrency_per_product: 16,
+            provider_queue_wait_ms: 2_000,
+            provider_breaker_failure_threshold: 1,
+            provider_breaker_cooldown_seconds: 60,
+            event_stream_name: "test".to_owned(),
+            idempotency_ttl_seconds: 3600,
+            dashboard_session_secret: Some("test-secret".to_owned()),
+            data_fingerprint_secret: Some("test-secret".to_owned()),
+            google_client_id: None,
+            google_client_secret: None,
+            google_redirect_uri: None,
+            google_member_redirect_uri: None,
+            admin_google_emails: std::collections::HashSet::new(),
+            development_admin_token: None,
+            demo_api_key: None,
+            allowed_dashboard_origin: None,
+            qris_base_url: "https://example.invalid".to_owned(),
+        };
+        let configs = ProviderConfigStore::build(&config)
+            .await
+            .expect("store tanpa DB");
+        let guard = Arc::new(ProviderGuard::new(ProviderGuardConfig::default()));
+        let provider = HttpProvider::new(configs, guard);
+        let endpoint = crate::provider_config::ResolvedProviderEndpoint {
+            id: uuid::Uuid::now_v7(),
+            product: ValidationProduct::Pln,
+            name: "uji".to_owned(),
+            base_url: "https://example.invalid/check".to_owned(),
+            api_key: "kunci-uji".to_owned(),
+            timeout_ms: 5_000,
+            request_mode: ProviderRequestMode::Cutiezy,
+            auth_header: "Authorization".to_owned(),
+            response_mapping: ProviderResponseMapping::default_for(ValidationProduct::Pln),
+            service_code_mapping: std::collections::HashMap::new(),
+            http_method: "GET".to_owned(),
+            code_param: "code".to_owned(),
+            number_param: "number".to_owned(),
+            key_param: None,
+        };
+        let (result, provider_failure) = provider
+            .validate_upstream_endpoint(
+                &endpoint,
+                ProviderValidationRequest {
+                    product: ValidationProduct::Pln,
+                    provider_hint: None,
+                    target: "12345678901".to_owned(),
+                },
+                false,
+            )
+            .await;
+        let error = result.expect_err("Cutiezy untuk PLN harus ditolak");
+        assert_eq!(error.message, GENERIC_PROVIDER_FAILURE);
+        assert_eq!(
+            error.status,
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            !provider_failure,
+            "penolakan mode tetap netral (tidak memicu breaker)"
+        );
+    }
+
+    #[test]
+    fn generic_message_matches_http_error_catch_all() {
+        // Penanda anti-drift: bila lengan catch-all berubah, tes ini
+        // gagal dan memaksa peninjauan ulang pesan mode di atas.
+        let mapped = map_provider_http_error(axum::http::StatusCode::IM_A_TEAPOT);
+        assert_eq!(mapped.message, GENERIC_PROVIDER_FAILURE);
+    }
+}
+
+#[cfg(test)]
 mod cutiezy_ewallet_tests {
     use super::{
         canonical_member_message, cutiezy_mapping, ewallet_not_kyc, normalize_provider_payload,
@@ -2069,7 +2218,164 @@ mod cutiezy_ewallet_tests {
 }
 
 #[cfg(test)]
+mod pacer_failure_tests {
+    use super::HttpProvider;
+    use crate::config::{AppConfig, Environment, ProviderMode};
+    use crate::models::{
+        ProviderRequestMode, ProviderResponseMapping, ProviderValidationRequest,
+        ValidationProduct,
+    };
+    use crate::provider_config::ProviderConfigStore;
+    use crate::provider_guard::{ProviderGuard, ProviderGuardConfig};
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            environment: Environment::Test,
+            bind_address: "127.0.0.1:0".to_owned(),
+            database_url: None,
+            redis_url: None,
+            provider_mode: ProviderMode::Http,
+            provider_base_url: None,
+            provider_api_key: None,
+            provider_credential_key: None,
+            api_key_encryption_key: None,
+            provider_allowed_hosts: Vec::new(),
+            request_timeout_seconds: 8,
+            default_rate_limit_per_minute: 60,
+            provider_max_concurrency_per_product: 16,
+            provider_queue_wait_ms: 2_000,
+            provider_breaker_failure_threshold: 1,
+            provider_breaker_cooldown_seconds: 60,
+            event_stream_name: "test".to_owned(),
+            idempotency_ttl_seconds: 3600,
+            dashboard_session_secret: Some("test-secret".to_owned()),
+            data_fingerprint_secret: Some("test-secret".to_owned()),
+            google_client_id: None,
+            google_client_secret: None,
+            google_redirect_uri: None,
+            google_member_redirect_uri: None,
+            admin_google_emails: std::collections::HashSet::new(),
+            development_admin_token: None,
+            demo_api_key: None,
+            allowed_dashboard_origin: None,
+            qris_base_url: "https://example.invalid".to_owned(),
+        }
+    }
+
+    /// Server lokal sekali-pakai yang selalu menjawab HTTP 500 (gagal
+    /// provider yang retryable) untuk satu request, lalu menutup koneksi.
+    fn serve_one_500() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind lokal");
+        let port = listener.local_addr().expect("alamat lokal").port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                // Baca sampai akhir header, lalu sepanjang Content-Length.
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            buffer.extend_from_slice(&chunk[..read]);
+                            if let Some(end) = buffer
+                                .windows(4)
+                                .position(|window| window == b"\r\n\r\n")
+                            {
+                                let header =
+                                    String::from_utf8_lossy(&buffer[..end]).into_owned();
+                                let length = header
+                                    .lines()
+                                    .find_map(|line| {
+                                        line.strip_prefix("content-length:")
+                                            .or_else(|| {
+                                                line.strip_prefix("Content-Length:")
+                                            })
+                                            .and_then(|value| {
+                                                value.trim().parse::<usize>().ok()
+                                            })
+                                    })
+                                    .unwrap_or(0);
+                                if buffer.len() >= end + 4 + length {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                );
+                let _ = stream.flush();
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn pacer_failure_on_retry_is_not_a_provider_failure() {
+        // Pace: attempt 1 langsung (slot sekarang), attempt 2 harus
+        // menunggu 5.000 ms > budget 100 ms sehingga ditolak 429.
+        let guard = Arc::new(ProviderGuard::new(ProviderGuardConfig {
+            max_concurrency_per_product: 16,
+            queue_wait_ms: 2_000,
+            failure_threshold: 1,
+            cooldown_seconds: 60,
+            max_attempts: 2,
+            pace_interval_ms: 5_000,
+            pace_max_wait_ms: 100,
+        }));
+        let configs = ProviderConfigStore::build(&test_config())
+            .await
+            .expect("store tanpa DB");
+        let provider = HttpProvider::new(configs, Arc::clone(&guard));
+        let port = serve_one_500();
+        let endpoint = crate::provider_config::ResolvedProviderEndpoint {
+            id: uuid::Uuid::now_v7(),
+            product: ValidationProduct::BankAccount,
+            name: "uji".to_owned(),
+            base_url: format!("http://127.0.0.1:{port}/check"),
+            api_key: "kunci-uji".to_owned(),
+            timeout_ms: 5_000,
+            request_mode: ProviderRequestMode::Generic,
+            auth_header: "Authorization".to_owned(),
+            response_mapping: ProviderResponseMapping::default_for(
+                ValidationProduct::BankAccount,
+            ),
+            service_code_mapping: std::collections::HashMap::new(),
+            http_method: "POST".to_owned(),
+            code_param: "code".to_owned(),
+            number_param: "number".to_owned(),
+            key_param: None,
+        };
+        let request = ProviderValidationRequest {
+            product: ValidationProduct::BankAccount,
+            provider_hint: Some("002".to_owned()),
+            target: "1234567890".to_owned(),
+        };
+        // Attempt 1: HTTP 500 (provider_failure=true, retryable).
+        // Attempt 2: pacer menolak -> error 429 internal.
+        let (result, provider_failure) = provider
+            .validate_upstream_endpoint(&endpoint, request, false)
+            .await;
+        let error = result.expect_err("pacer attempt 2 harus menggagalkan");
+        assert_eq!(
+            error.status,
+            axum::http::StatusCode::TOO_MANY_REQUESTS,
+            "error yang keluar harus error pacer, bukan error provider"
+        );
+        assert!(
+            !provider_failure,
+            "gagal pacer pada retry tidak boleh dicatat sebagai kegagalan \
+             provider (breaker): flag harus false"
+        );
+    }
+}
+
+#[cfg(test)]
 mod generic_get_tests {
+
     use super::build_generic_get_url;
     use crate::models::ValidationProduct;
 
@@ -2158,7 +2464,61 @@ mod generic_get_tests {
 }
 
 #[cfg(test)]
+mod demo_provider_tests {
+    use super::{DemoProvider, ProviderAdapter};
+    use crate::models::{ProviderValidationRequest, ValidationProduct};
+
+    fn target_for_selector(product: ValidationProduct, wanted: u32) -> String {
+        // DemoProvider menurunkan outcome dari SHA-256(product:target)[1] % 20,
+        // jadi target pertama yang mengenai tiap selector sepenuhnya deterministik
+        // (tidak ada pemindaian acak / ketergantungan waktu).
+        for index in 0..10_000 {
+            let target = format!("100000{index:04}");
+            let digest = <sha2::Sha256 as sha2::Digest>::digest(
+                format!("{}:{}", product.as_str(), target).as_bytes(),
+            );
+            if u32::from(digest[1]) % 20 == wanted {
+                return target;
+            }
+        }
+        panic!("tidak ada target demo untuk selector {wanted}");
+    }
+
+    #[tokio::test]
+    async fn demo_results_never_carry_provider_hint() {
+        let provider = DemoProvider;
+        // Selector: 1|2 = NotFound, 3 = Pending, sisanya = Valid
+        // (0 = ProviderError, tidak membawa result sama sekali).
+        for (product, hint) in [
+            (ValidationProduct::BankAccount, "002"),
+            (ValidationProduct::Ewallet, "dana"),
+        ] {
+            for wanted in [1_u32, 3, 4] {
+                let target = target_for_selector(product, wanted);
+                let outcome = provider
+                    .validate(ProviderValidationRequest {
+                        product,
+                        provider_hint: Some(hint.to_owned()),
+                        target,
+                    })
+                    .await
+                    .expect("validasi demo berhasil");
+                let result = outcome
+                    .result
+                    .expect("outcome demo membawa result");
+                assert_eq!(
+                    result.provider, None,
+                    "demo {product:?} selector {wanted}: result.provider harus None, \
+                     bukan hint {hint}"
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod pln_tests {
+
     use super::{chikamm_pln_mapping, normalize_provider_payload, parse_pln_tarif_daya};
     use crate::models::{ValidationProduct, ValidationStatus};
 

@@ -36,8 +36,11 @@ async fn main() -> Result<()> {
         // Multi-admin (area 7+8): seed eksplisit — semua email yang
         // sah menurut allowlist lama menjadi owner bila belum punya
         // baris admins (INSERT IGNORE, tidak menimpa peran yang sudah
-        // diatur). Fallback malas di admin_roles.rs tetap berlaku
-        // bila seed ini terlewat.
+        // diatur), KECUALI email yang ada di tombstone deleted_admins
+        // (dihapus lewat panel, perbaikan R1 — dicek di
+        // seed_legacy_admin). Fallback malas di admin_roles.rs tetap
+        // berlaku bila seed ini terlewat.
+
         let legacy_admins: Vec<String> =
             config.admin_google_emails.iter().cloned().collect();
         store.seed_legacy_admins(&legacy_admins).await;

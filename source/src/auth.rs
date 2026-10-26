@@ -24,7 +24,14 @@ use crate::{
 };
 
 const ADMIN_SESSION_COOKIE: &str = "rv_admin_session";
+/// Browser-binding cookie for an in-flight OAuth state (audit flow B16).
+/// Deliberately NOT a `__Host-` cookie: see the long comment on
+/// oauth_state_cookie below — start and callback can legitimately sit
+/// on different hosts (apex vs www), and a host-only cookie would not
+/// survive that hop. This mirrors the session cookies' Domain mechanism.
+const OAUTH_STATE_COOKIE: &str = "rv_oauth_state";
 const OAUTH_STATE_TTL: Duration = Duration::from_secs(10 * 60);
+
 const SESSION_TTL_SECONDS: i64 = 8 * 60 * 60;
 const DEVELOPMENT_SESSION_SECRET: &str =
     "rajacek-development-only-session-secret-change-before-sharing";
@@ -186,7 +193,8 @@ pub(crate) async fn google_authorize_redirect(
     states: &OAuthStateStore,
     purpose: OAuthPurpose,
     redirect_uri: &str,
-) -> Result<Redirect, AppError> {
+) -> Result<Response, AppError> {
+
     let (state, verifier) = states.issue(purpose).await;
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
     let mut url = url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
@@ -205,13 +213,25 @@ pub(crate) async fn google_authorize_redirect(
         query.append_pair("code_challenge_method", "S256");
         query.append_pair("prompt", "select_account");
     }
-    Ok(Redirect::temporary(url.as_str()))
+    // B16: bind this state to the requesting browser so the callback
+    // can prove the same browser started the flow. Without this, an
+    // attacker could plant their own code+state URL in a victim's
+    // browser and the victim would end up signed in as the attacker.
+    let mut response = Redirect::temporary(url.as_str()).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth_state_cookie(&state, config.dashboard_cookie_secure()))
+            .map_err(|_| AppError::internal("Cookie pengikat login Google tidak dapat dibuat"))?,
+    );
+    Ok(response)
 }
+
 
 pub async fn google_login_start(
     config: Arc<AppConfig>,
     states: Arc<OAuthStateStore>,
-) -> Result<Redirect, AppError> {
+) -> Result<Response, AppError> {
+
     if !config.google_login_is_configured() {
         return Err(AppError::service_unavailable(
             "Login Google belum dikonfigurasi. Lengkapi GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REDIRECT_URI, DATABASE_URL, REDIS_URL, dan DASHBOARD_SESSION_SECRET.",
@@ -234,9 +254,11 @@ pub(crate) async fn fetch_google_user(
     config: &AppConfig,
     states: &OAuthStateStore,
     query: &GoogleCallbackQuery,
+    browser_state_cookie: Option<&str>,
     purpose: OAuthPurpose,
     redirect_uri: &str,
 ) -> Result<GoogleUserInfo, AppError> {
+
     if let Some(error) = &query.error {
         tracing::warn!(error = %error, description = ?query.error_description, "Login Google ditolak");
         return Err(AppError::unauthorized(
@@ -251,10 +273,22 @@ pub(crate) async fn fetch_google_user(
         .state
         .as_deref()
         .ok_or_else(|| AppError::bad_request("State login Google tidak ditemukan"))?;
+    // B16: the state must belong to THIS browser. A planted callback
+    // URL carries the attacker's state, but the victim's browser
+    // carries no (or a different) binding cookie, so this fails here —
+    // before the state is consumed and before any session is minted.
+    // Checked before consume so a rejected attempt does not burn the
+    // legitimate owner's in-flight state.
+    if !oauth_state_binding_matches(browser_state_cookie, state) {
+        return Err(AppError::unauthorized(
+            "State login tidak cocok dengan browser peminta",
+        ));
+    }
     let pending = states
         .consume(state)
         .await
         .ok_or_else(|| AppError::unauthorized("State login tidak valid atau sudah kedaluwarsa"))?;
+
     if pending.purpose != purpose {
         return Err(AppError::unauthorized(
             "State login tidak cocok dengan alur masuk ini",
@@ -344,8 +378,10 @@ pub fn is_local_admin_email(email: &str) -> bool {
 pub async fn google_login_callback(
     config: Arc<AppConfig>,
     states: Arc<OAuthStateStore>,
+    headers: &HeaderMap,
     query: GoogleCallbackQuery,
 ) -> Result<(Response, String), AppError> {
+
     if !config.google_login_is_configured() {
         return Err(AppError::service_unavailable(
             "Login Google belum dikonfigurasi",
@@ -355,10 +391,12 @@ pub async fn google_login_callback(
         &config,
         &states,
         &query,
+        cookie_value(headers, OAUTH_STATE_COOKIE),
         OAuthPurpose::Admin,
         config.google_redirect_uri.as_deref().unwrap_or_default(),
     )
     .await?;
+
 
     let email = user.email.trim().to_ascii_lowercase();
     if config.admin_google_emails.is_empty() || !config.admin_google_emails.contains(&email) {
@@ -380,7 +418,15 @@ pub async fn google_login_callback(
     };
     let mut response = Redirect::to("/admin").into_response();
     append_session_cookie(&mut response, &config, &claims)?;
+    // B16: the binding served its purpose once the session is minted;
+    // clear it so no stale binding lingers for the next login.
+    if let Ok(value) =
+        HeaderValue::from_str(&oauth_state_clear_cookie(config.dashboard_cookie_secure()))
+    {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
     // Audit 2026-10-25, B12: return the verified admin email alongside
+
     // the redirect so the handler can record the login. No auth logic
     // changes — the email is the same value already in the claims.
     Ok((response, email))
@@ -534,12 +580,21 @@ pub fn require_admin(config: &AppConfig, headers: &HeaderMap) -> Result<AdminPri
 }
 
 pub fn auth_session_response(config: &AppConfig, headers: &HeaderMap) -> AuthSessionResponse {
-    if let Some(claims) = claims_from_headers(config, headers) {
+    // K28: report exactly what the action gate would accept. Previously
+    // this decoded signature + expiry only, so a pre-source admin token
+    // or a local-dev token looked "logged in" here while every admin
+    // action rejected it. session_from_headers enforces role == "admin",
+    // source == "google" in production, and allowlist membership (or the
+    // development local admin) — the same gate require_admin uses — so
+    // a token it rejects is never again reported as a valid login.
+    // Response shape is unchanged; role is "admin" because the gate
+    // already enforced it.
+    if let Some(principal) = session_from_headers(config, headers) {
         return AuthSessionResponse {
             authenticated: true,
-            email: Some(claims.email),
-            name: Some(claims.name),
-            role: Some(claims.role),
+            email: Some(principal.email),
+            name: Some(principal.name),
+            role: Some("admin".to_owned()),
             google_login_configured: config.google_login_is_configured(),
             development_access_available: !config.environment.is_production()
                 && config.development_admin_token.is_some(),
@@ -549,6 +604,7 @@ pub fn auth_session_response(config: &AppConfig, headers: &HeaderMap) -> AuthSes
 
     fallback_session_response(config, headers)
 }
+
 
 fn fallback_session_response(config: &AppConfig, headers: &HeaderMap) -> AuthSessionResponse {
     let development_authenticated = !config.environment.is_production()
@@ -679,7 +735,70 @@ fn session_cookie(token: &str, secure: bool) -> String {
     )
 }
 
+/// SHA-256 hex digest of an OAuth state: the only value ever stored in
+/// the browser binding cookie, so the raw state never lands in a cookie
+/// (and therefore never in cookie logs or dumps).
+pub(crate) fn oauth_state_digest(state: &str) -> String {
+    hex::encode(Sha256::digest(state.as_bytes()))
+}
+
+/// Set-Cookie value binding an issued OAuth state to the requesting
+/// browser (audit flow B16, login-CSRF / session fixation).
+///
+/// Why Domain=.rajacek.com and not `__Host-`: the audit text suggests
+/// `__Host-`, but that only works when start and callback share one
+/// host. Here they need not: both endpoints are /v1/ paths, which
+/// redirect_to_www explicitly never canonicalises, and the callback
+/// host is fixed by the registered GOOGLE_REDIRECT_URI (member flow:
+/// same origin via member_redirect_uri), not by the host the start
+/// link was clicked on. A host-only `__Host-` cookie set at start
+/// would simply not be sent to a callback on the other host, breaking
+/// legitimate logins. A Domain=.rajacek.com cookie — the exact
+/// mechanism the session cookies already rely on — is sent to both
+/// apex and www, so the binding holds whichever host pair is in play.
+/// Max-Age matches the server-side 10-minute state TTL.
+pub(crate) fn oauth_state_cookie(state: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{OAUTH_STATE_COOKIE}={}; Domain=.rajacek.com; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
+        oauth_state_digest(state),
+        OAUTH_STATE_TTL.as_secs()
+    )
+}
+
+/// Clear the binding cookie after a callback succeeds. The server-side
+/// state is single-use anyway, so a leftover digest is useless — but
+/// clearing keeps no stale binding around for the next login.
+pub(crate) fn oauth_state_clear_cookie(secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{OAUTH_STATE_COOKIE}=; Domain=.rajacek.com; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+    )
+}
+
+/// The binding cookie as sent by the browser that hit the callback, if
+/// any. Member flow uses this; the admin flow reads it inside
+/// google_login_callback.
+pub(crate) fn oauth_state_cookie_from_headers<'a>(headers: &'a HeaderMap) -> Option<&'a str> {
+    cookie_value(headers, OAUTH_STATE_COOKIE)
+}
+
+/// Whether the browser that hit the callback is the browser that
+/// started the flow: its binding cookie must equal the digest of the
+/// state in the callback URL. A missing cookie, or any mismatch, means
+/// the callback URL was planted in this browser by someone else
+/// (attacker starts a flow as themselves, victim clicks the attacker's
+/// code+state URL) and the callback must be rejected before any
+/// session is minted.
+pub(crate) fn oauth_state_binding_matches(browser_cookie: Option<&str>, state: &str) -> bool {
+    match browser_cookie {
+        Some(cookie) => constant_time_eq(cookie, &oauth_state_digest(state)),
+        None => false,
+    }
+}
+
 pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+
     let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
     cookie_header.split(';').find_map(|part| {
         let (key, value) = part.trim().split_once('=')?;
@@ -752,3 +871,260 @@ mod oauth_start_throttle_tests {
         assert!(oauth_start_allowed(&second));
     }
 }
+
+#[cfg(test)]
+mod oauth_binding_and_session_gate_tests {
+    use super::*;
+
+    const TEST_SECRET: &str = "test-dashboard-secret-untuk-tes";
+
+    fn test_config(
+        environment: crate::config::Environment,
+        admin_emails: Vec<&str>,
+    ) -> crate::config::AppConfig {
+        crate::config::AppConfig {
+            environment,
+            bind_address: "127.0.0.1:0".to_owned(),
+            database_url: None,
+            redis_url: None,
+            provider_mode: crate::config::ProviderMode::Demo,
+            provider_base_url: None,
+            provider_api_key: None,
+            provider_credential_key: None,
+            api_key_encryption_key: None,
+            provider_allowed_hosts: Vec::new(),
+            request_timeout_seconds: 8,
+            default_rate_limit_per_minute: 60,
+            provider_max_concurrency_per_product: 16,
+            provider_queue_wait_ms: 2_000,
+            provider_breaker_failure_threshold: 5,
+            provider_breaker_cooldown_seconds: 30,
+            event_stream_name: "validation-events".to_owned(),
+            idempotency_ttl_seconds: 86_400,
+            dashboard_session_secret: Some(TEST_SECRET.to_owned()),
+            data_fingerprint_secret: Some("test-fingerprint-secret".to_owned()),
+            google_client_id: None,
+            google_client_secret: None,
+            google_redirect_uri: None,
+            google_member_redirect_uri: None,
+            admin_google_emails: admin_emails.into_iter().map(str::to_owned).collect(),
+            development_admin_token: None,
+            demo_api_key: None,
+            allowed_dashboard_origin: None,
+            qris_base_url: "https://example.invalid".to_owned(),
+        }
+    }
+
+    fn mint_admin_token(email: &str, role: &str, source: &str) -> String {
+        let claims = SessionClaims {
+            sub: format!("admin:{email}"),
+            email: email.to_owned(),
+            name: "Admin Tes".to_owned(),
+            role: role.to_owned(),
+            exp: (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp() as usize,
+            iat: chrono::Utc::now().timestamp() as usize,
+            jti: uuid::Uuid::now_v7().to_string(),
+            source: source.to_owned(),
+        };
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_secret(TEST_SECRET.as_bytes()),
+        )
+        .expect("token tes")
+    }
+
+    fn headers_with_admin_cookie(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{ADMIN_SESSION_COOKIE}={token}"))
+                .expect("cookie tes"),
+        );
+        headers
+    }
+
+    // ---- B16: predikat pengikat ----
+
+    #[test]
+    fn binding_cookie_matches_only_its_own_state() {
+        let state = "state-contoh-untuk-tes";
+        let cookie = oauth_state_cookie(state, false);
+        // Mekanisme sesi yang sama: Domain, bukan host-only.
+        assert!(cookie.contains("Domain=.rajacek.com"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Max-Age=600"));
+        // Nilai cookie adalah digest, bukan state mentah.
+        assert!(!cookie.contains(state));
+        let digest = oauth_state_digest(state);
+        assert!(oauth_state_binding_matches(Some(&digest), state));
+        assert!(!oauth_state_binding_matches(Some(&oauth_state_digest("state-lain")), state));
+        assert!(!oauth_state_binding_matches(None, state));
+        assert!(!oauth_state_binding_matches(Some(""), state));
+    }
+
+    #[test]
+    fn binding_cookie_secure_flag_follows_config() {
+        let cookie = oauth_state_cookie("state-contoh", true);
+        assert!(cookie.contains("; Secure"));
+        let plain = oauth_state_cookie("state-contoh", false);
+        assert!(!plain.contains("Secure"));
+    }
+
+    // ---- B16: callback tanpa pengikat ditolak SEBELUM consume ----
+
+    #[tokio::test]
+    async fn fetch_google_user_rejects_callback_without_browser_binding() {
+        let config = test_config(crate::config::Environment::Production, vec![]);
+        let states = OAuthStateStore::new();
+        let (state, _verifier) = states.issue(OAuthPurpose::Member).await;
+        let query = GoogleCallbackQuery {
+            code: Some("kode-penyerang".to_owned()),
+            state: Some(state.clone()),
+            error: None,
+            error_description: None,
+        };
+        // Skenario pemicu B16: URL callback penyerang dibuka korban yang
+        // tidak pernah memulai alur ini -> tanpa cookie pengikat.
+        let result = fetch_google_user(
+            &config,
+            &states,
+            &query,
+            None,
+            OAuthPurpose::Member,
+            "https://example.invalid/v1/auth/google/member/callback",
+        )
+        .await;
+        assert!(result.is_err());
+        // Penolakan tidak menghanguskan state: pemilik sah yang sedang
+        // in-flight tetap bisa menyelesaikan alurnya (single-use utuh).
+        assert!(states.consume(&state).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn fetch_google_user_rejects_callback_with_wrong_browser_binding() {
+        let config = test_config(crate::config::Environment::Production, vec![]);
+        let states = OAuthStateStore::new();
+        let (state, _verifier) = states.issue(OAuthPurpose::Member).await;
+        // Korban punya cookie pengikat untuk alurnya SENDIRI, bukan
+        // untuk state penyerang di URL.
+        let victim_cookie = oauth_state_digest("state-milik-korban");
+        let query = GoogleCallbackQuery {
+            code: Some("kode-penyerang".to_owned()),
+            state: Some(state.clone()),
+            error: None,
+            error_description: None,
+        };
+        let result = fetch_google_user(
+            &config,
+            &states,
+            &query,
+            Some(&victim_cookie),
+            OAuthPurpose::Member,
+            "https://example.invalid/v1/auth/google/member/callback",
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(states.consume(&state).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn fetch_google_user_with_matching_binding_passes_the_gate() {
+        let config = test_config(crate::config::Environment::Production, vec![]);
+        let states = OAuthStateStore::new();
+        let (state, _verifier) = states.issue(OAuthPurpose::Member).await;
+        let cookie = oauth_state_digest(&state);
+        let query = GoogleCallbackQuery {
+            code: Some("kode-tes".to_owned()),
+            state: Some(state.clone()),
+            error: None,
+            error_description: None,
+        };
+        let result = fetch_google_user(
+            &config,
+            &states,
+            &query,
+            Some(&cookie),
+            OAuthPurpose::Member,
+            "https://example.invalid/v1/auth/google/member/callback",
+        )
+        .await;
+        // Dengan pengikat cocok, gerbang B16 lolos dan state terpakai
+        // (single-use tetap berjalan): kegagalan di sini — bila ada —
+        // terjadi pada penukaran kode ke Google, bukan pada validasi
+        // state. Bukti deterministiknya adalah state sudah hangus.
+        assert!(states.consume(&state).await.is_none());
+        // Kode tes tidak mungkin ditukar menjadi token Google yang sah,
+        // jadi hasil akhirnya tetap Err — dari langkah penukaran kode,
+        // bukan dari gerbang state.
+        assert!(result.is_err());
+    }
+
+    // ---- K28: /v1/auth/session memakai gerbang aksi ----
+
+    #[test]
+    fn pre_source_admin_token_no_longer_reports_authenticated_in_production() {
+        let config = test_config(
+            crate::config::Environment::Production,
+            vec!["admin-tes@example.test"],
+        );
+        // Token admin pra-source: klaim source kosong, tanda tangan sah,
+        // email ada di allowlist — persis token yang dulu dilaporkan
+        // authenticated:true padahal semua aksi admin menolaknya.
+        let token = mint_admin_token("admin-tes@example.test", "admin", "");
+        let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
+        assert!(!response.authenticated);
+        assert!(response.email.is_none());
+        assert!(session_from_headers(&config, &headers_with_admin_cookie(&token)).is_none());
+    }
+
+    #[test]
+    fn non_google_source_token_no_longer_reports_authenticated_in_production() {
+        let config = test_config(
+            crate::config::Environment::Production,
+            vec!["admin-tes@example.test"],
+        );
+        let token = mint_admin_token("admin-tes@example.test", "admin", "local");
+        let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
+        assert!(!response.authenticated);
+    }
+
+    #[test]
+    fn non_admin_role_token_no_longer_reports_authenticated() {
+        let config = test_config(
+            crate::config::Environment::Production,
+            vec!["admin-tes@example.test"],
+        );
+        let token = mint_admin_token("admin-tes@example.test", "member", "google");
+        let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
+        assert!(!response.authenticated);
+    }
+
+    #[test]
+    fn google_admin_token_still_reports_authenticated_in_production() {
+        let config = test_config(
+            crate::config::Environment::Production,
+            vec!["admin-tes@example.test"],
+        );
+        let token = mint_admin_token("admin-tes@example.test", "admin", "google");
+        let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
+        assert!(response.authenticated);
+        assert_eq!(response.email.as_deref(), Some("admin-tes@example.test"));
+        assert_eq!(response.role.as_deref(), Some("admin"));
+    }
+
+    #[test]
+    fn admin_token_outside_allowlist_no_longer_reports_authenticated() {
+        let config = test_config(
+            crate::config::Environment::Production,
+            vec!["admin-tes@example.test"],
+        );
+        // Email sudah tidak ada di allowlist: gerbang aksi menolaknya,
+        // maka endpoint sesi pun tidak boleh melaporkannya login.
+        let token = mint_admin_token("bukan-admin@example.test", "admin", "google");
+        let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
+        assert!(!response.authenticated);
+    }
+}
+

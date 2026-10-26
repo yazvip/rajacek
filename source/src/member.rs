@@ -23,9 +23,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     api::{effective_client_ip, record_admin_activity, AppState},
     auth::{
-        cookie_value, fetch_google_user, google_authorize_redirect, session_secret, AdminPrincipal,
-        OAuthPurpose,
+        cookie_value, fetch_google_user, google_authorize_redirect, oauth_state_clear_cookie,
+        oauth_state_cookie_from_headers, session_secret, AdminPrincipal, OAuthPurpose,
     },
+
     error::AppError,
     models::{
         GoogleCallbackQuery, MemberAccount, MemberDailyCount, MemberUsageData,
@@ -152,6 +153,7 @@ async fn member_session_claims(
 /// A resolved member session: the account (Google members) plus the API key
 /// prefix every data handler scopes to. Legacy key-only sessions have no
 /// account and scope directly to the prefix stored in the token.
+#[derive(Debug)]
 pub struct MemberSession {
     pub member: Option<MemberAccount>,
     pub prefix: String,
@@ -246,22 +248,31 @@ async fn resolve_session(state: &AppState, headers: &HeaderMap) -> Result<Member
         return Err(AppError::unauthorized("Kunci member sudah tidak aktif"));
     }
     if let Some(member_id) = summary.member_id {
-        if let Some(member) = state.store.member_by_id(member_id).await? {
-            if member.status != "active" {
-                return Err(AppError::forbidden(
-                    "Akun member dinonaktifkan. Hubungi admin untuk bantuan.",
-                ));
-            }
-            return Ok(MemberSession {
-                member: Some(member),
-                prefix: summary.prefix,
-            });
+        // K29: mirror the UUID branch (fail-closed). A prefix whose
+        // member row is gone must not degrade to a ghost member-None
+        // session that can still reveal and sandbox; only a key with
+        // no owning member at all (member_id None, standalone key)
+        // legitimately resolves with member None below.
+        let member = state
+            .store
+            .member_by_id(member_id)
+            .await?
+            .ok_or_else(|| AppError::unauthorized("Sesi member tidak valid"))?;
+        if member.status != "active" {
+            return Err(AppError::forbidden(
+                "Akun member dinonaktifkan. Hubungi admin untuk bantuan.",
+            ));
         }
+        return Ok(MemberSession {
+            member: Some(member),
+            prefix: summary.prefix,
+        });
     }
     Ok(MemberSession {
         member: None,
         prefix: summary.prefix,
     })
+
 }
 
 /// Public profile view shared by the session and overview responses.
@@ -699,25 +710,32 @@ pub struct HistoryStats {
     hits_last_3600s: u64,
 }
 
+/// Filter produk riwayat member (B2): "pln" diterima, sama seperti jalur
+/// riwayat admin. Nilai kosong/absen berarti tanpa filter.
+fn parse_member_history_product(value: Option<&str>) -> Result<Option<ValidationProduct>, AppError> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some("bank_account") => Ok(Some(ValidationProduct::BankAccount)),
+        Some("ewallet") => Ok(Some(ValidationProduct::Ewallet)),
+        Some("whatsapp") => Ok(Some(ValidationProduct::Whatsapp)),
+        Some("pln") => Ok(Some(ValidationProduct::Pln)),
+        Some(other) => Err(AppError::bad_request(format!(
+            "Produk tidak dikenal: {other}"
+        ))),
+    }
+}
+
 pub async fn history(
     State(state): State<AppState>,
+
     headers: HeaderMap,
     Query(query): Query<MemberHistoryQuery>,
 ) -> Result<Json<HistoryResponse>, AppError> {
     let session = resolve_session(&state, &headers).await?;
     let limit = query.limit.unwrap_or(15).clamp(1, 100);
     let offset = query.offset.unwrap_or(0);
-    let product = match query.product.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some("bank_account") => Some(ValidationProduct::BankAccount),
-        Some("ewallet") => Some(ValidationProduct::Ewallet),
-        Some("whatsapp") => Some(ValidationProduct::Whatsapp),
-        Some(other) => {
-            return Err(AppError::bad_request(format!(
-                "Produk tidak dikenal: {other}"
-            )))
-        }
-    };
+    let product = parse_member_history_product(query.product.as_deref())?;
+
     let outcome = query
         .outcome
         .map(|text| text.trim().to_lowercase())
@@ -784,8 +802,10 @@ pub struct UsageDay {
     bank_account: i64,
     ewallet: i64,
     whatsapp: i64,
+    pln: i64,
     total: i64,
 }
+
 
 #[derive(Serialize)]
 pub struct UsageResponse {
@@ -793,8 +813,22 @@ pub struct UsageResponse {
     source: &'static str,
 }
 
+/// Satu entri agregasi pemakaian harian (B2): kolom pln ikut terisi, produk
+/// tak dikenal tetap hanya menaikkan total (perilaku lama untuk `_`).
+fn add_usage_entry(day: &mut UsageDay, product: &str, count: i64) {
+    match product {
+        "bank_account" => day.bank_account += count,
+        "ewallet" => day.ewallet += count,
+        "whatsapp" => day.whatsapp += count,
+        "pln" => day.pln += count,
+        _ => {}
+    }
+    day.total += count;
+}
+
 pub async fn usage(
     State(state): State<AppState>,
+
     headers: HeaderMap,
 ) -> Result<Json<UsageResponse>, AppError> {
     let session = resolve_session(&state, &headers).await?;
@@ -818,15 +852,11 @@ pub async fn usage(
                 bank_account: 0,
                 ewallet: 0,
                 whatsapp: 0,
+                pln: 0,
                 total: 0,
             });
-        match entry.product.as_str() {
-            "bank_account" => day.bank_account += entry.count,
-            "ewallet" => day.ewallet += entry.count,
-            "whatsapp" => day.whatsapp += entry.count,
-            _ => {}
-        }
-        day.total += entry.count;
+        add_usage_entry(day, entry.product.as_str(), entry.count);
+
     }
     let mut days = Vec::with_capacity(14);
     for back in (0..14).rev() {
@@ -837,8 +867,10 @@ pub async fn usage(
             bank_account: 0,
             ewallet: 0,
             whatsapp: 0,
+            pln: 0,
             total: 0,
         }));
+
     }
     Ok(Json(UsageResponse { days, source }))
 }
@@ -904,8 +936,10 @@ pub async fn google_start(
 
 pub async fn google_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<GoogleCallbackQuery>,
 ) -> Result<Response, AppError> {
+
     if !state.config.google_member_login_is_configured() {
         return Err(AppError::service_unavailable(
             "Login Google untuk member belum dikonfigurasi",
@@ -919,10 +953,12 @@ pub async fn google_callback(
         &state.config,
         &state.oauth_states,
         &query,
+        oauth_state_cookie_from_headers(&headers),
         OAuthPurpose::Member,
         &redirect_uri,
     )
     .await?;
+
 
     let email = user.email.trim().to_ascii_lowercase();
     let (member, is_new) = match state.store.member_by_google_sub(&user.sub).await? {
@@ -1054,10 +1090,20 @@ pub async fn google_callback(
         header::SET_COOKIE,
         session_cookie_header(&state, &token, MEMBER_SESSION_TTL_SECONDS),
     );
+    // B16: binding cookie cleared once the session is minted, mirroring
+    // the admin callback.
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth_state_clear_cookie(
+            state.config.dashboard_cookie_secure(),
+        ))
+        .expect("cookie clear pengikat selalu valid"),
+    );
     response
         .headers_mut()
         .append(header::SET_COOKIE, host_only_clear_header(&state));
     Ok(response)
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,11 +1235,49 @@ pub async fn reveal_own_key(
     Ok(Json(OwnKeyRevealResponse { api_key: plaintext }))
 }
 
+/// Audit trail for a redeemed one-time key reveal (audit flow B17).
+/// Mirrors the self-reveal recording in reveal_own_key exactly — same
+/// record_admin_activity path, prefix only, never the plaintext — but
+/// with its own source ("member_one_time_reveal") so forensics can tell
+/// a one-time reveal apart from a later self-reveal or an admin reveal
+/// of the same key. Only successful redemptions are recorded; the
+/// caller invokes this after the single-use token has been removed.
+async fn record_one_time_reveal_activity(state: &AppState, session: &MemberSession) {
+    tracing::info!(
+        prefix = %session.prefix,
+        member_id = ?session.member.as_ref().map(|member| member.id),
+        "Kunci API member dilihat lewat tautan satu-kali"
+    );
+    let email = session
+        .member
+        .as_ref()
+        .map(|member| member.email.clone())
+        .unwrap_or_else(|| format!("member:{}", session.prefix));
+    let name = session
+        .member
+        .as_ref()
+        .and_then(|member| member.name.clone())
+        .unwrap_or_else(|| "Member".to_owned());
+    record_admin_activity(
+        state,
+        &AdminPrincipal {
+            email,
+            name,
+            source: "member_one_time_reveal",
+            jti: String::new(),
+        },
+        "Kunci API dilihat lewat tautan satu-kali",
+        format!("Kunci {}", session.prefix),
+    )
+    .await;
+}
+
 pub async fn reveal_key(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<RevealQuery>,
 ) -> Result<Json<RevealResponse>, AppError> {
+
     // A valid member session is required, the token is single-use, and it
     // is bound to the member + key it was minted for: a leaked token cannot
     // be redeemed by another member's session (a mismatch does NOT consume
@@ -1220,7 +1304,13 @@ pub async fn reveal_key(
                 AppError::not_found("Tautan tampilkan kunci tidak valid atau sudah dipakai")
             })?
     };
+    // B17: a successful one-time reveal leaves a persistent audit row
+    // (prefix only, never the plaintext), through the same
+    // record_admin_activity path as the self-reveal. Failed redemptions
+    // return above and are not recorded.
+    record_one_time_reveal_activity(&state, &session).await;
     Ok(Json(RevealResponse { api_key: plaintext }))
+
 }
 
 // ---------------------------------------------------------------------------
@@ -1809,8 +1899,61 @@ mod session_binding_tests {
 }
 
 #[cfg(test)]
+mod member_history_product_filter_tests {
+    use super::*;
+
+    #[test]
+    fn member_history_filter_accepts_pln_like_admin() {
+        assert_eq!(
+            parse_member_history_product(Some("pln")).expect("pln accepted"),
+            Some(ValidationProduct::Pln)
+        );
+        assert_eq!(
+            parse_member_history_product(Some(" pln ")).expect("pln trimmed"),
+            Some(ValidationProduct::Pln)
+        );
+        assert_eq!(
+            parse_member_history_product(None).expect("absent ok"),
+            None
+        );
+        assert_eq!(
+            parse_member_history_product(Some("")).expect("empty ok"),
+            None
+        );
+        assert!(parse_member_history_product(Some("tidak_dikenal")).is_err());
+    }
+
+    #[test]
+    fn usage_aggregation_fills_pln_column_and_keeps_total_consistent() {
+        let mut day = UsageDay {
+            date: "2026-10-26".to_owned(),
+            bank_account: 0,
+            ewallet: 0,
+            whatsapp: 0,
+            pln: 0,
+            total: 0,
+        };
+        add_usage_entry(&mut day, "bank_account", 3);
+        add_usage_entry(&mut day, "ewallet", 2);
+        add_usage_entry(&mut day, "whatsapp", 1);
+        add_usage_entry(&mut day, "pln", 5);
+        add_usage_entry(&mut day, "tidak_dikenal", 7);
+        assert_eq!(day.bank_account, 3);
+        assert_eq!(day.ewallet, 2);
+        assert_eq!(day.whatsapp, 1);
+        assert_eq!(day.pln, 5);
+        assert_eq!(day.total, 18);
+        assert_eq!(
+            day.bank_account + day.ewallet + day.whatsapp + day.pln + 7,
+            day.total
+        );
+    }
+}
+
+#[cfg(test)]
 mod member_history_no_raw_fields_tests {
     use super::*;
+
 
     #[test]
     fn member_history_response_serialization_omits_raw_target_and_name() {
@@ -1880,3 +2023,212 @@ mod member_history_no_raw_fields_tests {
         assert!(serialized.contains("member-tes@example.test"));
     }
 }
+
+#[cfg(test)]
+mod resolve_session_and_reveal_audit_tests {
+    use super::*;
+    use crate::api::AppState;
+    use crate::models::{CreateApiKeyRequest, MemberAccount};
+
+    async fn test_app_state() -> AppState {
+        let config = std::sync::Arc::new(crate::config::AppConfig {
+            environment: crate::config::Environment::Test,
+            bind_address: "127.0.0.1:0".to_owned(),
+            database_url: None,
+            redis_url: None,
+            provider_mode: crate::config::ProviderMode::Demo,
+            provider_base_url: None,
+            provider_api_key: None,
+            provider_credential_key: None,
+            api_key_encryption_key: None,
+            provider_allowed_hosts: Vec::new(),
+            request_timeout_seconds: 8,
+            default_rate_limit_per_minute: 60,
+            provider_max_concurrency_per_product: 16,
+            provider_queue_wait_ms: 2_000,
+            provider_breaker_failure_threshold: 5,
+            provider_breaker_cooldown_seconds: 30,
+            event_stream_name: "validation-events".to_owned(),
+            idempotency_ttl_seconds: 86_400,
+            dashboard_session_secret: Some("test-dashboard-secret-untuk-tes".to_owned()),
+            data_fingerprint_secret: Some("test-fingerprint-secret".to_owned()),
+            google_client_id: None,
+            google_client_secret: None,
+            google_redirect_uri: None,
+            google_member_redirect_uri: None,
+            admin_google_emails: std::collections::HashSet::new(),
+            development_admin_token: None,
+            demo_api_key: None,
+            allowed_dashboard_origin: None,
+            qris_base_url: "https://example.invalid".to_owned(),
+        });
+        let provider_configs = crate::provider_config::ProviderConfigStore::build(&config)
+            .await
+            .expect("provider configs tanpa DB");
+        let store = std::sync::Arc::new(
+            crate::store::AdminStore::new(None, 60).expect("admin store demo"),
+        );
+        let guard_arc = std::sync::Arc::new(crate::provider_guard::ProviderGuard::new(
+            crate::provider_guard::ProviderGuardConfig::default(),
+        ));
+        let provider =
+            crate::provider::build_provider(&config, provider_configs.clone(), guard_arc);
+        AppState {
+            config: config.clone(),
+            store,
+            rate_limiter: crate::rate_limit::build_rate_limiter(None, 60)
+                .await
+                .expect("rate limiter lokal"),
+            idempotency: crate::idempotency::build_idempotency_coordinator(
+                None,
+                std::time::Duration::from_secs(86_400),
+            )
+            .await
+            .expect("idempotensi lokal"),
+            provider,
+            provider_configs,
+            provider_guard: None,
+            event_sink: crate::events::build_usage_event_sink(
+                None,
+                "validation-events".to_owned(),
+            )
+            .await
+            .expect("event sink lokal"),
+            oauth_states: std::sync::Arc::new(crate::auth::OAuthStateStore::new()),
+            session_revocation: std::sync::Arc::new(
+                crate::session_revocation::SessionRevocation::new(None).await,
+            ),
+        }
+    }
+
+    fn member_fixture() -> MemberAccount {
+        MemberAccount {
+            id: uuid::Uuid::now_v7(),
+            member_code: None,
+            google_sub: "google-sub-tes".to_owned(),
+            email: "member-tes@example.test".to_owned(),
+            name: Some("Member Tes".to_owned()),
+            picture_url: None,
+            plan_kind: "manual".to_owned(),
+            status: "active".to_owned(),
+            created_at: Utc::now(),
+            last_login_at: None,
+        }
+    }
+
+    fn headers_with_member_cookie(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{MEMBER_SESSION_COOKIE}={token}"))
+                .expect("cookie tes"),
+        );
+        headers
+    }
+
+    // ---- B17: reveal satu-kali meninggalkan baris audit prefix-only ----
+
+    #[tokio::test]
+    async fn one_time_reveal_leaves_prefix_only_audit_row() {
+        let state = test_app_state().await;
+        let member = member_fixture();
+        let session = MemberSession {
+            member: Some(member.clone()),
+            prefix: "rv_live_ab12".to_owned(),
+        };
+        record_one_time_reveal_activity(&state, &session).await;
+        let (entries, total) = state
+            .store
+            .list_admin_audit(10, 0, Some("satu-kali"), None, None, None)
+            .await;
+        assert!(total >= 1);
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.action.contains("satu-kali"))
+            .expect("baris audit reveal satu-kali");
+        assert_eq!(entry.actor, member.email);
+        // Hanya prefix — tidak ada plaintext apa pun di detail.
+        assert_eq!(entry.detail, "Kunci rv_live_ab12");
+    }
+
+    // ---- K29: prefix dengan member_id hilang -> 401, sama seperti UUID ----
+
+    #[tokio::test]
+    async fn prefix_session_with_missing_member_row_fails_closed() {
+        let state = test_app_state().await;
+        let member = member_fixture();
+        let created = state
+            .store
+            .create_member_api_key(&member, 100, None, 60)
+            .await
+            .expect("kunci fixture terbit");
+        drop(created.plaintext_key);
+        assert!(created.key.member_id.is_some());
+        // Tanpa pool DB, member_by_id mengembalikan None: persis kondisi
+        // baris member hilang yang dimaksud K29.
+        assert!(state
+            .store
+            .member_by_id(member.id)
+            .await
+            .expect("baca member")
+            .is_none());
+        let token = issue_member_session(
+            &state,
+            &created.key.prefix,
+            "api_key",
+            &created.key.prefix,
+        )
+        .expect("sesi prefix");
+        let error = resolve_session(&state, &headers_with_member_cookie(&token))
+            .await
+            .expect_err("sesi prefix yatim harus ditolak");
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.message, "Sesi member tidak valid");
+    }
+
+    #[tokio::test]
+    async fn uuid_session_with_missing_member_row_fails_closed_the_same_way() {
+        // Paritas yang dituntut K29: cabang UUID sudah fail-closed dengan
+        // pesan yang sama; tes ini mengunci paritas itu.
+        let state = test_app_state().await;
+        let orphan = uuid::Uuid::now_v7();
+        let token = issue_member_session(&state, &orphan.to_string(), "api_key", "")
+            .expect("sesi uuid");
+        let error = resolve_session(&state, &headers_with_member_cookie(&token))
+            .await
+            .expect_err("sesi uuid yatim harus ditolak");
+        assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error.message, "Sesi member tidak valid");
+    }
+
+    #[tokio::test]
+    async fn prefix_session_without_member_still_resolves() {
+        // Regresi penjaga: kunci mandiri (member_id None) TIDAK ikut
+        // ditolak oleh perbaikan K29 — ia tetap resolve ke member None.
+        let state = test_app_state().await;
+        let created = state
+            .store
+            .create_api_key(CreateApiKeyRequest {
+                name: "Kunci tes".to_owned(),
+                scopes: vec!["validate:*".to_owned()],
+                rate_limit_per_minute: Some(60),
+            })
+            .await
+            .expect("kunci mandiri terbit");
+        drop(created.plaintext_key);
+        assert!(created.key.member_id.is_none());
+        let token = issue_member_session(
+            &state,
+            &created.key.prefix,
+            "api_key",
+            &created.key.prefix,
+        )
+        .expect("sesi prefix");
+        let session = resolve_session(&state, &headers_with_member_cookie(&token))
+            .await
+            .expect("kunci mandiri tetap lolos");
+        assert!(session.member.is_none());
+        assert_eq!(session.prefix, created.key.prefix);
+    }
+}
+

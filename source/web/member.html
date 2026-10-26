@@ -154,7 +154,8 @@
       .bar-total { font-size:10px; font-weight:700; font-family:'JetBrains Mono',monospace; color:var(--ink); line-height:1.2; white-space:nowrap; }
       .bar-stack { width:100%; max-width:34px; display:flex; flex-direction:column-reverse; height:96px; justify-content:flex-start; position:relative; z-index:1; background:#f1f5f9; border-radius:6px 6px 0 0; overflow:hidden; }
       .bar-stack > div { width:100%; }
-      .seg-bank { background:var(--brand); } .seg-ewallet { background:#34d399; } .seg-wa { background:var(--amber); }
+      .seg-bank { background:var(--brand); } .seg-ewallet { background:#34d399; } .seg-wa { background:var(--amber); } .seg-pln { background:#3b82f6; }
+
       .bar-date { font-size:10px; font-family:'JetBrains Mono',monospace; color:var(--faint); white-space:nowrap; line-height:1.2; }
       .legend { display:flex; gap:16px; font-size:12px; color:var(--muted); margin-top:12px; flex-wrap:wrap; }
       .legend i { display:inline-block; width:10px; height:10px; border-radius:999px; margin-right:5px; }
@@ -338,7 +339,9 @@
       }
       @media (min-width:860px) {
         .grid-3 { grid-template-columns:repeat(3,1fr); }
+        .grid-3.usage-kpi { grid-template-columns:repeat(4,1fr); }
       }
+
       @media (min-width:1024px) {
         .grid-kpi { grid-template-columns:repeat(4,1fr); }
         .grid-main { grid-template-columns:2fr 1fr; }
@@ -563,6 +566,8 @@
                   <span><i class="seg-bank"></i>Rekening bank</span>
                   <span><i class="seg-ewallet"></i>E-Wallet</span>
                   <span><i class="seg-wa"></i>WhatsApp</span>
+                  <span><i class="seg-pln"></i>PLN</span>
+
                 </div>
                 <div style="display:flex;justify-content:flex-end;margin-top:12px;">
                   <button type="button" id="chartCtaBtn" style="border:none;background:transparent;color:var(--brand-700);font-weight:700;font-size:12px;padding:0;">Uji Validasi Live →</button>
@@ -606,7 +611,8 @@
 
           <!-- PAGE: PENGGUNAAN -->
           <section id="page-penggunaan" class="page-section stack">
-            <div class="grid-3">
+            <div class="grid-3 usage-kpi">
+
               <div class="card kpi">
                 <div class="kpi-top"><span class="kpi-label">Rekening Bank (14 Hari)</span><span class="nav-dot"></span></div>
                 <div class="kpi-value" style="font-size:20px;" id="usageBankTotal">–</div>
@@ -622,6 +628,12 @@
                 <div class="kpi-value" style="font-size:20px;" id="usageWaTotal">–</div>
                 <p class="sub">Verifikasi nomor terdaftar</p>
               </div>
+              <div class="card kpi">
+                <div class="kpi-top"><span class="kpi-label">PLN (14 Hari)</span><span class="nav-dot" style="background:#3b82f6;"></span></div>
+                <div class="kpi-value" style="font-size:20px;" id="usagePlnTotal">–</div>
+                <p class="sub">Cek ID pelanggan PLN</p>
+              </div>
+
             </div>
             <div class="card" style="padding:0;overflow:hidden;">
               <div style="padding:20px 20px 0;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;">
@@ -634,7 +646,8 @@
               <div style="overflow-x:auto;margin-top:16px;">
                 <table>
                   <thead>
-                    <tr><th>Tanggal</th><th>Rekening Bank</th><th>E-Wallet</th><th>WhatsApp</th><th>Total Harian</th><th style="width:33%;">Proporsi Volume</th></tr>
+                    <tr><th>Tanggal</th><th>Rekening Bank</th><th>E-Wallet</th><th>WhatsApp</th><th>PLN</th><th>Total Harian</th><th style="width:33%;">Proporsi Volume</th></tr>
+
                   </thead>
                   <tbody id="usageDailyBody"></tbody>
                 </table>
@@ -1132,25 +1145,31 @@
           const h = (v) => Math.round(84 * v / max);
           const label = new Date(day.date + 'T00:00:00+07:00')
             .toLocaleDateString('id-ID', { day: '2-digit', month: 'short' });
-          const detail = `Bank ${fmtNum(day.bank_account)}, E-Wallet ${fmtNum(day.ewallet)}, WA ${fmtNum(day.whatsapp)}`;
+          const detail = `Bank ${fmtNum(day.bank_account)}, E-Wallet ${fmtNum(day.ewallet)}, WA ${fmtNum(day.whatsapp)}, PLN ${fmtNum(day.pln || 0)}`;
+
           return `<div class="bar-col" title="${label}: ${fmtNum(day.total)} cek · ${detail}">
             ${day.total ? `<div class="bar-total">${fmtNum(day.total)}</div>` : ''}
             <div class="bar-stack">
               <div class="seg-bank" style="height:${h(day.bank_account)}px"></div>
               <div class="seg-ewallet" style="height:${h(day.ewallet)}px"></div>
               <div class="seg-wa" style="height:${h(day.whatsapp)}px"></div>
+              <div class="seg-pln" style="height:${h(day.pln || 0)}px"></div>
+
             </div><div class="bar-date">${label}</div></div>`;
         }).join('');
         const sum = (k) => d.days.reduce((s, x) => s + (x[k] || 0), 0);
         $('usageBankTotal').textContent = fmtNum(sum('bank_account')) + ' cek';
         $('usageEwalletTotal').textContent = fmtNum(sum('ewallet')) + ' cek';
         $('usageWaTotal').textContent = fmtNum(sum('whatsapp')) + ' cek';
+        $('usagePlnTotal').textContent = fmtNum(sum('pln')) + ' cek';
+
         $('usageBankShare').textContent = total14 > 0 ? Math.round(100 * sum('bank_account') / total14) + '% dari total trafik' : 'Belum ada trafik 14 hari';
         $('usageDailyTotal').textContent = `Total 14 Hari: ${fmtNum(total14)} Cek`;
         $('usageDailyBody').innerHTML = [...d.days].sort((a, b) => b.date.localeCompare(a.date)).map((day) => {
           const pct = Math.round(100 * day.total / max);
           const dlabel = new Date(day.date + 'T00:00:00+07:00').toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
-          return `<tr><td style="font-weight:600;">${dlabel}</td><td class="mono">${fmtNum(day.bank_account)}</td><td class="mono">${fmtNum(day.ewallet)}</td><td class="mono">${fmtNum(day.whatsapp)}</td><td class="mono" style="font-weight:700;">${fmtNum(day.total)}</td><td><div class="prop-bar"><div style="width:${pct}%"></div></div></td></tr>`;
+          return `<tr><td style="font-weight:600;">${dlabel}</td><td class="mono">${fmtNum(day.bank_account)}</td><td class="mono">${fmtNum(day.ewallet)}</td><td class="mono">${fmtNum(day.whatsapp)}</td><td class="mono">${fmtNum(day.pln || 0)}</td><td class="mono" style="font-weight:700;">${fmtNum(day.total)}</td><td><div class="prop-bar"><div style="width:${pct}%"></div></div></td></tr>`;
+
         }).join('');
       }
 

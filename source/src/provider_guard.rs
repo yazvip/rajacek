@@ -835,6 +835,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reset_endpoint_purges_breaker_entry_for_deleted_endpoint() {
+        let guard = guard(1, 600, 4);
+        let ticket = guard
+            .acquire(ValidationProduct::BankAccount, "srv-hapus")
+            .await
+            .expect("circuit tertutup menerima");
+        guard.record_failure(&ticket).await;
+        assert!(guard.is_open("srv-hapus").await);
+        // delete_provider_endpoint memakai reset_endpoint sebagai purge-nya.
+        guard.reset_endpoint("srv-hapus").await;
+        let snapshot = guard.endpoint_snapshot().await;
+        assert!(
+            !snapshot
+                .iter()
+                .any(|entry| entry.endpoint_id == "srv-hapus"),
+            "entri breaker endpoint yang dihapus harus hilang dari snapshot"
+        );
+        assert!(!guard.is_open("srv-hapus").await);
+    }
+
+    #[tokio::test]
     async fn admin_reset_revives_open_endpoint_immediately() {
         let guard = guard(2, 600, 4);
         for _ in 0..2 {

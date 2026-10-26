@@ -1396,8 +1396,10 @@ impl AdminStore {
                         "bank_account" => ValidationProduct::BankAccount,
                         "ewallet" => ValidationProduct::Ewallet,
                         "whatsapp" => ValidationProduct::Whatsapp,
+                        "pln" => ValidationProduct::Pln,
                         _ => return None,
                     };
+
                     let title = match product {
                         ValidationProduct::BankAccount => "Validasi rekening bank",
                         ValidationProduct::Ewallet => "Validasi e-wallet",
@@ -2047,10 +2049,23 @@ impl AdminStore {
                 .await
             {
                 Ok(member) => return Ok(member),
-                Err(CreateMemberFailure::CodeCollision) => continue,
+                Err(CreateMemberFailure::CodeCollision(code)) => {
+                    // B18: majukan counter melewati kode yang
+                    // bertabrakan dalam transaksi TERPISAH yang
+                    // di-commit, SEBELUM mencoba lagi. Tanpa ini
+                    // rollback try_create_member mengembalikan
+                    // next_value ke angka yang sama dan retry
+                    // menabrak kode yang sama 3x. Gagal resync
+                    // tidak menggagalkan retry (best-effort): bila
+                    // resync gagal, percobaan berikut tetap jalan
+                    // dan kegagalan akhir tetap 500 seperti dulu.
+                    self.resync_member_code_counter(&pool, &code).await;
+                    continue;
+                }
                 Err(CreateMemberFailure::Fatal(error)) => return Err(error),
             }
         }
+
         Err(AppError::internal("Akun member tidak dapat dibuat"))
     }
 
@@ -2121,9 +2136,13 @@ impl AdminStore {
             last_login_at: Some(now),
         };
         // Member + pemajuan counter ter-commit bersamaan: gagal di sini =
-        // rollback total, nomor tidak hangus secara diam-diam menjadi
-        // celah (nomor yang terlanjur maju tapi member gagal tetap maju —
-        // itu AMAN: celah urutan boleh ada, duplikat yang tidak boleh).
+        // rollback total. Untuk bentrok kode (B18) rollback itu justru
+        // masalahnya — next_value kembali ke angka yang sama — dan
+        // ditutup oleh resync_member_code_counter di create_member
+        // (transaksi terpisah, ter-commit) sebelum retry. Nomor yang
+        // terlewat karena rollback/resync tetap dibiarkan kosong: celah
+        // urutan AMAN, duplikat yang tidak boleh.
+
         if let Err(error) = sqlx::query(
             "INSERT INTO members (id, member_code, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
@@ -2142,8 +2161,9 @@ impl AdminStore {
         {
             tx.rollback().await.ok();
             if is_member_code_collision(&error) {
-                return Err(CreateMemberFailure::CodeCollision);
+                return Err(CreateMemberFailure::CodeCollision(member_code.clone()));
             }
+
             tracing::warn!(?error, "Gagal membuat member baru");
             return Err(CreateMemberFailure::Fatal(AppError::internal(
                 "Akun member tidak dapat dibuat",
@@ -2156,6 +2176,72 @@ impl AdminStore {
         })?;
         Ok(member)
     }
+
+    /// Nomor urut dari kode member ("RC000042" -> 42); None bila format
+    /// tak dikenali. Murni, supaya bisa dites tanpa database.
+    pub(crate) fn member_code_sequence(code: &str) -> Option<u64> {
+        code.strip_prefix("RC")?.parse().ok()
+    }
+
+    /// Target counter setelah bentrok: tidak pernah mundur, dan selalu
+    /// melewati kode terbesar yang sudah ada (bukan hanya satu langkah
+    /// melewati kode yang bertabrakan). Murni, cerminan dari SQL di
+    /// `resync_member_code_counter` — target = max(kode_bertabrakan + 1,
+    /// kode_maksimum_yang_ada + 1).
+    pub(crate) fn resync_counter_target(
+        collided_sequence: u64,
+        max_existing_sequence: u64,
+    ) -> u64 {
+        collided_sequence
+            .saturating_add(1)
+            .max(max_existing_sequence.saturating_add(1))
+    }
+
+    /// Sinkronisasi ulang counter kode member SETELAH bentrok, dalam
+    /// transaksi sendiri yang di-commit sebelum retry (B18). Best-effort
+    /// dan tidak pernah menggagalkan pemanggil: kegagalan apa pun hanya
+    /// di-warn, lalu retry tetap berjalan seperti dulu.
+    ///
+    /// Keamanan arahnya: GREATEST di UPDATE menjamin counter tidak
+    /// pernah mundur (counter yang sudah lebih maju karena celah urutan
+    /// tidak ditarik balik); MAX dari tabel members menutup lag berapa
+    /// pun besarnya, bukan hanya satu langkah. Seed INSERT IGNORE
+    /// menutup kasus baris counter belum ada (sama seperti jaring
+    /// pengaman di try_create_member).
+    async fn resync_member_code_counter(&self, pool: &sqlx::MySqlPool, collided_code: &str) {
+        let floor = Self::member_code_sequence(collided_code)
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(error) => {
+                tracing::warn!(?error, "Resync counter kode member gagal dimulai (retry tetap jalan)");
+                return;
+            }
+        };
+        let seeded = sqlx::query(
+            "INSERT IGNORE INTO member_code_counter (id, next_value) VALUES (1, 1)",
+        )
+        .execute(&mut *tx)
+        .await
+        .is_ok();
+        let advanced = sqlx::query(
+            "UPDATE member_code_counter SET next_value = GREATEST(next_value, ?, (SELECT COALESCE(MAX(CAST(SUBSTRING(member_code, 3) AS UNSIGNED)), 0) + 1 FROM members)) WHERE id = 1",
+        )
+        .bind(floor as i64)
+        .execute(&mut *tx)
+        .await
+        .is_ok();
+        if seeded && advanced {
+            if let Err(error) = tx.commit().await {
+                tracing::warn!(?error, "Resync counter kode member gagal dikomit (retry tetap jalan)");
+            }
+        } else {
+            tx.rollback().await.ok();
+            tracing::warn!("Resync counter kode member gagal ditulis (retry tetap jalan)");
+        }
+    }
+
 
     /// DELIBERATE warn-only (audit 2026-10-25, K35, kept as a conscious
     /// decision): last-login is display metadata, not money, and it is
@@ -2578,6 +2664,57 @@ impl AdminStore {
         }
     }
 
+    /// Jalur export member (K39): filter + LIMIT di query, meniru pola
+    /// orders/usage. `limit` diharapkan = EXPORT_MAX_ROWS + 1 agar
+    /// penanda truncated di handler tetap akurat. Tanpa pool (mode
+    /// memori/dev) jatuh kembali ke list_members + filter + truncate
+    /// dengan semantik filter yang sama (q: email/nama/id substring
+    /// tak peka huruf; status: sama persis tak peka huruf; rentang:
+    /// from inklusif, to eksklusif) — jadi perilaku export mode memori
+    /// tidak berubah. list_members() admin TIDAK diubah di sini.
+    pub async fn list_members_for_export(
+        &self,
+        q: Option<&str>,
+        status: Option<&str>,
+        from: Option<chrono::DateTime<Utc>>,
+        to_exclusive: Option<chrono::DateTime<Utc>>,
+        limit: i64,
+    ) -> Vec<crate::models::MemberAccount> {
+        let Some(pool) = self.pool() else {
+            let mut members = self.list_members().await;
+            members.retain(|member| {
+                status.map_or(true, |status| member.status.eq_ignore_ascii_case(status))
+                    && q.map_or(true, |needle| {
+                        let needle = needle.to_lowercase();
+                        member.email.to_lowercase().contains(&needle)
+                            || member
+                                .name
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                                .contains(&needle)
+                            || member.id.to_string().to_lowercase().contains(&needle)
+                    })
+                    && from.map_or(true, |from| member.created_at >= from)
+                    && to_exclusive.map_or(true, |to| member.created_at < to)
+            });
+            members.truncate(limit.max(0) as usize);
+            return members;
+        };
+        let mut builder =
+            members_export_query_builder(q, status, from, to_exclusive, limit);
+        match builder.build_query_as::<MemberRow>().fetch_all(&pool).await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| row.into_account().ok())
+                .collect(),
+            Err(error) => {
+                tracing::warn!(?error, "Gagal memuat daftar member untuk export");
+                Vec::new()
+            }
+        }
+    }
+
     /// Apply a package (or manual plan) to the member's key.
     /// Bucket (2026-10-26): mode "replace" menghapus semua bucket lalu
     /// membuat satu bucket (kuota baru, expiry = sekarang + valid_days).
@@ -2603,8 +2740,9 @@ impl AdminStore {
         rate_limit_per_minute: Option<u32>,
         package_id: Option<Uuid>,
         plan_kind: &str,
-    ) -> Result<(AdminApiKeySummary, u64), AppError> {
+    ) -> Result<(AdminApiKeySummary, u64, Vec<QuotaBucket>), AppError> {
         // Compute the new record without mutating yet.
+
         let mut record = {
             let data = self.data.read().await;
             let record = data
@@ -2625,8 +2763,19 @@ impl AdminStore {
             }
             record.clone()
         };
+        // K18: potret bucket lama SEBELUM mode replace menghapusnya.
+        // Potret diambil dari record yang sama yang akan di-DELETE dari
+        // database di bawah, jadi isinya persis baris yang musnah —
+        // bukan perkiraan dari tampilan. Mode add mengembalikan vec
+        // kosong (tidak ada bucket yang dihapus).
+        let deleted_buckets: Vec<QuotaBucket> = if mode == "replace" {
+            record.buckets.clone()
+        } else {
+            Vec::new()
+        };
         let now = Utc::now();
         // Bucket (2026-10-26): stacking-expiry lama dihapus di kedua mode.
+
         // replace = hapus semua bucket, satu bucket baru (kuota baru,
         // expiry = sekarang + valid_days) — tampilan luarnya sama persis
         // (total = sisa = kuota baru, expiry dari sekarang). add = satu
@@ -2719,7 +2868,8 @@ impl AdminStore {
                 .await;
         }
         self.set_member_plan_kind(member_id, plan_kind).await?;
-        Ok((record.summary, record.remaining_quota))
+        Ok((record.summary, record.remaining_quota, deleted_buckets))
+
     }
 
     /// Hasil grant pembelian paket yang sudah dibayar (atomik).
@@ -3223,6 +3373,101 @@ pub(crate) fn is_duplicate_key_error(error: &sqlx::Error) -> bool {
 /// praktis sampai 999.999 — 1 juta member adalah batas yang jauh di
 /// luar skala saat ini, dan kegagalan insert di sana fail-closed
 /// (bukan duplikat diam-diam).
+/// Escape karakter wildcard LIKE (K39): kata kunci admin adalah
+/// substring biasa, bukan pola — `%`, `_`, dan `\` di input harus
+/// cocok secara literal, bukan sebagai wildcard. MySQL memakai
+/// backslash sebagai karakter escape default LIKE.
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch == '%' || ch == '_' || ch == '\\' {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
+}
+
+/// Konstruktor query export member (K39): filter + ORDER + LIMIT di
+/// dalam SQL, meniru pola orders/usage. Dipisah dari
+/// `list_members_for_export` supaya bentuk SQL-nya bisa dites tanpa
+/// database (apakah LIMIT benar-benar ada di query, bukan hanya di
+/// truncate sesudah fetch_all).
+fn members_export_query_builder<'a>(
+    q: Option<&'a str>,
+    status: Option<&'a str>,
+    from: Option<chrono::DateTime<Utc>>,
+    to_exclusive: Option<chrono::DateTime<Utc>>,
+    limit: i64,
+) -> sqlx::QueryBuilder<'a, sqlx::MySql> {
+    let mut builder = sqlx::QueryBuilder::new(
+        "SELECT id, member_code, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at FROM members WHERE 1 = 1",
+    );
+    if let Some(status) = status {
+        builder.push(" AND status = ").push_bind(status);
+    }
+    if let Some(q) = q {
+        let pattern = format!("%{}%", escape_like_pattern(q));
+        builder
+            .push(" AND (email LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR name LIKE ")
+            .push_bind(pattern.clone())
+            .push(" OR id LIKE ")
+            .push_bind(pattern)
+            .push(")");
+    }
+    if let Some(from) = from {
+        builder.push(" AND created_at >= ").push_bind(from);
+    }
+    if let Some(to_exclusive) = to_exclusive {
+        builder.push(" AND created_at < ").push_bind(to_exclusive);
+    }
+    builder.push(" ORDER BY created_at DESC LIMIT ").push_bind(limit);
+    builder
+}
+
+#[cfg(test)]
+mod members_export_query_tests {
+    use super::*;
+    use sqlx::Execute;
+
+    #[test]
+    fn like_pattern_escapes_wildcards_and_backslash() {
+        assert_eq!(escape_like_pattern("a%b_c\\d"), "a\\%b\\_c\\\\d");
+        assert_eq!(escape_like_pattern("biasa"), "biasa");
+        assert_eq!(escape_like_pattern(""), "");
+    }
+
+    #[test]
+    fn export_query_carries_filters_and_limit_in_sql() {
+        let mut builder = members_export_query_builder(
+            Some("cari"),
+            Some("active"),
+            None,
+            None,
+            10_001,
+        );
+        let sql = builder.build().sql().to_owned();
+        // LIMIT harus ada DI QUERY (bukan hanya truncate pasca-fetch).
+        assert!(sql.contains("LIMIT"), "{sql}");
+        assert!(sql.contains("ORDER BY created_at DESC"), "{sql}");
+        // Filter ikut di query: status + q (LIKE di 3 kolom).
+        assert!(sql.contains("status ="), "{sql}");
+        assert!(sql.contains("email LIKE"), "{sql}");
+        assert!(sql.contains("name LIKE"), "{sql}");
+        assert!(sql.contains("id LIKE"), "{sql}");
+    }
+
+    #[test]
+    fn export_query_without_filters_still_limits() {
+        let mut builder = members_export_query_builder(None, None, None, None, 10_001);
+        let sql = builder.build().sql().to_owned();
+        assert!(sql.contains("LIMIT"), "{sql}");
+        assert!(!sql.contains("LIKE"), "{sql}");
+    }
+}
+
 pub(crate) fn format_member_code(sequence: u64) -> String {
     format!("RC{sequence:06}")
 }
@@ -3239,12 +3484,58 @@ fn is_member_code_collision(error: &sqlx::Error) -> bool {
     }
 }
 
+#[cfg(test)]
+mod member_code_collision_resync_tests {
+    use super::*;
+
+    #[test]
+    fn sequence_parses_rc_codes_and_rejects_garbage() {
+        assert_eq!(AdminStore::member_code_sequence("RC000001"), Some(1));
+        assert_eq!(AdminStore::member_code_sequence("RC000042"), Some(42));
+        assert_eq!(AdminStore::member_code_sequence("RC1000000"), Some(1_000_000));
+        assert_eq!(AdminStore::member_code_sequence("XX000042"), None);
+        assert_eq!(AdminStore::member_code_sequence("RC"), None);
+        assert_eq!(AdminStore::member_code_sequence("RCabc"), None);
+        assert_eq!(AdminStore::member_code_sequence(""), None);
+    }
+
+    #[test]
+    fn resync_target_jumps_past_all_existing_codes() {
+        // Bentrok tunggal: maju tepat satu langkah melewati kode itu.
+        assert_eq!(AdminStore::resync_counter_target(41, 41), 42);
+        // Counter tertinggal jauh dari kode maksimum: satu resync
+        // langsung melompati SEMUA kode yang ada (bukan satu langkah),
+        // sehingga percobaan berikut tidak menabrak kode lama lagi.
+        assert_eq!(AdminStore::resync_counter_target(5, 100), 101);
+        // Tidak pernah mundur: target >= kode bertabrakan + 1 dan
+        // >= kode maksimum yang ada + 1.
+        assert_eq!(AdminStore::resync_counter_target(10, 3), 11);
+        assert_eq!(AdminStore::resync_counter_target(0, 0), 1);
+    }
+
+    #[test]
+    fn retry_after_resync_uses_a_fresh_code_not_the_collided_one() {
+        // Simulasi skenario pemicu B18: counter menunjuk 41, padahal
+        // 41, 42, 43 sudah dipakai. Dulu: retry membaca 41 lagi (3x).
+        // Kini: satu resync -> 44, kode percobaan berikut != 41.
+        let collided = 41;
+        let max_existing = 43;
+        let next = AdminStore::resync_counter_target(collided, max_existing);
+        assert_eq!(next, 44);
+        assert_ne!(format_member_code(next), format_member_code(collided));
+    }
+}
+
 enum CreateMemberFailure {
     /// Nomor counter ternyata sudah terpakai (counter pernah di-reset
     /// manual): pemanggil boleh mencoba lagi dengan nomor berikut.
-    CodeCollision,
+    /// Membawa kode yang bertabrakan supaya pemanggil bisa memajukan
+    /// counter melewati kode itu SEBELUM mencoba lagi (B18) — tanpa
+    /// kode ini retry buta dan membaca next_value yang sama.
+    CodeCollision(String),
     Fatal(AppError),
 }
+
 
 impl AdminStore {
     /// Record a trial grant. The table's primary key (google_sub) makes
@@ -3940,6 +4231,14 @@ impl AdminStore {
             }
             return Err(AppError::internal("Akun admin tidak dapat dibuat"));
         }
+        // R1: pembuatan ulang eksplisit oleh owner membatalkan
+        // penghapusan lama — bersihkan tombstone email ini (bila ada).
+        // Best-effort: kegagalan di sini tidak menggagalkan pembuatan,
+        // karena baris admins yang baru sudah membuat resolve lolos.
+        let _ = sqlx::query("DELETE FROM deleted_admins WHERE email = ?")
+            .bind(email)
+            .execute(&pool)
+            .await;
         Ok(AdminAccount {
             id,
             email: email.to_owned(),
@@ -3949,6 +4248,7 @@ impl AdminStore {
             updated_at: now,
             created_by: Some(created_by.to_owned()),
         })
+
     }
 
     /// Ubah peran dan/atau status aktif akun. Mengembalikan None bila
@@ -3993,20 +4293,69 @@ impl AdminStore {
         Ok(Some(account))
     }
 
-    /// Hapus akun admin. Mengembalikan true bila ada baris yang dihapus.
-    pub async fn delete_admin_account(&self, id: Uuid) -> Result<bool, AppError> {
+    /// Hapus akun admin dan catat emailnya di tombstone
+    /// `deleted_admins` (migrasi 0028, perbaikan R1). Tanpa tombstone,
+    /// penghapusan bisa dibatalkan diam-diam oleh fallback/seed owner
+    /// di `admin_roles.rs` dan `main.rs` pada request berikutnya.
+    /// Mengembalikan true bila ada baris yang dihapus. Tombstone hanya
+    /// ditulis bila baris benar-benar terhapus (bukan bila id tidak
+    /// ditemukan); INSERT IGNORE membuat balapan hapus bersamaan tidak
+    /// menggagalkan penghapusan. Bila tabel tombstone belum ada
+    /// (migrasi 0028 belum jalan), penghapusan tetap jalan dan
+    /// perilaku lama dipertahankan — tidak ada admin yang terkunci
+    /// oleh migrasi yang tertunda. Membuat ulang email yang sama lewat
+    /// `create_admin_account` membersihkan tombstone-nya.
+    pub async fn delete_admin_account(
+        &self,
+        id: Uuid,
+        deleted_by: &str,
+    ) -> Result<bool, AppError> {
         let Some(pool) = self.pool() else {
             return Err(AppError::service_unavailable(
                 "Kelola admin membutuhkan database.",
             ));
         };
+        // Email dibaca dulu: setelah DELETE, tidak ada lagi sumber
+        // email untuk tombstone. Bila baca ini gagal, hapus tetap jalan
+        // tetapi tombstone tidak tertulis (dicatat di log, lihat bawah).
+        let email: Option<String> = sqlx::query_scalar::<_, String>(
+            "SELECT email FROM admins WHERE id = ?",
+        )
+        .bind(id.to_string())
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten();
         let result = sqlx::query("DELETE FROM admins WHERE id = ?")
             .bind(id.to_string())
             .execute(&pool)
             .await
             .map_err(|_| AppError::internal("Akun admin tidak dapat dihapus"))?;
-        Ok(result.rows_affected() > 0)
+        let deleted = result.rows_affected() > 0;
+        if deleted {
+            match email {
+                Some(email) => {
+                    let _ = sqlx::query(
+                        "INSERT IGNORE INTO deleted_admins (email, deleted_at, deleted_by) \
+                         VALUES (?, ?, ?)",
+                    )
+                    .bind(email)
+                    .bind(chrono::Utc::now())
+                    .bind(deleted_by)
+                    .execute(&pool)
+                    .await;
+                }
+                None => {
+                    tracing::warn!(
+                        id = %id,
+                        "Admin dihapus tetapi emailnya tidak terbaca, tombstone tidak tertulis"
+                    );
+                }
+            }
+        }
+        Ok(deleted)
     }
+
 
     /// Jumlah owner yang masih aktif — dipakai guard "owner terakhir"
     /// di handler agar owner tidak bisa menonaktifkan/mendemot/menghapus
@@ -4025,14 +4374,59 @@ impl AdminStore {
         .unwrap_or(0) as u64
     }
 
+    /// Apakah email ini pernah dihapus lewat panel (tombstone R1,
+    /// migrasi 0028)? Tanpa database -> Ok(false) (keterbatasan mode
+    /// tanpa database yang sama dengan deactivate di mode itu).
+    /// Query gagal -> Err (fail-closed, pengerasan koordinator atas
+    /// patch worker yang menelan error menjadi false): pemanggil
+    /// resolve menolak/menggagalkan request alih-alih memberi
+    /// fallback Owner, dan seed melewati penulisan saat ragu.
+    /// Dengan migrasi 0028 ter-apply, query ini selalu sukses.
+    pub async fn is_admin_deleted(&self, email: &str) -> Result<bool, AppError> {
+        let Some(pool) = self.pool() else {
+            return Ok(false);
+        };
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM deleted_admins WHERE email = ?",
+        )
+        .bind(email)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| AppError::internal("Gagal memeriksa status penghapusan admin"))?
+        .unwrap_or(0);
+        Ok(count > 0)
+    }
+
     /// Seed malas satu email lama sebagai owner (INSERT IGNORE).
     /// Best-effort dan tidak pernah gagalkan pemanggil: bila tabel
     /// belum ada (migrasi 0019 belum jalan) atau ada balapan, fallback
     /// di admin_roles.rs tetap mengembalikan owner untuk sesi itu.
+    /// PENGECUALIAN R1: email yang ada di tombstone `deleted_admins`
+    /// TIDAK PERNAH di-seed kembali — penghapusan lewat panel harus
+    /// persisten, termasuk setelah restart (seed startup memanggil
+    /// fungsi ini lewat seed_legacy_admins, jadi ikut ter-cover).
     pub async fn seed_legacy_admin(&self, email: &str) {
         let Some(pool) = self.pool() else {
             return;
         };
+        match self.is_admin_deleted(email).await {
+            Ok(true) => {
+                tracing::warn!(
+                    email,
+                    "Seed admin lama dilewati: email ada di tombstone penghapusan"
+                );
+                return;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                tracing::warn!(
+                    email,
+                    "Seed admin lama dilewati: status tombstone tidak dapat diperiksa"
+                );
+                return;
+            }
+        }
+
         let now = chrono::Utc::now();
         if let Err(error) = sqlx::query(
             "INSERT IGNORE INTO admins (id, email, role, active, created_at, updated_at, created_by) \
@@ -5282,16 +5676,24 @@ mod quota_bucket_tests {
     async fn assign_add_creates_bucket_and_replace_resets_buckets() {
         let store = AdminStore::new(None, 60).expect("store baru");
         let member = member_fixture();
-        let (key, _, _) = two_bucket_key(&store, &member).await;
+        let (key, first_id, second_id) = two_bucket_key(&store, &member).await;
         let (_, remaining) = store.member_key(member.id).await.unwrap();
         assert_eq!(remaining, 150);
         // Replace: semua bucket lama hilang, satu bucket baru 200 hit.
-        let (summary, remaining) = store
+        let (summary, remaining, deleted_buckets) = store
             .assign_plan_to_member_key(member.id, 200, 30, "replace", None, None, "package")
             .await
             .expect("assign-replace");
         assert_eq!(remaining, 200);
         assert_eq!(summary.quota_total, 200);
+        // K18: bucket lama yang dihapus dikembalikan persis untuk jejak
+        // audit — kedua bucket dari two_bucket_key, bukan bucket baru.
+        assert_eq!(deleted_buckets.len(), 2);
+        assert!(deleted_buckets.iter().any(|bucket| bucket.id == first_id));
+        assert!(deleted_buckets.iter().any(|bucket| bucket.id == second_id));
+        assert!(deleted_buckets.iter().any(|bucket| bucket.total_hits == 100));
+        assert!(deleted_buckets.iter().any(|bucket| bucket.total_hits == 50));
+
         let buckets = store.key_bucket_list(&key.prefix).await;
         assert_eq!(buckets.len(), 1);
         assert_eq!(buckets[0].total_hits, 200);

@@ -73,11 +73,13 @@ pub const HEALTH_LATENCY_SAMPLE_LIMIT: i64 = 5_000;
 pub const ANALYTICS_CACHE_TTL_SECS: u64 = 60;
 
 /// Produk yang selalu tampil meski tanpa data (tidak crash).
-const KNOWN_PRODUCTS: [ValidationProduct; 3] = [
+const KNOWN_PRODUCTS: [ValidationProduct; 4] = [
     ValidationProduct::BankAccount,
     ValidationProduct::Ewallet,
     ValidationProduct::Whatsapp,
+    ValidationProduct::Pln,
 ];
+
 
 /// `true` hanya untuk status order yang dihitung sebagai pendapatan.
 pub fn is_revenue_status(status: &str) -> bool {
@@ -338,9 +340,11 @@ fn product_label_for(code: &str) -> String {
         "bank_account" => ValidationProduct::BankAccount.label_id().to_owned(),
         "ewallet" => ValidationProduct::Ewallet.label_id().to_owned(),
         "whatsapp" => ValidationProduct::Whatsapp.label_id().to_owned(),
+        "pln" => ValidationProduct::Pln.label_id().to_owned(),
         other => other.to_owned(),
     }
 }
+
 
 /// Gabungkan agregat per produk dari SQL menjadi daftar produk:
 /// produk yang dikenal selalu ada (nol bila tanpa data).
@@ -553,16 +557,10 @@ fn build_route_health(
         .collect()
 }
 
-/// Kesehatan rute + produk. Ledger dibaca toleran-gagal per query:
-/// bila ledger tidak bisa dibaca, produk tetap tampil dengan angka kosong
-/// dan `ledger_available = false`, sementara data breaker tetap live.
-pub async fn providers_health(
-    pool: Option<&MySqlPool>,
-    endpoints: &[ProviderEndpoint],
-    guard_snapshot: Option<Vec<GuardEndpointStatus>>,
-) -> ProvidersHealthResponse {
-    let routes = build_route_health(endpoints, guard_snapshot.as_deref());
-    let mut products: Vec<ProductHealth> = KNOWN_PRODUCTS
+/// Daftar awal kesehatan per produk: satu entri nol per produk yang dikenal
+/// (B21, termasuk PLN) — baris ledger kemudian hanya memperbarui entri ini.
+fn initial_product_health() -> Vec<ProductHealth> {
+    KNOWN_PRODUCTS
         .iter()
         .map(|product| ProductHealth {
             product: product.as_str().to_owned(),
@@ -575,7 +573,21 @@ pub async fn providers_health(
             avg_latency_ms: None,
             p95_latency_ms: None,
         })
-        .collect();
+        .collect()
+}
+
+/// Kesehatan rute + produk. Ledger dibaca toleran-gagal per query:
+/// bila ledger tidak bisa dibaca, produk tetap tampil dengan angka kosong
+/// dan `ledger_available = false`, sementara data breaker tetap live.
+
+pub async fn providers_health(
+    pool: Option<&MySqlPool>,
+    endpoints: &[ProviderEndpoint],
+    guard_snapshot: Option<Vec<GuardEndpointStatus>>,
+) -> ProvidersHealthResponse {
+    let routes = build_route_health(endpoints, guard_snapshot.as_deref());
+    let mut products = initial_product_health();
+
     let mut ledger_available = false;
     if let Some(pool) = pool {
         let start = Utc::now().naive_utc() - chrono::Duration::hours(HEALTH_WINDOW_HOURS);
@@ -658,9 +670,11 @@ pub async fn providers_health(
 mod tests {
     use super::{
         build_hits_per_day, build_product_analytics, build_revenue, build_route_health,
-        clamp_analytics_days, is_revenue_status, latency_summary, percentile_sorted,
-        success_rate_percent, wib_day_list, ANALYTICS_DEFAULT_DAYS, ANALYTICS_MAX_DAYS,
+        clamp_analytics_days, initial_product_health, is_revenue_status, latency_summary,
+        percentile_sorted, product_label_for, success_rate_percent, wib_day_list,
+        ANALYTICS_DEFAULT_DAYS, ANALYTICS_MAX_DAYS,
     };
+
     use crate::{
         models::{ProviderEndpoint, ProviderRequestMode, ProviderResponseMapping, ValidationProduct},
         provider_guard::GuardEndpointStatus,
@@ -715,9 +729,32 @@ mod tests {
     }
 
     #[test]
+    fn health_products_include_pln_with_validasi_label() {
+        let products = initial_product_health();
+        assert_eq!(products.len(), 4);
+        let pln = products
+            .iter()
+            .find(|product| product.product == "pln")
+            .expect("pln health row");
+        assert_eq!(pln.product_label, "Validasi PLN");
+        assert_eq!(pln.total_hits, 0);
+        assert_eq!(pln.success_rate_percent, None);
+    }
+
+    #[test]
+    fn product_label_for_pln_is_validasi_pln_not_raw_code() {
+        assert_eq!(product_label_for("pln"), "Validasi PLN");
+        assert_eq!(product_label_for("bank_account"), "Validasi rekening");
+        // Produk tak dikenal tetap jatuh ke kode mentah (perilaku lama).
+        assert_eq!(product_label_for("baru"), "baru");
+    }
+
+    #[test]
     fn product_without_data_does_not_crash_and_has_no_rate() {
+
         let products = build_product_analytics(vec![]);
-        assert_eq!(products.len(), 3);
+        assert_eq!(products.len(), 4);
+
         for product in &products {
             assert_eq!(product.total_hits, 0);
             assert_eq!(product.success_rate_percent, None);
@@ -756,7 +793,8 @@ mod tests {
             &days,
             &[],
         );
-        assert_eq!(hits.len(), 2 * 3);
+        assert_eq!(hits.len(), 2 * 4);
+
         let known = hits
             .iter()
             .find(|row| row.day == first && row.product == "bank_account")

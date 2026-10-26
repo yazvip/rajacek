@@ -1603,12 +1603,28 @@ pub async fn ensure_key_buyable(store: &AdminStore, member_id: Uuid) -> Result<(
     Ok(())
 }
 
+/// Referensi log untuk token QR: hash SHA-256 token yang dipotong
+/// (12 hex) + panjang token. Cukup untuk mengorelasikan baris log
+/// dengan satu QR, tanpa menulis token penuh ke jurnal — token penuh
+/// memungkinkan check-status/cancel oleh siapa pun yang membaca log.
+/// Hash dipilih, bukan prefix, karena panjang/format token tidak
+/// dijamin sehingga prefix bisa menyingkap sebagian besar token pendek.
+fn token_log_ref(token: &str) -> String {
+    let hash = Sha256::digest(token.as_bytes());
+    format!(
+        "sha256:{}..len{}",
+        &hex::encode(hash)[..12],
+        token.chars().count()
+    )
+}
+
 pub async fn create_member_order(
     store: &AdminStore,
     config: &AppConfig,
     member_id: Uuid,
     package: &AdminPackage,
 ) -> Result<(MemberOrderView, bool), AppError> {
+
     let pool = pool_or_unavailable(store)?;
     if !package.active {
         return Err(AppError::bad_request("Paket ini sudah tidak aktif"));
@@ -1729,7 +1745,8 @@ pub async fn create_member_order(
             // jadi tidak ada kredensial di URL yang tercatat).
             if let Some(token) = error.orphan_token() {
                 if let Err(cancel_error) = client.cancel(&api_key, token).await {
-                    tracing::error!(?cancel_error, member_id = %member_id, token = %token, amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
+                    tracing::error!(?cancel_error, member_id = %member_id, token_ref = %token_log_ref(token), amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
+
                 }
             }
             return Err(error.to_app_error());
@@ -1789,7 +1806,8 @@ pub async fn create_member_order(
         tracing::warn!(?error, "Insert order gagal setelah create QRIS (3 percobaan)");
         if let Err(cancel_error) = client.cancel(&api_key, &invoice.token).await {
             // Loud: a paid orphan QR cannot be granted without an order row.
-            tracing::error!(?cancel_error, member_id = %member_id, token = %invoice.token, amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
+            tracing::error!(?cancel_error, member_id = %member_id, token_ref = %token_log_ref(&invoice.token), amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
+
         }
         return Err(AppError::internal("Order tidak dapat dibuat. Coba lagi."));
     }
@@ -2421,7 +2439,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn token_log_ref_never_contains_full_token() {
+        let token = "tok_live_contoh_token_panjang_0123456789";
+        let reference = token_log_ref(token);
+        assert!(
+            !reference.contains(token),
+            "referensi log tidak boleh memuat token penuh: {reference}"
+        );
+        assert_eq!(
+            reference,
+            token_log_ref(token),
+            "referensi harus deterministik untuk token yang sama"
+        );
+        assert_ne!(
+            reference,
+            token_log_ref("tok_live_token_lain_yang_berbeda_9876543210"),
+            "token berbeda harus menghasilkan referensi berbeda"
+        );
+        // Token pendek/kosong tidak boleh panic dan referensinya bukan token itu sendiri.
+        assert!(!token_log_ref("").is_empty());
+        assert_ne!(token_log_ref("x"), "x");
+    }
+
+    #[test]
     fn hmac_sha256_matches_rfc_4231_case_2() {
+
         let tag = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
         assert_eq!(
             hex::encode(tag),

@@ -742,12 +742,10 @@ impl ProviderConfigStore {
                     channel,
                     member_code,
                 )| {
-                    let product = match product_code.as_str() {
-                        "bank_account" => ValidationProduct::BankAccount,
-                        "ewallet" => ValidationProduct::Ewallet,
-                        "whatsapp" => ValidationProduct::Whatsapp,
-                        _ => return None,
+                    let Some(product) = parse_product(product_code.as_str()) else {
+                        return None;
                     };
+
                     Some(crate::models::ValidationHistoryItem {
                         request_id,
                         api_key_prefix,
@@ -1403,8 +1401,10 @@ fn parse_product(value: &str) -> Option<ValidationProduct> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_public_ip, validate_endpoint_url, validate_http_params, validate_service_code_mapping,
+        is_public_ip, parse_product, validate_endpoint_url, validate_http_params,
+        validate_service_code_mapping,
     };
+
     use crate::models::ValidationProduct;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1440,7 +1440,21 @@ mod tests {
     }
 
     #[test]
+    fn history_product_mapping_keeps_every_product_including_pln() {
+        for (code, expected) in [
+            ("bank_account", ValidationProduct::BankAccount),
+            ("ewallet", ValidationProduct::Ewallet),
+            ("whatsapp", ValidationProduct::Whatsapp),
+            ("pln", ValidationProduct::Pln),
+        ] {
+            assert_eq!(parse_product(code), Some(expected), "{code} must map");
+        }
+        assert_eq!(parse_product("tidak_dikenal"), None);
+    }
+
+    #[test]
     fn http_params_normalize_and_reject_bad_names() {
+
         let (method, code, number, key) =
             validate_http_params("get", " bank ", "user_id", Some(" apikey ")).unwrap();
         assert_eq!(method, "GET");

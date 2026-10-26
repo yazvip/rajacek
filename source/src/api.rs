@@ -1294,14 +1294,22 @@ async fn google_login_start(
 
 async fn google_login_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<GoogleCallbackQuery>,
 ) -> Result<Response, AppError> {
+
     // B12, same pattern as local login: the auth flow in auth.rs is
     // unchanged; only its outcome is recorded, with the verified admin
     // email on success (the callback now returns it alongside the
     // redirect). On failure the email is not reliably known, so the
     // actor is "unknown" rather than a guess.
-    match auth::google_login_callback(state.config.clone(), state.oauth_states.clone(), query)
+    match auth::google_login_callback(
+        state.config.clone(),
+        state.oauth_states.clone(),
+        &headers,
+        query,
+    )
+
         .await
     {
         Ok((response, email)) => {
@@ -1921,21 +1929,126 @@ async fn list_products(
     Ok(Json(state.store.list_products().await))
 }
 
+/// Detail audit perubahan produk (K37): id + nilai sebelum/sesudah
+/// untuk field yang berubah (nama, harga, aktif, rute). Tanpa `before`
+/// (produk tidak ditemukan di daftar sebelum update — praktis tidak
+/// terjadi karena update sudah lolos), detail tetap memuat id + harga
+/// + status baru, bukan sekadar nama.
+fn product_update_audit_detail(
+    before: Option<&AdminProduct>,
+    after: &AdminProduct,
+) -> String {
+    let Some(before) = before else {
+        return format!(
+            "{} (id {}) diperbarui dari dashboard admin; harga Rp{}; aktif {}.",
+            after.name, after.id, after.base_price_idr, after.active
+        );
+    };
+    let mut changes = Vec::new();
+    if before.name != after.name {
+        changes.push(format!("nama {} → {}", before.name, after.name));
+    }
+    if before.base_price_idr != after.base_price_idr {
+        changes.push(format!(
+            "harga Rp{} → Rp{}",
+            before.base_price_idr, after.base_price_idr
+        ));
+    }
+    if before.active != after.active {
+        changes.push(format!("aktif {} → {}", before.active, after.active));
+    }
+    if before.provider_route != after.provider_route {
+        changes.push(format!(
+            "rute {} → {}",
+            before.provider_route, after.provider_route
+        ));
+    }
+    if changes.is_empty() {
+        format!(
+            "{} (id {}) diperbarui dari dashboard admin; tidak ada field berubah.",
+            after.name, after.id
+        )
+    } else {
+        format!(
+            "{} (id {}) diperbarui dari dashboard admin: {}.",
+            after.name,
+            after.id,
+            changes.join(", ")
+        )
+    }
+}
+
+#[cfg(test)]
+mod product_update_audit_detail_tests {
+    use super::*;
+
+    fn product_fixture(price: u64, active: bool) -> AdminProduct {
+        AdminProduct {
+            id: Uuid::parse_str("0199a5a5-0000-7000-8000-000000000001").unwrap(),
+            code: "bank_account".to_owned(),
+            name: "Rekening Bank".to_owned(),
+            description: String::new(),
+            active,
+            provider_route: "bank".to_owned(),
+            base_price_idr: price,
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn price_change_shows_before_and_after_values() {
+        let before = product_fixture(5000, true);
+        let mut after = product_fixture(7500, true);
+        after.name = "Rekening Bank".to_owned();
+        let detail = product_update_audit_detail(Some(&before), &after);
+        assert!(detail.contains("0199a5a5-0000-7000-8000-000000000001"), "{detail}");
+        assert!(detail.contains("harga Rp5000 → Rp7500"), "{detail}");
+        assert!(!detail.contains("aktif"), "{detail}");
+    }
+
+    #[test]
+    fn no_change_reports_no_changed_field() {
+        let before = product_fixture(5000, true);
+        let after = product_fixture(5000, true);
+        let detail = product_update_audit_detail(Some(&before), &after);
+        assert!(detail.contains("tidak ada field berubah"), "{detail}");
+    }
+
+    #[test]
+    fn missing_before_still_names_id_and_new_price() {
+        let after = product_fixture(7500, false);
+        let detail = product_update_audit_detail(None, &after);
+        assert!(detail.contains("0199a5a5-0000-7000-8000-000000000001"), "{detail}");
+        assert!(detail.contains("Rp7500"), "{detail}");
+    }
+}
+
 async fn update_product(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateProductRequest>,
 ) -> Result<Json<AdminProduct>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Manager, "PATCH /v1/admin/products/:id")
+            .await?;
+    let before = state
+        .store
+        .list_products()
+        .await
+        .into_iter()
+        .find(|product| product.id == id);
     let product = state.store.update_product(id, input).await?;
-    record_admin_activity(
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Produk diperbarui",
-        format!("{} diperbarui dari dashboard admin.", product.name),
+        product_update_audit_detail(before.as_ref(), &product),
+        Some("product"),
+        Some(&id.to_string()),
     )
     .await;
+
     Ok(Json(product))
 }
 
@@ -1950,25 +2063,37 @@ async fn list_provider_endpoints(
 /// Switching a server ON in the admin panel is an explicit operator
 /// decision: it force-closes that server's circuit breaker (failure history
 /// forgotten) so the server serves again immediately instead of waiting
-/// out the automatic cooldown.
-async fn reset_breaker_if_active(state: &AppState, endpoint: &ProviderEndpoint) {
-    if endpoint.active {
+/// out the automatic cooldown. ONLY a false->true activation does this:
+/// editing a server that stays active (name/timeout/mapping) must never
+/// clear its breaker and skip the cooldown (K34).
+async fn reset_breaker_on_activation(
+    state: &AppState,
+    was_active: bool,
+    endpoint: &ProviderEndpoint,
+) {
+    if !was_active && endpoint.active {
         if let Some(guard) = &state.provider_guard {
             guard.reset_endpoint(&endpoint.id.to_string()).await;
         }
     }
 }
 
+
 async fn create_provider_endpoint(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(input): Json<crate::models::CreateProviderEndpointRequest>,
 ) -> Result<(StatusCode, Json<ProviderEndpoint>), AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Manager, "POST /v1/admin/provider-endpoints")
+            .await?;
     let product = input.product;
     let endpoint = state.provider_configs.create(input).await?;
-    reset_breaker_if_active(&state, &endpoint).await;
-    record_admin_activity(
+    // New endpoint id: no breaker entry can exist yet, so this reset is a
+    // no-op; false marks "not previously active" for a fresh server.
+    reset_breaker_on_activation(&state, false, &endpoint).await;
+
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Server provider ditambahkan",
@@ -1977,8 +2102,11 @@ async fn create_provider_endpoint(
             endpoint.name,
             product.label_id()
         ),
+        Some("provider_endpoint"),
+        Some(&endpoint.id.to_string()),
     )
     .await;
+
     Ok((StatusCode::CREATED, Json(endpoint)))
 }
 
@@ -1988,10 +2116,21 @@ async fn update_provider_endpoint(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateProviderEndpointRequest>,
 ) -> Result<Json<ProviderEndpoint>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Manager, "PUT /v1/admin/provider-endpoints/:id")
+            .await?;
+    let was_active = state
+        .provider_configs
+        .list()
+        .await
+        .iter()
+        .find(|endpoint| endpoint.id == id)
+        .map(|endpoint| endpoint.active)
+        .unwrap_or(false);
     let endpoint = state.provider_configs.update_by_id(id, input).await?;
-    reset_breaker_if_active(&state, &endpoint).await;
-    record_admin_activity(
+    reset_breaker_on_activation(&state, was_active, &endpoint).await;
+
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Endpoint provider diperbarui",
@@ -2000,8 +2139,11 @@ async fn update_provider_endpoint(
             endpoint.name,
             endpoint.product.label_id()
         ),
+        Some("provider_endpoint"),
+        Some(&endpoint.id.to_string()),
     )
     .await;
+
     Ok(Json(endpoint))
 }
 
@@ -2016,10 +2158,25 @@ async fn set_provider_endpoint_active(
     Path(id): Path<Uuid>,
     Json(input): Json<SetEndpointActiveInput>,
 ) -> Result<Json<ProviderEndpoint>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "PATCH /v1/admin/provider-endpoints/:id/active",
+    )
+    .await?;
+    let was_active = state
+        .provider_configs
+        .list()
+        .await
+        .iter()
+        .find(|endpoint| endpoint.id == id)
+        .map(|endpoint| endpoint.active)
+        .unwrap_or(false);
     let endpoint = state.provider_configs.set_active(id, input.active).await?;
-    reset_breaker_if_active(&state, &endpoint).await;
-    record_admin_activity(
+    reset_breaker_on_activation(&state, was_active, &endpoint).await;
+
+    record_admin_activity_with_entity(
         &state,
         &principal,
         if input.active {
@@ -2033,8 +2190,11 @@ async fn set_provider_endpoint_active(
             endpoint.product.label_id(),
             if input.active { "aktif" } else { "nonaktif" }
         ),
+        Some("provider_endpoint"),
+        Some(&endpoint.id.to_string()),
     )
     .await;
+
     Ok(Json(endpoint))
 }
 
@@ -2043,7 +2203,13 @@ async fn delete_provider_endpoint(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "DELETE /v1/admin/provider-endpoints/:id",
+    )
+    .await?;
     // Resolve first so the audit row can name the endpoint (B12: no
     // generic "one server deleted" rows); delete() itself returns ().
     let endpoint = state
@@ -2052,7 +2218,13 @@ async fn delete_provider_endpoint(
         .await
         .ok_or_else(|| AppError::not_found("Endpoint provider tidak ditemukan"))?;
     state.provider_configs.delete(id).await?;
-    record_admin_activity(
+    // K43: hapus juga entri circuit breaker endpoint ini dari memori
+    // guard — kalau tidak, entri yatim menumpuk selama masa proses.
+    // reset_endpoint adalah purge yang sudah ada (me-remove entri map).
+    if let Some(guard) = &state.provider_guard {
+        guard.reset_endpoint(&id.to_string()).await;
+    }
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Server provider dihapus",
@@ -2062,8 +2234,11 @@ async fn delete_provider_endpoint(
             id,
             endpoint.product.label_id()
         ),
+        Some("provider_endpoint"),
+        Some(&id.to_string()),
     )
     .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2350,6 +2525,23 @@ async fn update_provider_guard(
     }))
 }
 
+/// K49: tester admin memang mengembalikan payload mentah upstream pada
+/// SUKSES (field `upstream_response`), tetapi pada ERROR payload yang
+/// sama tidak boleh ikut lewat `AppError.details` (diserialisasi ke
+/// respons error oleh error.rs). Hapus HANYA kunci `upstream_response`
+/// sehingga details lain (mis. `retry_after_seconds` pada 429) tetap utuh.
+fn strip_tester_raw_details(mut error: AppError) -> AppError {
+    if let Some(details) = error.details.as_mut() {
+        if let Some(object) = details.as_object_mut() {
+            object.remove("upstream_response");
+            if object.is_empty() {
+                error.details = None;
+            }
+        }
+    }
+    error
+}
+
 async fn admin_provider_tester(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2369,9 +2561,14 @@ async fn admin_provider_tester(
             state
                 .provider
                 .validate_for_admin_at(endpoint_id, request.clone())
-                .await?
+                .await
+                .map_err(strip_tester_raw_details)?
         }
-        None => state.provider.validate_for_admin(request.clone()).await?,
+        None => state
+            .provider
+            .validate_for_admin(request.clone())
+            .await
+            .map_err(strip_tester_raw_details)?,
     };
     let total_latency_ms = request_started.elapsed().as_millis() as u64;
     // The tester sends real validations and returns raw upstream payloads,
@@ -2445,16 +2642,101 @@ async fn create_package(
     headers: HeaderMap,
     Json(input): Json<CreatePackageRequest>,
 ) -> Result<(StatusCode, Json<AdminPackage>), AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Manager, "POST /v1/admin/packages").await?;
     let package = state.store.create_package(input).await?;
-    record_admin_activity(
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Paket baru dibuat",
         format!("Paket {} berhasil diterbitkan.", package.name),
+        Some("package"),
+        Some(&package.id.to_string()),
     )
     .await;
+
     Ok((StatusCode::CREATED, Json(package)))
+}
+
+/// Detail audit perubahan paket (K37): id + nilai sebelum/sesudah
+/// untuk field yang berubah (nama, harga, hit, aktif). Pola sama
+/// dengan produk; tanpa `before`, detail tetap memuat id + harga baru.
+fn package_update_audit_detail(
+    before: Option<&AdminPackage>,
+    after: &AdminPackage,
+) -> String {
+    let Some(before) = before else {
+        return format!(
+            "{} (id {}) diperbarui; harga Rp{}; {} hit; aktif {}.",
+            after.name, after.id, after.price_idr, after.included_hits, after.active
+        );
+    };
+    let mut changes = Vec::new();
+    if before.name != after.name {
+        changes.push(format!("nama {} → {}", before.name, after.name));
+    }
+    if before.price_idr != after.price_idr {
+        changes.push(format!(
+            "harga Rp{} → Rp{}",
+            before.price_idr, after.price_idr
+        ));
+    }
+    if before.included_hits != after.included_hits {
+        changes.push(format!(
+            "hit {} → {}",
+            before.included_hits, after.included_hits
+        ));
+    }
+    if before.active != after.active {
+        changes.push(format!("aktif {} → {}", before.active, after.active));
+    }
+    if changes.is_empty() {
+        format!(
+            "{} (id {}) diperbarui; tidak ada field berubah.",
+            after.name, after.id
+        )
+    } else {
+        format!(
+            "{} (id {}) diperbarui: {}.",
+            after.name,
+            after.id,
+            changes.join(", ")
+        )
+    }
+}
+
+#[cfg(test)]
+mod package_update_audit_detail_tests {
+    use super::*;
+
+    fn package_fixture(price: u64, hits: u64) -> AdminPackage {
+        AdminPackage {
+            id: Uuid::parse_str("0199a5a5-0000-7000-8000-000000000002").unwrap(),
+            name: "Paket Uji".to_owned(),
+            slug: "paket-uji".to_owned(),
+            description: String::new(),
+            price_idr: price,
+            included_hits: hits,
+            active: true,
+            highlighted: false,
+            products: Vec::new(),
+            rate_limit_per_minute: 60,
+            promo_percent: 0,
+            promo_ends_at: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn package_price_and_hits_changes_show_before_and_after() {
+        let before = package_fixture(50000, 100);
+        let after = package_fixture(75000, 150);
+        let detail = package_update_audit_detail(Some(&before), &after);
+        assert!(detail.contains("0199a5a5-0000-7000-8000-000000000002"), "{detail}");
+        assert!(detail.contains("harga Rp50000 → Rp75000"), "{detail}");
+        assert!(detail.contains("hit 100 → 150"), "{detail}");
+    }
 }
 
 async fn update_package(
@@ -2463,15 +2745,26 @@ async fn update_package(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdatePackageRequest>,
 ) -> Result<Json<AdminPackage>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Manager, "PATCH /v1/admin/packages/:id")
+            .await?;
+    let before = state
+        .store
+        .list_packages()
+        .await
+        .into_iter()
+        .find(|package| package.id == id);
     let package = state.store.update_package(id, input).await?;
-    record_admin_activity(
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Paket diperbarui",
-        format!("Paket {} diperbarui.", package.name),
+        package_update_audit_detail(before.as_ref(), &package),
+        Some("package"),
+        Some(&id.to_string()),
     )
     .await;
+
     Ok(Json(package))
 }
 
@@ -2480,12 +2773,14 @@ async fn delete_package(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Manager, "DELETE /v1/admin/packages/:id")
+            .await?;
     // DB-first inside the store (B13): a database failure now fails
     // this handler instead of reporting a delete that resurrects on
     // restart. The returned detach count (K30) goes into the audit row.
     let deleted = state.store.delete_package(id).await?;
-    record_admin_activity(
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Paket dihapus",
@@ -2493,8 +2788,11 @@ async fn delete_package(
             "Paket {} ({}) dihapus; {} kunci dilepas dari paket (kuota member dipertahankan).",
             deleted.name, id, deleted.keys_detached
         ),
+        Some("package"),
+        Some(&id.to_string()),
     )
     .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2607,18 +2905,23 @@ async fn create_api_key(
     headers: HeaderMap,
     Json(input): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<crate::models::CreatedApiKey>), AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Manager, "POST /v1/admin/api-keys").await?;
     let created = state.store.create_api_key(input).await?;
-    record_admin_activity(
+    let key_id = created.key.id.to_string();
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Kunci API dibuat",
         format!(
-            "{} diterbitkan dan hanya ditampilkan sekali.",
-            created.key.name
+            "{} ({}) diterbitkan dan hanya ditampilkan sekali.",
+            created.key.name, created.key.prefix
         ),
+        Some("api_key"),
+        Some(&key_id),
     )
     .await;
+
     Ok((StatusCode::CREATED, Json(created)))
 }
 
@@ -2627,7 +2930,9 @@ async fn revoke_api_key(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Manager, "DELETE /v1/admin/api-keys/:id")
+            .await?;
     let summary = state.store.revoke_api_key(id).await?;
     // Name the key and, for member keys, the owner (B12/K32): a bare
     // "one key revoked" row is useless forensics for a paid member key.
@@ -2642,7 +2947,7 @@ async fn revoke_api_key(
             .unwrap_or_else(|| format!("milik member {member_id}")),
         None => "standalone".to_owned(),
     };
-    record_admin_activity(
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Kunci API dicabut",
@@ -2650,8 +2955,11 @@ async fn revoke_api_key(
             "Kunci {} ({}, {}) dicabut; tidak lagi dapat melakukan validasi.",
             summary.prefix, summary.name, owner
         ),
+        Some("api_key"),
+        Some(&id.to_string()),
     )
     .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2736,7 +3044,13 @@ async fn assign_member_package(
     Path(id): Path<Uuid>,
     Json(input): Json<AssignMemberPackageInput>,
 ) -> Result<Json<AdminMemberView>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Support).await?;
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Support,
+        "POST /v1/admin/members/:id/assign-package",
+    )
+    .await?;
     let member = state
         .store
         .member_by_id(id)
@@ -2790,22 +3104,37 @@ async fn assign_member_package(
             ));
         }
     }
-    let (summary, remaining) = state
+    let (summary, remaining, deleted_buckets) = state
         .store
         .assign_plan_to_member_key(
             id, quota_hits, valid_days, mode, rate_limit, package_id, plan_kind,
         )
         .await?;
-    record_admin_activity(
+    // K18: bila mode replace, detail audit memuat SATU BARIS per bucket
+    // lama yang dihapus (id, order_id, total, sisa, expiry) — cukup
+    // untuk merekonstruksi pembelian mana yang hangus. Ditulis hanya
+    // bila assign BERHASIL, jadi baris audit tidak pernah mengklaim
+    // penghapusan yang tidak terjadi. Tanpa nilai sensitif apa pun.
+    let mut assign_detail = format!(
+        "{}: {} hit, {} hari, mode {}, sisa {}",
+        member.email, quota_hits, valid_days, mode, remaining
+    );
+    if mode == "replace" {
+        assign_detail.push_str(&format!(
+            ". Bucket lama yang dihapus: {}",
+            format_deleted_buckets_detail(&deleted_buckets)
+        ));
+    }
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Paket member diatur",
-        format!(
-            "{}: {} hit, {} hari, mode {}, sisa {}",
-            member.email, quota_hits, valid_days, mode, remaining
-        ),
+        assign_detail,
+        Some("member"),
+        Some(&id.to_string()),
     )
     .await;
+
     let member_code = member.member_code.clone();
     Ok(Json(AdminMemberView {
         member_code,
@@ -2823,8 +3152,105 @@ async fn assign_member_package(
     }))
 }
 
+/// Satu baris per bucket lama yang dihapus assign-replace (K18): id
+/// bucket, order pembelian (atau "tanpa order" untuk bucket assign
+/// manual/backfill), total, sisa, dan expiry. Murni, supaya bisa dites
+/// tanpa database.
+fn format_deleted_buckets_detail(buckets: &[crate::models::QuotaBucket]) -> String {
+    if buckets.is_empty() {
+        return "tidak ada bucket lama yang dihapus".to_owned();
+    }
+    buckets
+        .iter()
+        .map(|bucket| {
+            format!(
+                "bucket {}: order {}, total {} hit, sisa {} hit, expiry {}",
+                bucket.id,
+                bucket
+                    .order_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "tanpa order".to_owned()),
+                bucket.total_hits,
+                bucket.remaining_hits,
+                bucket
+                    .expires_at
+                    .map(|expiry| expiry.to_rfc3339())
+                    .unwrap_or_else(|| "tanpa expiry".to_owned()),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+#[cfg(test)]
+mod deleted_buckets_detail_tests {
+    use super::*;
+
+    fn bucket_fixture(
+        id: &str,
+        order_id: Option<&str>,
+        total: u64,
+        remaining: u64,
+        expires_at: Option<chrono::DateTime<Utc>>,
+    ) -> crate::models::QuotaBucket {
+        crate::models::QuotaBucket {
+            id: Uuid::parse_str(id).unwrap(),
+            key_id: Uuid::parse_str("0199a5a5-0000-7000-8000-000000000001").unwrap(),
+            member_id: None,
+            order_id: order_id.map(|value| Uuid::parse_str(value).unwrap()),
+            package_id: None,
+            total_hits: total,
+            remaining_hits: remaining,
+            expires_at,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn replace_detail_lists_every_deleted_bucket_with_order_total_remaining_expiry() {
+        let buckets = vec![
+            bucket_fixture(
+                "0199a5a5-0000-7000-8000-000000000101",
+                Some("0199a5a5-0000-7000-8000-000000000201"),
+                100,
+                40,
+                Some(
+                    chrono::DateTime::parse_from_rfc3339("2026-11-25T00:00:00Z")
+                        .unwrap()
+                        .to_utc(),
+                ),
+            ),
+            bucket_fixture(
+                "0199a5a5-0000-7000-8000-000000000102",
+                None,
+                50,
+                50,
+                None,
+            ),
+        ];
+        let detail = format_deleted_buckets_detail(&buckets);
+        assert!(detail.contains("0199a5a5-0000-7000-8000-000000000101"), "{detail}");
+        assert!(detail.contains("0199a5a5-0000-7000-8000-000000000201"), "{detail}");
+        assert!(detail.contains("total 100 hit, sisa 40 hit"), "{detail}");
+        assert!(detail.contains("2026-11-25"), "{detail}");
+        assert!(detail.contains("0199a5a5-0000-7000-8000-000000000102"), "{detail}");
+        assert!(detail.contains("tanpa order"), "{detail}");
+        assert!(detail.contains("total 50 hit, sisa 50 hit"), "{detail}");
+        assert!(detail.contains("tanpa expiry"), "{detail}");
+    }
+
+    #[test]
+    fn empty_deleted_list_states_that_nothing_was_deleted() {
+        assert_eq!(
+            format_deleted_buckets_detail(&[]),
+            "tidak ada bucket lama yang dihapus"
+        );
+    }
+}
+
 #[derive(Deserialize)]
 struct MemberRateLimitInput {
+
     rate_limit_per_minute: u32,
 }
 
@@ -2844,7 +3270,7 @@ async fn set_member_rate_limit(
         .store
         .set_member_key_rate_limit(id, input.rate_limit_per_minute)
         .await?;
-    record_admin_activity(
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Rate limit member diatur",
@@ -2852,8 +3278,11 @@ async fn set_member_rate_limit(
             "Kunci {} menjadi {} request/menit",
             summary.prefix, input.rate_limit_per_minute
         ),
+        Some("member"),
+        Some(&id.to_string()),
     )
     .await;
+
     Ok(Json(summary))
 }
 
@@ -2875,7 +3304,7 @@ async fn set_member_status(
         .await?
         .ok_or_else(|| AppError::not_found("Member tidak ditemukan"))?;
     state.store.set_member_status(id, input.active).await?;
-    record_admin_activity(
+    record_admin_activity_with_entity(
         &state,
         &principal,
         if input.active {
@@ -2884,8 +3313,11 @@ async fn set_member_status(
             "Member dinonaktifkan"
         },
         format!("Akun {}", member.email),
+        Some("member"),
+        Some(&id.to_string()),
     )
     .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2950,20 +3382,30 @@ async fn regenerate_member_key(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<Json<crate::models::CreatedApiKey>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "POST /v1/admin/members/:id/regenerate-key",
+    )
+    .await?;
     let member = state
         .store
         .member_by_id(id)
         .await?
         .ok_or_else(|| AppError::not_found("Member tidak ditemukan"))?;
     let created = state.store.regenerate_member_key(&member).await?;
-    record_admin_activity(
+    let key_id = created.key.id.to_string();
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Kunci member diregenerasi",
-        format!("Kunci baru untuk {}", member.email),
+        format!("Kunci baru {} untuk {}", created.key.prefix, member.email),
+        Some("api_key"),
+        Some(&key_id),
     )
     .await;
+
     Ok(Json(created))
 }
 
@@ -3252,7 +3694,13 @@ async fn adjust_member_key_quota(
     Path((id, key_id)): Path<(Uuid, Uuid)>,
     Json(input): Json<AdjustMemberKeyInput>,
 ) -> Result<Json<AdjustMemberKeyResponse>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "POST /v1/admin/members/:id/keys/:key_id/adjust",
+    )
+    .await?;
     let member = state
         .store
         .member_by_id(id)
@@ -3264,13 +3712,16 @@ async fn adjust_member_key_quota(
         .store
         .adjust_member_key_quota(id, key_id, delta)
         .await?;
-    record_admin_activity(
+    record_admin_activity_with_entity(
         &state,
         &principal,
         "Kuota member disesuaikan",
         quota_adjust_audit_detail(&member.email, &outcome, &reason),
+        Some("member"),
+        Some(&id.to_string()),
     )
     .await;
+
     Ok(Json(AdjustMemberKeyResponse {
         member_id: id,
         key_id,
@@ -3379,6 +3830,23 @@ async fn require_admin_role(
     Ok(principal)
 }
 
+/// Varian `require_admin_role` untuk endpoint sensitif (K38): label
+/// route ikut tercatat bila peran ditolak (throttled di
+/// admin_roles::require_role_at). Pemanggil read-only tetap memakai
+/// `require_admin_role` tanpa jejak penolakan.
+async fn require_admin_role_at(
+    state: &AppState,
+    headers: &HeaderMap,
+    min_role: Role,
+    endpoint: &str,
+) -> Result<AdminPrincipal, AppError> {
+    let principal = require_admin(state, headers).await?;
+    admin_roles::require_role_at(&state.store, &principal, min_role, Some(endpoint))
+        .await?;
+    Ok(principal)
+}
+
+
 /// Shared admin-activity recorder. Signature intentionally unchanged
 /// (audit 2026-10-25, B12 coordination): other areas call this for
 /// self-reveal and admin login/logout, so it stays
@@ -3413,6 +3881,39 @@ pub(crate) async fn record_admin_activity(
         })
         .await;
 }
+
+/// Varian `record_admin_activity` dengan kolom terstruktur (K37).
+/// Menulis baris yang SAMA (durable admin_audit_log + mirror
+/// in-memory), hanya saja `entity_type`/`entity_id` diisi sehingga
+/// forensik bisa query berdasarkan entitas, bukan menebak dari nama
+/// (nama bisa duplikat/berubah). Pemanggil tanpa entitas jelas tetap
+/// memakai fungsi lama.
+pub(crate) async fn record_admin_activity_with_entity(
+    state: &AppState,
+    principal: &AdminPrincipal,
+    title: &str,
+    detail: String,
+    entity_type: Option<&str>,
+    entity_id: Option<&str>,
+) {
+    state
+        .store
+        .persist_admin_audit(&principal.email, title, &detail, entity_type, entity_id)
+        .await;
+    state
+        .store
+        .append_activity(ActivityItem {
+            id: Uuid::now_v7(),
+            title: title.to_owned(),
+            detail: format!("{} • oleh {}", detail, principal.email),
+            product: None,
+            status: "info".to_owned(),
+            occurred_at: Utc::now(),
+            provider_latency_ms: None,
+        })
+        .await;
+}
+
 
 /// Convenience principal for audit rows that are not tied to a verified
 /// admin session (failed logins): the actor is the attempted address,
@@ -3581,7 +4082,8 @@ async fn create_admin_account(
     headers: HeaderMap,
     Json(input): Json<CreateAdminAccountRequest>,
 ) -> Result<(StatusCode, Json<admin_roles::AdminAccount>), AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Owner).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Owner, "POST /v1/admin/admins").await?;
     let email = admin_roles::validate_admin_email(&input.email)?;
     let role = input
         .role
@@ -3612,7 +4114,8 @@ async fn update_admin_account(
     Path(id): Path<Uuid>,
     Json(input): Json<UpdateAdminAccountRequest>,
 ) -> Result<Json<admin_roles::AdminAccount>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Owner).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Owner, "PATCH /v1/admin/admins/:id").await?;
     if state.store.pool().is_none() {
         return Err(AppError::service_unavailable(
             "Kelola admin membutuhkan database.",
@@ -3698,7 +4201,8 @@ async fn delete_admin_account(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Owner).await?;
+    let principal =
+        require_admin_role_at(&state, &headers, Role::Owner, "DELETE /v1/admin/admins/:id").await?;
     if state.store.pool().is_none() {
         return Err(AppError::service_unavailable(
             "Kelola admin membutuhkan database.",
@@ -3722,7 +4226,8 @@ async fn delete_admin_account(
             "Owner aktif terakhir tidak dapat dihapus.",
         ));
     }
-    if !state.store.delete_admin_account(id).await? {
+    if !state.store.delete_admin_account(id, &principal.email).await? {
+
         return Err(AppError::not_found("Admin tidak ditemukan"));
     }
     record_admin_activity(
@@ -4598,13 +5103,20 @@ async fn export_admin_csv(
             (document, count, truncated, String::new())
         }
         "members" => {
+            // K39: LIMIT + filter di query (bukan fetch_all seluruh
+            // tabel lalu truncate). +1 baris agar penanda truncated
+            // tetap akurat, meniru cabang orders/usage; baris ekstra
+            // dibuang oleh truncate di bawah, bukan dikirim.
             let mut members = state
                 .store
-                .list_members()
-                .await
-                .into_iter()
-                .filter(|member| member_matches_admin_filters(member, &filters))
-                .collect::<Vec<_>>();
+                .list_members_for_export(
+                    filters.q.as_deref(),
+                    filters.status.as_deref(),
+                    filters.from.map(|from| from.and_utc()),
+                    filters.to_exclusive.map(|to| to.and_utc()),
+                    EXPORT_MAX_ROWS as i64 + 1,
+                )
+                .await;
             let truncated = members.len() > EXPORT_MAX_ROWS;
             members.truncate(EXPORT_MAX_ROWS);
             let count = members.len();
@@ -5635,6 +6147,67 @@ mod site_status_tests {
         assert_eq!(MAINTENANCE_MESSAGE, "Layanan sedang dalam pemeliharaan");
     }
 
+    #[tokio::test]
+    async fn breaker_reset_only_on_false_to_true_activation() {
+        let guard = Arc::new(ProviderGuard::new(ProviderGuardConfig {
+            failure_threshold: 1,
+            cooldown_seconds: 600,
+            ..ProviderGuardConfig::default()
+        }));
+        let state = test_app_state(Some(Arc::clone(&guard))).await;
+        let endpoint = crate::models::ProviderEndpoint {
+            id: Uuid::now_v7(),
+            product: crate::models::ValidationProduct::BankAccount,
+            name: "uji".to_owned(),
+            base_url: "https://example.invalid".to_owned(),
+            timeout_ms: 5000,
+            request_mode: crate::models::ProviderRequestMode::Generic,
+            auth_header: "Authorization".to_owned(),
+            active: true,
+            api_key_configured: true,
+            response_mapping: crate::models::ProviderResponseMapping::default_for(
+                crate::models::ValidationProduct::BankAccount,
+            ),
+            service_code_mapping: std::collections::HashMap::new(),
+            http_method: "POST".to_owned(),
+            code_param: "code".to_owned(),
+            number_param: "number".to_owned(),
+            key_param: None,
+            updated_at: Utc::now(),
+        };
+        let id = endpoint.id.to_string();
+        // Buka breaker, lalu edit yang tetap aktif TIDAK BOLEH me-reset.
+        let ticket = guard
+            .acquire(crate::models::ValidationProduct::BankAccount, &id)
+            .await
+            .expect("circuit tertutup menerima");
+        guard.record_failure(&ticket).await;
+        assert!(
+            guard
+                .acquire(crate::models::ValidationProduct::BankAccount, &id)
+                .await
+                .is_err(),
+            "breaker harus terbuka sebelum edit"
+        );
+        reset_breaker_on_activation(&state, true, &endpoint).await;
+        assert!(
+            guard
+                .acquire(crate::models::ValidationProduct::BankAccount, &id)
+                .await
+                .is_err(),
+            "edit aktif->aktif tidak boleh me-reset breaker"
+        );
+        // Transisi nonaktif->aktif TETAP me-reset.
+        reset_breaker_on_activation(&state, false, &endpoint).await;
+        assert!(
+            guard
+                .acquire(crate::models::ValidationProduct::BankAccount, &id)
+                .await
+                .is_ok(),
+            "transisi nonaktif->aktif harus me-reset breaker"
+        );
+    }
+
     async fn test_app_state(
         guard: Option<Arc<ProviderGuard>>,
     ) -> AppState {
@@ -6170,5 +6743,40 @@ mod admin_export_tests {
         let plain = serde_json::to_string(&account).expect("serialize account");
         assert!(!plain.contains("member_code"));
         assert!(!plain.contains("RC000007"));
+    }
+}
+
+#[cfg(test)]
+mod tester_error_details_tests {
+    use super::strip_tester_raw_details;
+    use crate::error::AppError;
+    use serde_json::json;
+
+    #[test]
+    fn tester_error_strips_only_upstream_response() {
+        let error = AppError::service_unavailable("gagal").with_details(json!({
+            "upstream_response": {"http_status": 422, "body": "mentah"},
+            "retry_after_seconds": 30,
+        }));
+        let stripped = strip_tester_raw_details(error);
+        let details = stripped.details.expect("details lain dipertahankan");
+        assert!(
+            details.get("upstream_response").is_none(),
+            "upstream_response harus hilang dari details error tester"
+        );
+        assert_eq!(details["retry_after_seconds"], 30);
+    }
+
+    #[test]
+    fn tester_error_with_only_raw_details_ends_up_without_details() {
+        let error = AppError::service_unavailable("gagal")
+            .with_details(json!({"upstream_response": {"http_status": 422}}));
+        assert_eq!(strip_tester_raw_details(error).details, None);
+    }
+
+    #[test]
+    fn tester_error_without_details_is_unchanged() {
+        let error = AppError::service_unavailable("gagal");
+        assert_eq!(strip_tester_raw_details(error).details, None);
     }
 }
