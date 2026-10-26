@@ -39,10 +39,41 @@ use crate::{
 pub const ALLOWED_EXPIRY_MINUTES: [i64; 5] = [3, 5, 10, 12, 15];
 /// Batas create order per member per jam (anti boros 6 hit Cutiezy).
 const CREATE_ORDERS_PER_HOUR: i64 = 5;
-/// Satu create order per proses dalam satu waktu: cek order waiting +
-/// create Cutiezy + insert harus atomik terhadap create lain member yang
-/// sama (deployment single-instance; multi-instance butuh guard DB).
-static CREATE_ORDER_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Registry lock create per member (perbaikan K21): dulu satu mutex
+/// global membuat satu create Cutiezy yang lambat memblokir create
+/// semua member. Kini tiap member punya mutex sendiri, jadi create
+/// yang lambat hanya menahan create member itu sendiri. Registry
+/// hanya menyimpan Weak dan dibersihkan tiap acquire, jadi entri
+/// member yang sudah selesai tidak menumpuk di memori. Registry
+/// dipegang tanpa await (hanya get-or-insert), jadi tidak ada
+/// deadlock async. Cek waiting + create + insert tetap atomik
+/// terhadap create lain member yang SAMA (deployment single-instance;
+/// multi-instance butuh guard DB).
+static CREATE_ORDER_LOCKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Mutex create untuk satu member: ambil dari registry atau buat baru.
+fn member_create_lock(member_id: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    let mut registry = CREATE_ORDER_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry.retain(|_, weak| weak.strong_count() > 0);
+    match registry.get(&member_id).and_then(std::sync::Weak::upgrade) {
+        Some(lock) => lock,
+        None => {
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            registry.insert(member_id, Arc::downgrade(&lock));
+            lock
+        }
+    }
+}
+
+/// Guard create per member: member yang sama tetap serial, member
+/// berbeda tidak saling blokir.
+async fn member_create_guard(member_id: Uuid) -> tokio::sync::OwnedMutexGuard<()> {
+    member_create_lock(member_id).lock_owned().await
+}
 
 // ---------------------------------------------------------------------------
 // Pengaturan
@@ -2129,9 +2160,10 @@ pub async fn create_member_order(
         return Err(AppError::forbidden("Pembelian paket sedang tidak tersedia"));
     }
     ensure_key_buyable(store, member_id).await?;
-    // Serialisasi create per proses: cek waiting + create + insert tidak
-    // boleh disalip create lain (tiap QR sukses = 6 hit Cutiezy).
-    let _guard = CREATE_ORDER_LOCK.lock().await;
+    // Serialisasi create per member (K21): cek waiting + create +
+    // insert tidak boleh disalip create lain member yang sama (tiap QR
+    // sukses = 6 hit Cutiezy); create member lain tidak ikut tertahan.
+    let _guard = member_create_guard(member_id).await;
     // B9: waiting per (member, paket). Paket sama -> kembalikan order
     // itu (tanpa create baru, tanpa hitung rate limit). Paket berbeda
     // -> 409 eksplisit yang menyebut paket yang sedang menunggu, agar
@@ -3803,5 +3835,63 @@ mod area3_tests {
         // Duplikasi refund penuh: total sudah penuh, tambahan apa pun ditolak.
         assert!(refund_total_after(100_000, 1, 100_000).is_err());
         assert!(refund_total_after(100_000, 100_000, 100_000).is_err());
+    }
+
+    /// K21: member berbeda tidak saling blokir, member yang sama
+    /// tetap serial — dibuktikan tanpa sleep lewat try_lock_owned.
+    #[tokio::test]
+    async fn per_member_create_lock_isolates_members() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        let _held_a = super::member_create_guard(a).await;
+        // Member lain bisa mengunci seketika walau A sedang ditahan.
+        assert!(super::member_create_lock(b).try_lock_owned().is_ok());
+        // Member yang sama tetap tertahan.
+        assert!(super::member_create_lock(a).try_lock_owned().is_err());
+    }
+
+    /// K21: entri registry member yang sudah selesai dibersihkan
+    /// saat acquire berikutnya (tidak bocor memori). UUID acak per
+    /// tes agar tidak terpengaruh tes lain yang berjalan paralel.
+    #[test]
+    fn per_member_create_lock_registry_is_pruned() {
+        let a = uuid::Uuid::new_v4();
+        let b = uuid::Uuid::new_v4();
+        {
+            let lock_a = super::member_create_lock(a);
+            drop(lock_a);
+        }
+        // Acquire member lain memicu prune entri A yang sudah mati.
+        let _lock_b = super::member_create_lock(b);
+        let registry = super::CREATE_ORDER_LOCKS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(!registry.contains_key(&a));
+        assert!(registry.contains_key(&b));
+    }
+
+    /// K21: dua create member berbeda benar-benar berjalan bersamaan
+    /// (bukan sekadar mutex berbeda di atas kertas): keduanya harus
+    /// mencapai barrier yang sama; dengan mutex global, task kedua
+    /// tidak akan pernah sampai dan timeout menggagalkan tes.
+    #[tokio::test]
+    async fn per_member_create_guards_run_concurrently() {
+        use tokio::sync::Barrier;
+        let barrier = std::sync::Arc::new(Barrier::new(2));
+        let run = |member: uuid::Uuid, barrier: std::sync::Arc<Barrier>| async move {
+            let _guard = super::member_create_guard(member).await;
+            barrier.wait().await;
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            async {
+                tokio::join!(
+                    run(uuid::Uuid::new_v4(), std::sync::Arc::clone(&barrier)),
+                    run(uuid::Uuid::new_v4(), std::sync::Arc::clone(&barrier)),
+                )
+            },
+        )
+        .await;
+        assert!(result.is_ok(), "guard member berbeda saling memblokir");
     }
 }
