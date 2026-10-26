@@ -1066,20 +1066,52 @@
       return `<tr>
       <td data-label="No." class="row-num">${formatNumber(h.total - h.offset - idx)}</td>
       <td data-label="Waktu" class="history-date" title="${escapeHtml(occurred.full)}">${escapeHtml(occurred.date)}${occurred.time ? `<br /><span>${escapeHtml(occurred.time)}</span>` : ""}</td>
-      <td data-label="Member"><strong>${escapeHtml(item.member_code || "—")}</strong><span class="cell-sub"><code>${escapeHtml(item.api_key_prefix)}</code></span></td>
       <td data-label="Produk">${escapeHtml(productLabel(item.product))}</td>
       <td data-label="Target">${escapeHtml(target)}</td>
       <td data-label="Nama">${escapeHtml(accountName)}</td>
       <td data-label="Hasil"><span class="status-badge ${escapeHtml(item.outcome)}">${escapeHtml(outcomeLabel[item.outcome] || item.outcome)}</span></td>
       <td data-label="Latensi">${latencyCell(item)}</td>
-      <td data-label="Request ID"><code>${escapeHtml(String(item.request_id).length <= 12 ? String(item.request_id) : String(item.request_id).slice(0, 8) + "…")}</code></td>
+      <td data-label="Request ID"><button class="table-action" type="button" data-action="history-detail" data-id="${escapeHtml(String(item.request_id))}" title="Lihat detail validasi">${escapeHtml(String(item.request_id).length <= 12 ? String(item.request_id) : String(item.request_id).slice(0, 8) + "…")}</button></td>
     </tr>`;
-    }).join("") : `<tr><td colspan="9">Belum ada riwayat yang cocok dengan filter.</td></tr>`;
+    }).join("") : `<tr><td colspan="8">Belum ada riwayat yang cocok dengan filter.</td></tr>`;
     const from = h.total === 0 ? 0 : h.offset + 1;
     const to = Math.min(h.offset + h.limit, h.total);
     $("#history-page-info").textContent = `Menampilkan ${formatNumber(from)}–${formatNumber(to)} dari ${formatNumber(h.total)} riwayat`;
     $("#history-prev").disabled = h.offset <= 0;
     $("#history-next").disabled = h.offset + h.limit >= h.total;
+  }
+
+  function openHistoryDetail(requestId) {
+    const item = state.history.items.find((entry) => String(entry.request_id) === String(requestId));
+    if (!item) return;
+    const occurred = formatHistoryDateTime(item.occurred_at);
+    const target = item.target_raw != null && item.target_raw !== "" ? item.target_raw : item.target_masked;
+    const accountName = item.account_name != null && item.account_name !== "" ? item.account_name : "—";
+    const outcomeLabel = {
+      valid: "Valid", invalid: "Tidak valid", not_found: "Tidak ditemukan",
+      not_kyc: "Belum KYC",
+      provider_error: "Error provider", pending: "Menunggu",
+      rate_limited: "Rate limit", quota_exhausted: "Kuota habis",
+    };
+    let latencyDetail;
+    if (item.total_latency_ms == null) {
+      latencyDetail = `${formatNumber(item.provider_latency_ms)} ms (provider saja, data lama)`;
+    } else {
+      const processing = item.rajacek_processing_ms || 0;
+      const gap = Math.max(0, item.total_latency_ms - item.provider_latency_ms - processing);
+      const attempts = item.attempts && item.attempts > 1 ? ` · ${item.attempts}× percobaan` : "";
+      latencyDetail = `Total ${formatNumber(item.total_latency_ms)} ms · provider ${formatNumber(item.provider_latency_ms)} ms · proses ${formatNumber(processing)} ms · gap ${formatNumber(gap)} ms${attempts}`;
+    }
+    $("#history-detail-body").innerHTML =
+      testerRow("Waktu", occurred.full)
+      + testerRow("Member", `${item.member_code || "—"} (${item.api_key_prefix})`)
+      + testerRow("Produk", productLabel(item.product))
+      + testerRow("Target", target)
+      + testerRow("Nama", accountName)
+      + testerRow("Hasil", outcomeLabel[item.outcome] || item.outcome)
+      + testerRow("Latensi", latencyDetail)
+      + testerRow("Request ID", String(item.request_id));
+    openModal("history-detail-modal");
   }
 
   async function loadMembers() {
@@ -3178,6 +3210,7 @@
       if (action === "toggle-provider") toggleProvider(actionElement);
       if (action === "toggle-provider-force") toggleProviderForce(actionElement);
       if (action === "health-toggle-provider") toggleHealthProvider(id);
+      if (action === "history-detail") openHistoryDetail(id);
       if (action === "dlq-replay") replayDlq(id);
       if (action === "dlq-replay-all") replayAllDlq();
       if (action === "toggle-provider-detail") {

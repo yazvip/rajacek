@@ -1913,20 +1913,39 @@ td.empty-state { display: table-cell; }
    satu baris penuh. Urutan kolom kini 9: No./Waktu/Prefix/Produk/
    Target/Nama/Hasil/Latensi/Request ID — aturan nowrap bergeser ikut
    nomor kolom baru; hanya kolom Nama (ke-6) yang boleh membungkus,
-   dan HANYA di spasi (overflow-wrap/word-break normal). */
+   dan HANYA di spasi (overflow-wrap/word-break normal).
+   Tambahan 2026-10-26 (panel UI: kolom Member dihapus + padding dilegakan):
+   urutan kolom kini 8: No./Waktu/Produk/Target/Nama/Hasil/Latensi/
+   Request ID; nowrap = 1,2,3,4,6,8; hanya kolom Nama (ke-5) yang boleh
+   membungkus (di spasi); padding sel 10px 16px + 20px di kolom terakhir
+   agar data tidak menempel garis tepi/scrollbar. Atribusi member tidak
+   hilang: kode + prefix tampil di popup detail Request ID. */
 #view-history .table-scroll table { min-width: 960px; }
-#history-table td { overflow-wrap: normal; padding: 8px 12px; }
+#history-table th, #history-table td { overflow-wrap: normal; padding: 10px 16px; }
+#history-table th:last-child, #history-table td:last-child { padding-right: 20px; }
 #history-table td:nth-child(1),
 #history-table td:nth-child(2),
 #history-table td:nth-child(3),
 #history-table td:nth-child(4),
-#history-table td:nth-child(5),
-#history-table td:nth-child(7),
-#history-table td:nth-child(9) { white-space: nowrap; }
-#history-table td:nth-child(6) { white-space: normal; overflow-wrap: normal; word-break: normal; }
-#history-table td:nth-child(8) .cell-sub { white-space: normal; }
+#history-table td:nth-child(6),
+#history-table td:nth-child(8) { white-space: nowrap; }
+#history-table td:nth-child(5) { white-space: normal; overflow-wrap: normal; word-break: normal; }
+#history-table td:nth-child(7) .cell-sub { white-space: normal; }
 #history-table td code { overflow-wrap: normal; }
 #history-table td.history-date { font-size: 12px; line-height: 1.45; }
+
+/* Ikon info label form guard (ℹ): tooltip native via title, tanpa JS
+   kustom agar tidak ada risiko overflow. */
+.guard-info { cursor: help; color: var(--muted); font-size: 13px; }
+
+/* Isi popup detail validasi riwayat (modal #history-detail-modal):
+   daftar definisi senada kartu hasil tester, tapi scoped ke modal ini. */
+#history-detail-body { display: grid; gap: 0; margin: 18px 0 0; }
+#history-detail-body > div { padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
+#history-detail-body > div:last-child { border-bottom: 0; }
+#history-detail-body dt { color: var(--muted); font-size: 12px; font-weight: 600; }
+#history-detail-body dd { margin: 4px 0 0; font-weight: 600; overflow-wrap: anywhere; }
+#history-detail-body dd code { overflow-wrap: anywhere; }
 #history-table td.history-date span { white-space: nowrap; }
 
 /* ------------------------------------------------------------------
@@ -1940,8 +1959,9 @@ td.empty-state { display: table-cell; }
    app.js per sel) di kiri, nilai rata kanan di sisi berlawanan.
    Dipakai posisi absolut untuk label (bukan flex pada td) supaya
    sel multi-baris tetap rapi apa adanya: Waktu 2 baris (tanggal /
-   jam), Member 2 baris (kode tebal / prefix sekunder), Latensi
-   2 baris (total / detail provider), Nama membungkus di spasi.
+   jam), Latensi 2 baris (total / detail provider), Nama membungkus
+   di spasi. Kolom Member dihapus 2026-10-26 (atribusi pindah ke
+   popup detail Request ID), jadi kartu menampilkan 8 field.
    Nilai panjang di kartu boleh membungkus (pengecualian khusus
    mobile untuk target/nama/detail latensi) agar tidak meluber;
    prefix + request ID tetap mono (tetap <code>), badge Hasil
@@ -1987,7 +2007,7 @@ td.empty-state { display: table-cell; }
   #view-history #history-table td[colspan]::before { content: none; }
   /* Nilai multi-baris rata kanan: stack latensi + sub-detailnya. */
   #view-history #history-table td .latency-stack { align-items: flex-end; text-align: right; }
-  #view-history #history-table td:nth-child(8) .cell-sub { white-space: normal; }
+  #view-history #history-table td:nth-child(7) .cell-sub { white-space: normal; }
   #view-history #history-table td.history-date span { white-space: normal; }
   #view-history #history-table td .cell-sub { font-size: 11px; }
 }
