@@ -1109,6 +1109,14 @@
       + testerRow("Target", target)
       + testerRow("Nama", accountName)
       + testerRow("Hasil", outcomeLabel[item.outcome] || item.outcome)
+      // Sumber data (migration 0033) hanya untuk hasil Valid, sesuai
+      // perintah: Valid + nama diketahui -> nama endpoint; Valid + null
+      // (baris lama pra-fitur) -> "tidak tercatat (data lama)"; hasil
+      // lain -> baris disembunyikan. Yang tampil hanya NAMA endpoint,
+      // tidak pernah URL/host/kredensial.
+      + (item.outcome === "valid"
+        ? testerRow("Sumber data", item.provider_endpoint_name ? item.provider_endpoint_name : "tidak tercatat (data lama)")
+        : "")
       + testerRow("Latensi", latencyDetail)
       + testerRow("Request ID", String(item.request_id));
     openModal("history-detail-modal");

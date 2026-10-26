@@ -1992,6 +1992,7 @@ mod member_history_no_raw_fields_tests {
             target_masked: "***7890".to_owned(),
             target_raw: Some("1234567890".to_owned()),
             account_name: Some("Andrias Se****an Su****o".to_owned()),
+            provider_endpoint_name: Some("Endpoint Uji".to_owned()),
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,
@@ -2015,6 +2016,8 @@ mod member_history_no_raw_fields_tests {
         assert!(!serialized.contains("target_raw"));
         assert!(!serialized.contains("account_name"));
         assert!(!serialized.contains("member_code"));
+        assert!(!serialized.contains("provider_endpoint_name"));
+        assert!(!serialized.contains("Endpoint Uji"));
         assert!(!serialized.contains("1234567890"));
         assert!(!serialized.contains("Andrias Se****an Su****o"));
         assert!(!serialized.contains("RC000001"));

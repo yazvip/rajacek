@@ -1829,6 +1829,18 @@ pub(crate) async fn execute_validation(
         .result
         .as_ref()
         .and_then(|result| result.account_name.clone());
+    // Nama endpoint sumber untuk popup Detail admin di jalur memori
+    // (jalur database me-resolve lewat JOIN di
+    // validation_history_from_db). Lookup best-effort dari store yang
+    // sama dengan balapan; gagal lookup -> null, bukan error.
+    let history_endpoint_name = match outcome.provider_endpoint_id {
+        Some(id) => state
+            .provider_configs
+            .resolve_by_id(id)
+            .await
+            .map(|endpoint| endpoint.name),
+        None => None,
+    };
     let usage_event = UsageEvent {
         event_id: Uuid::now_v7(),
         request_id: request_id.clone(),
@@ -1843,6 +1855,7 @@ pub(crate) async fn execute_validation(
         target_masked: mask_target(request.product, &request.target),
         target_raw: Some(request.target.clone()),
         account_name: history_account_name,
+        provider_endpoint_id: outcome.provider_endpoint_id,
         provider_reference: outcome.result.and_then(|result| result.reference),
         provider_latency_ms: outcome.provider_latency_ms,
         rajacek_processing_ms,
@@ -1865,6 +1878,7 @@ pub(crate) async fn execute_validation(
         target_masked: usage_event.target_masked.clone(),
         target_raw: usage_event.target_raw.clone(),
         account_name: usage_event.account_name.clone(),
+        provider_endpoint_name: history_endpoint_name,
         provider_reference: usage_event.provider_reference.clone(),
         provider_latency_ms: usage_event.provider_latency_ms,
         rajacek_processing_ms: Some(usage_event.rajacek_processing_ms),
@@ -7355,6 +7369,7 @@ mod admin_export_tests {
             target_masked: "***1234".to_owned(),
             target_raw: None,
             account_name: None,
+            provider_endpoint_name: None,
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,
@@ -7598,6 +7613,7 @@ mod admin_export_tests {
         item.target_raw = Some("1234567890".to_owned());
         item.account_name = Some("Andrias Se****an Su****o".to_owned());
         item.member_code = Some("RC000001".to_owned());
+        item.provider_endpoint_name = Some("Endpoint Uji".to_owned());
         let admin_response = ValidationHistoryResponse {
             items: vec![crate::models::AdminValidationHistoryItem::from(&item)],
             total: 1,
@@ -7617,10 +7633,15 @@ mod admin_export_tests {
         // yang sama tetap tanpa kode (batas keras).
         assert!(serialized.contains("\"member_code\":\"RC000001\""));
         assert!(serialized.contains("\"api_key_prefix\":\"rv_live_x\""));
+        // Riwayat admin membawa nama endpoint sumber (migration 0033);
+        // bentuk member untuk item yang sama tetap tanpa field itu.
+        assert!(serialized.contains("\"provider_endpoint_name\":\"Endpoint Uji\""));
         let member_serialized =
             serde_json::to_string(&item).expect("serialize member shape");
         assert!(!member_serialized.contains("member_code"));
         assert!(!member_serialized.contains("RC000001"));
+        assert!(!member_serialized.contains("provider_endpoint_name"));
+        assert!(!member_serialized.contains("Endpoint Uji"));
         assert!(member_serialized.contains("\"api_key_prefix\":\"rv_live_x\""));
     }
 

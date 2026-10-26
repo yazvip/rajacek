@@ -14,16 +14,22 @@ use crate::models::UsageEvent;
 /// is not compile-time checked, so a forgotten column/bind here would
 /// otherwise surface only at runtime against a live database).
 /// Columns target_raw + account_name come from migration 0024 and are
-/// admin-history only; member responses never read them.
+/// admin-history only; member responses never read them. Column
+/// provider_endpoint_id comes from migration 0033 (winning endpoint id,
+/// NULL for pre-feature rows); it uses a CASE bind because sqlx has no
+/// native Option<Uuid>-to-BINARY(16) mapping in this query style, the
+/// same pattern as the price_snapshot_id bind in the ledger INSERT below.
 const PERSIST_VALIDATION_REQUEST_SQL: &str = r#"
             INSERT IGNORE INTO validation_requests (
                 id, request_id, event_id, api_key_prefix, product_code, outcome,
                 target_fingerprint, target_masked, target_raw, account_name,
-                provider_reference, provider_latency_ms,
+                provider_reference, provider_endpoint_id, provider_latency_ms,
                 rajacek_processing_ms, total_latency_ms, attempts,
                 occurred_at, channel
             ) VALUES (
-                UUID_TO_BIN(?), ?, UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                UUID_TO_BIN(?), ?, UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?,
+                CASE WHEN ? IS NULL THEN NULL ELSE UUID_TO_BIN(?) END,
+                ?, ?, ?, ?, ?, ?
             )
             "#;
 
@@ -95,6 +101,7 @@ impl Database {
         let event_id = event.event_id.to_string();
         let product_code = event.product.as_str();
         let outcome = event.status.as_str();
+        let provider_endpoint_id = event.provider_endpoint_id.map(|value| value.to_string());
 
         sqlx::query(PERSIST_VALIDATION_REQUEST_SQL)
             .bind(&event_id)
@@ -108,6 +115,8 @@ impl Database {
             .bind(&event.target_raw)
             .bind(&event.account_name)
             .bind(&event.provider_reference)
+            .bind(&provider_endpoint_id)
+            .bind(&provider_endpoint_id)
             .bind(event.provider_latency_ms)
             .bind(event.rajacek_processing_ms)
             .bind(event.total_latency_ms)
@@ -164,13 +173,24 @@ mod persist_sql_tests {
     #[test]
     fn validation_request_insert_covers_migration_0024_columns() {
         // sqlx::query tidak dicek saat compile, jadi kunci guard ini:
-        // kolom baru migrasi 0024 harus ada di INSERT, dan jumlah
-        // placeholder harus sama dengan jumlah bind di
-        // persist_usage_event (17: 15 lama + target_raw + account_name).
+        // kolom baru migrasi 0024 harus ada di INSERT. Jumlah
+        // placeholder TIDAK diasersi di sini lagi (dulu 17) karena
+        // migrasi 0033 menambah satu kolom CASE dua placeholder — total
+        // dikunci oleh validation_request_insert_covers_migration_0033_
+        // endpoint_column di bawah, bukan di dua tempat.
         assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("target_raw"));
         assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("account_name"));
         assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("target_masked"));
+    }
+
+    #[test]
+    fn validation_request_insert_covers_migration_0033_endpoint_column() {
+        // Migrasi 0033 menambah satu kolom (provider_endpoint_id) yang
+        // di-bind lewat CASE dua placeholder (NULL-aman), jadi total
+        // placeholder naik 17 -> 19. Jumlah ini harus sama dengan jumlah
+        // bind di persist_usage_event.
+        assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("provider_endpoint_id"));
         let placeholders = PERSIST_VALIDATION_REQUEST_SQL.matches('?').count();
-        assert_eq!(placeholders, 17, "bind dan placeholder tidak seimbang");
+        assert_eq!(placeholders, 19, "bind dan placeholder tidak seimbang");
     }
 }

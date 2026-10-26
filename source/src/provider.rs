@@ -45,6 +45,15 @@ pub struct ProviderValidationOutcome {
     pub message: String,
     pub result: Option<ValidationResultData>,
     pub provider_name: String,
+    /// Id endpoint yang jawabannya dipakai (migration 0033). Di-stempel
+    /// saat outcome attempt HTTP dibangun di `validate_upstream_endpoint`
+    /// (id endpoint yang sedang dicoba), jadi balapan — single-admitted,
+    /// early-return Valid, maupun fallback — mengembalikannya apa adanya
+    /// tanpa mengubah logika seleksi balapan. None untuk adapter demo
+    /// (tanpa baris endpoint) dan jalur tanpa attempt. Struct ini tidak
+    /// pernah diserialisasi ke respons member (validation_response
+    /// mengambil field satu per satu), jadi field ini tidak bocor.
+    pub provider_endpoint_id: Option<Uuid>,
     pub provider_latency_ms: u64,
     /// Which attempt produced this outcome (1 = first try, no retry happened).
     pub attempts: u32,
@@ -152,6 +161,9 @@ impl ProviderAdapter for DemoProvider {
             message: message.to_owned(),
             result,
             provider_name: self.name().to_owned(),
+            // Adapter demo tidak punya baris endpoint: tidak ada sumber
+            // yang bisa ditampilkan di Detail validasi.
+            provider_endpoint_id: None,
             provider_latency_ms: started.elapsed().as_millis() as u64,
             attempts: 1,
         })
@@ -344,6 +356,12 @@ impl HttpProvider {
     /// In particular a NotKyc leg can never beat a Valid leg: a NotKyc
     /// finisher is only a fallback, and the race keeps waiting for the
     /// remaining legs, so a later Valid still wins outright.
+    ///
+    /// Endpoint identity (migration 0033) rides on the outcome itself:
+    /// every attempt outcome is stamped with its endpoint id where it is
+    /// built, so whichever pair this race returns — single-admitted,
+    /// early-return Valid, or best fallback — already carries the
+    /// winning endpoint. Error paths return no outcome, hence no id.
     async fn validate_upstream_race(
         &self,
         request: ProviderValidationRequest,
@@ -903,6 +921,11 @@ impl HttpProvider {
                 message,
                 result,
                 provider_name: endpoint.name.clone(),
+                // Stempel sumber di titik ini (bukan di balapan): setiap
+                // outcome attempt HTTP membawa id endpointnya sendiri,
+                // sehingga pemenang balapan — jalur apa pun — teridentifikasi
+                // tanpa mengubah seleksi balapan.
+                provider_endpoint_id: Some(endpoint.id),
                 // Both set by the attempt loop, which times the whole sequence.
                 provider_latency_ms: 0,
                 attempts: 1,
@@ -2633,6 +2656,225 @@ mod pacer_failure_tests {
             "gagal pacer pada retry tidak boleh dicatat sebagai kegagalan \
              provider (breaker): flag harus false"
         );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_source_tests {
+    //! Balapan harus mengembalikan id endpoint pemenang di semua jalur
+    //! (migration 0033): single-admitted, early-return Valid, dan
+    //! fallback. Id di-stempel di konstruksi outcome attempt, jadi
+    //! balapan mengembalikannya apa adanya — tes ini mengunci perilaku
+    //! ujung-ke-ujung itu lewat server lokal + store in-memory.
+    use super::HttpProvider;
+    use crate::config::{AppConfig, Environment, ProviderMode};
+    use crate::models::{
+        CreateProviderEndpointRequest, ProviderRequestMode, ProviderResponseMapping,
+        ProviderValidationRequest, ValidationProduct, ValidationStatus,
+    };
+    use crate::provider_config::ProviderConfigStore;
+    use crate::provider_guard::{ProviderGuard, ProviderGuardConfig};
+    use std::collections::HashSet;
+    use std::io::{Read, Write};
+    use std::sync::Arc;
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            environment: Environment::Test,
+            bind_address: "127.0.0.1:0".to_owned(),
+            database_url: None,
+            redis_url: None,
+            provider_mode: ProviderMode::Http,
+            provider_base_url: None,
+            provider_api_key: None,
+            provider_credential_key: Some("test-only-credential-key".to_owned()),
+            api_key_encryption_key: None,
+            provider_allowed_hosts: Vec::new(),
+            request_timeout_seconds: 8,
+            default_rate_limit_per_minute: 60,
+            provider_max_concurrency_per_product: 16,
+            provider_queue_wait_ms: 2_000,
+            provider_breaker_failure_threshold: 5,
+            provider_breaker_cooldown_seconds: 60,
+            event_stream_name: "test".to_owned(),
+            idempotency_ttl_seconds: 3600,
+            dashboard_session_secret: None,
+            data_fingerprint_secret: None,
+            google_client_id: None,
+            google_client_secret: None,
+            google_redirect_uri: None,
+            google_member_redirect_uri: None,
+            admin_google_emails: HashSet::new(),
+            development_admin_token: None,
+            demo_api_key: None,
+            allowed_dashboard_origin: None,
+            qris_base_url: "https://example.invalid".to_owned(),
+        }
+    }
+
+    /// Server lokal sekali-pakai yang menjawab satu request dengan body
+    /// JSON yang diberikan (satu server per leg balapan).
+    fn serve_one_json(body: &'static str) -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind lokal");
+        let port = listener.local_addr().expect("alamat lokal").port();
+        let body = body.to_owned();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            buffer.extend_from_slice(&chunk[..read]);
+                            if let Some(end) = buffer
+                                .windows(4)
+                                .position(|window| window == b"\r\n\r\n")
+                            {
+                                let header =
+                                    String::from_utf8_lossy(&buffer[..end]).into_owned();
+                                let length = header
+                                    .lines()
+                                    .find_map(|line| {
+                                        line.strip_prefix("content-length:")
+                                            .or_else(|| {
+                                                line.strip_prefix("Content-Length:")
+                                            })
+                                            .and_then(|value| {
+                                                value.trim().parse::<usize>().ok()
+                                            })
+                                    })
+                                    .unwrap_or(0);
+                                if buffer.len() >= end + 4 + length {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                let header = format!(
+                    "HTTP/1.1 200 Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(header.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        port
+    }
+
+    async fn create_endpoint(
+        store: &ProviderConfigStore,
+        port: u16,
+        name: &str,
+    ) -> crate::models::ProviderEndpoint {
+        store
+            .create(CreateProviderEndpointRequest {
+                product: ValidationProduct::BankAccount,
+                name: name.to_owned(),
+                base_url: format!("http://127.0.0.1:{port}/check"),
+                api_key: Some("test-key".to_owned()),
+                timeout_ms: 5_000,
+                request_mode: ProviderRequestMode::Generic,
+                auth_header: "Authorization".to_owned(),
+                response_mapping: ProviderResponseMapping::default_for(
+                    ValidationProduct::BankAccount,
+                ),
+                service_code_mapping: std::collections::HashMap::new(),
+                http_method: "POST".to_owned(),
+                code_param: "code".to_owned(),
+                number_param: "target".to_owned(),
+                key_param: None,
+                active: true,
+                force_on: false,
+            })
+            .await
+            .expect("endpoint uji terdaftar")
+    }
+
+    async fn race_provider() -> HttpProvider {
+        let configs = ProviderConfigStore::build(&test_config())
+            .await
+            .expect("store tanpa DB");
+        let guard = Arc::new(ProviderGuard::new(ProviderGuardConfig {
+            // Pacer 1 ms: kedua leg ke host yang sama (127.0.0.1) tidak
+            // saling menunda secara berarti, dan tidak ada penolakan.
+            pace_interval_ms: 1,
+            ..ProviderGuardConfig::default()
+        }));
+        HttpProvider::new(configs, guard)
+    }
+
+    fn bank_request() -> ProviderValidationRequest {
+        ProviderValidationRequest {
+            product: ValidationProduct::BankAccount,
+            provider_hint: Some("002".to_owned()),
+            target: "1234567890".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn single_admitted_race_carries_winning_endpoint_id() {
+        let provider = race_provider().await;
+        let port = serve_one_json(
+            r#"{"status":"valid","result":{"account_name":"NAMA UJI","reference":"ref-1"}}"#,
+        );
+        let endpoint = create_endpoint(provider_store(&provider), port, "Endpoint Uji").await;
+        let (outcome, _) = provider
+            .validate_upstream_race(bank_request(), false)
+            .await
+            .expect("balapan satu endpoint sukses");
+        assert_eq!(outcome.status, ValidationStatus::Valid);
+        assert_eq!(outcome.provider_endpoint_id, Some(endpoint.id));
+    }
+
+    #[tokio::test]
+    async fn multi_leg_valid_beats_invalid_with_winner_id() {
+        let provider = race_provider().await;
+        let store = provider_store(&provider);
+        let invalid_port =
+            serve_one_json(r#"{"status":"invalid","result":{"account_name":null}}"#);
+        let valid_port = serve_one_json(
+            r#"{"status":"valid","result":{"account_name":"NAMA UJI","reference":"ref-2"}}"#,
+        );
+        let invalid = create_endpoint(store, invalid_port, "Endpoint Invalid").await;
+        let valid = create_endpoint(store, valid_port, "Endpoint Valid").await;
+        let _ = invalid;
+        let (outcome, _) = provider
+            .validate_upstream_race(bank_request(), false)
+            .await
+            .expect("balapan dua leg sukses");
+        assert_eq!(outcome.status, ValidationStatus::Valid);
+        assert_eq!(
+            outcome.provider_endpoint_id,
+            Some(valid.id),
+            "pemenang Valid harus membawa id endpoint Valid, bukan Invalid"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_leg_fallback_carries_best_ranked_endpoint_id() {
+        let provider = race_provider().await;
+        let store = provider_store(&provider);
+        let invalid_port =
+            serve_one_json(r#"{"status":"invalid","result":{"account_name":null}}"#);
+        let not_found_port = serve_one_json(r#"{"status":"not_found","result":{}}"#);
+        let invalid = create_endpoint(store, invalid_port, "Endpoint Invalid").await;
+        let _not_found = create_endpoint(store, not_found_port, "Endpoint NotFound").await;
+        let (outcome, _) = provider
+            .validate_upstream_race(bank_request(), false)
+            .await
+            .expect("balapan fallback sukses");
+        assert_eq!(outcome.status, ValidationStatus::Invalid);
+        assert_eq!(
+            outcome.provider_endpoint_id,
+            Some(invalid.id),
+            "fallback terbaik (Invalid > NotFound) harus membawa id endpoint Invalid"
+        );
+    }
+
+    fn provider_store(provider: &HttpProvider) -> &ProviderConfigStore {
+        &provider.provider_configs
     }
 }
 

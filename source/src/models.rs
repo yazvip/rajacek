@@ -264,6 +264,11 @@ pub struct UsageEvent {
     /// stored history keeps the upstream form. Defaulted like target_raw.
     #[serde(default)]
     pub account_name: Option<String>,
+    /// Id endpoint yang jawabannya dipakai (migration 0033), ditulis ke
+    /// `validation_requests.provider_endpoint_id` oleh worker. Defaulted
+    /// supaya event yang diantre binary lama tetap ter-parse (None).
+    #[serde(default)]
+    pub provider_endpoint_id: Option<Uuid>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     /// Internal processing time and end-to-end total for this check, plus how
@@ -317,6 +322,16 @@ pub struct ValidationHistoryItem {
     /// NotKyc (the provider logic already strips the name there).
     #[serde(skip_serializing)]
     pub account_name: Option<String>,
+    /// Nama endpoint yang jawabannya dipakai, admin history only
+    /// (migration 0033: JOIN ke third_party_endpoints di
+    /// validation_history_from_db; jalur memori di-resolve dari
+    /// ProviderConfigStore saat validasi). None untuk baris lama
+    /// pra-fitur. Never serialized from this struct: the member history
+    /// endpoint returns this struct verbatim — the admin endpoint
+    /// converts to [`AdminValidationHistoryItem`] instead, same pattern
+    /// as `target_raw` / `account_name` above.
+    #[serde(skip_serializing)]
+    pub provider_endpoint_name: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     /// Latency breakdown for the admin history view; None for rows recorded
@@ -346,6 +361,9 @@ pub struct AdminValidationHistoryItem {
     pub target_masked: String,
     pub target_raw: Option<String>,
     pub account_name: Option<String>,
+    /// Nama endpoint sumber jawaban (migration 0033), admin only. Hanya
+    /// NAMA yang dikirim — tidak pernah URL, host, kunci, atau kredensial.
+    pub provider_endpoint_name: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     pub rajacek_processing_ms: Option<u64>,
@@ -366,6 +384,7 @@ impl From<&ValidationHistoryItem> for AdminValidationHistoryItem {
             target_masked: item.target_masked.clone(),
             target_raw: item.target_raw.clone(),
             account_name: item.account_name.clone(),
+            provider_endpoint_name: item.provider_endpoint_name.clone(),
             provider_reference: item.provider_reference.clone(),
             provider_latency_ms: item.provider_latency_ms,
             rajacek_processing_ms: item.rajacek_processing_ms,
@@ -1663,6 +1682,7 @@ mod history_filter_tests {
             target_masked: String::new(),
             target_raw: None,
             account_name: None,
+            provider_endpoint_name: None,
             provider_reference: None,
             provider_latency_ms: 0,
             rajacek_processing_ms: None,
@@ -1781,6 +1801,7 @@ mod admin_history_fields_tests {
             target_masked: "***7890".to_owned(),
             target_raw: Some("1234567890".to_owned()),
             account_name: Some("Andrias Se****an Su****o".to_owned()),
+            provider_endpoint_name: None,
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,
@@ -1798,6 +1819,9 @@ mod admin_history_fields_tests {
         )
         .expect("event dengan field baru harus ter-parse");
         assert_eq!(event.target_raw.as_deref(), Some("1234567890"));
+        // Payload lama tanpa provider_endpoint_id (migration 0033) tetap
+        // ter-parse dengan nilai None — bukan error.
+        assert_eq!(event.provider_endpoint_id, None);
         assert_eq!(
             event.account_name.as_deref(),
             Some("Andrias Se****an Su****o")
