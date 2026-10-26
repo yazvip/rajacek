@@ -516,6 +516,12 @@
               </div>
             </div>
 
+            <div class="card reveal-card hidden" id="trialHeldCard">
+              <h2 class="section">ℹ️ Trial gratis ditahan untuk jaringan ini</h2>
+              <p class="sub">Jaringan yang kamu gunakan sudah mencapai batas 5 trial gratis per hari, jadi akun ini dibuat tanpa kuota trial. Akun dan kunci API kamu tetap aktif — kamu tetap bisa membeli paket kapan saja di bagian <strong>Beli Paket</strong>.</p>
+              <div style="margin-top:12px;"><button id="trialHeldClose" type="button">Mengerti</button></div>
+            </div>
+
             <div class="grid-kpi">
               <div class="card kpi">
                 <div class="kpi-top"><span class="kpi-label">Sisa Kuota</span><span class="kpi-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span></div>
@@ -1480,6 +1486,21 @@
         }
       });
 
+      // Anti-farming (27 Okt 2026): trial ditahan karena IP signup
+      // sudah mencapai batas 5 grant per 24 jam. Param dibaca
+      // SEBELUM handleReveal menghapus query URL (replaceState ke
+      // pathname) — dan penghapusannya di sini hanya membuang param
+      // trial, supaya token reveal tetap bisa dibaca sesudahnya.
+      function handleTrialHeld() {
+        const params = new URLSearchParams(location.search);
+        if (params.get('trial') !== 'held') return;
+        params.delete('trial');
+        const rest = params.toString();
+        history.replaceState({}, '', rest ? `${location.pathname}?${rest}` : location.pathname);
+        $('trialHeldCard').classList.remove('hidden');
+      }
+      $('trialHeldClose').addEventListener('click', () => $('trialHeldCard').classList.add('hidden'));
+
       async function handleReveal() {
         const params = new URLSearchParams(location.search);
         const token = params.get('reveal');
@@ -1546,7 +1567,7 @@
         try {
           const res = await fetch('/v1/member/session', { credentials: 'same-origin' });
           const d = await res.json();
-          if (d.authenticated) { showApp(d.prefix); await loadAll(); await handleReveal(); sbLoadOptions(); loadBuy(); }
+          if (d.authenticated) { showApp(d.prefix); await loadAll(); handleTrialHeld(); await handleReveal(); sbLoadOptions(); loadBuy(); }
           else showLogin();
         } catch { showLogin(); }
       })();

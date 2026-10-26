@@ -287,6 +287,7 @@ pub fn build_router(state: AppState) -> Router {
         // untuk tahu breaker terbuka, stream melewati ambang, atau
         // DLQ tidak kosong.
         .route("/v1/admin/stream-health", get(get_stream_health))
+        .route("/v1/admin/trial-monitor", get(get_trial_monitor))
         .route("/v1/admin/dlq", get(list_dlq_entries))
         .route("/v1/admin/dlq/replay-all", post(replay_all_dlq_entries))
         .route("/v1/admin/dlq/:id/replay", post(replay_dlq_entry))
@@ -5952,6 +5953,64 @@ async fn get_stream_health(
         dlq_non_empty: dlq_length.is_some_and(|length| length > 0),
         breakers_open,
         alerts: crate::alerts::alert_status(),
+    }))
+}
+
+/// Satu IP teratas di monitor trial (24 jam). Nilai IP apa adanya
+/// dari kolom signup_ip — endpoint ini admin-only (Viewer), dan
+/// panel hanya menampilkan agregat ini, bukan daftar member.
+#[derive(Serialize)]
+struct TrialTopIpView {
+    ip: String,
+    grants: u64,
+}
+
+/// Agregat monitor trial anti-farming (27 Okt 2026). Jendela 24 jam
+/// rolling (bukan hari kalender) agar konsisten dengan batas klaim.
+/// Baris lama ber-signup_ip NULL dihitung ke grant + kuota, tapi
+/// tidak ke top IP mana pun — top IP kosong sampai ada grant baru
+/// ber-IP, tanpa error.
+#[derive(Serialize)]
+struct TrialMonitorResponse {
+    grants_24h: u64,
+    grants_7d: u64,
+    total_grants: u64,
+    quota_hits_24h: u64,
+    top_ips_24h: Vec<TrialTopIpView>,
+    ips_at_limit_24h: u64,
+    ip_limit_per_24h: u64,
+    alert_threshold_grants_24h: u64,
+    alert: bool,
+}
+
+// Peran: Viewer (bacaan saja), sama dengan get_stream_health.
+// Tanpa pool -> semua nol, bukan error: monitor tidak boleh gagal
+// hanya karena store belum terhubung.
+async fn get_trial_monitor(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TrialMonitorResponse>, AppError> {
+    require_admin_role(&state, &headers, Role::Viewer).await?;
+    let rows = state.store.trial_monitor_rows().await;
+    let total_grants = state.store.trial_grants_total().await;
+    let stats = crate::store::aggregate_trial_monitor(&rows, total_grants, Utc::now());
+    Ok(Json(TrialMonitorResponse {
+        grants_24h: stats.grants_24h,
+        grants_7d: stats.grants_7d,
+        total_grants: stats.total_grants,
+        quota_hits_24h: stats.quota_hits_24h,
+        top_ips_24h: stats
+            .top_ips_24h
+            .into_iter()
+            .map(|entry| TrialTopIpView {
+                ip: entry.ip,
+                grants: entry.grants,
+            })
+            .collect(),
+        ips_at_limit_24h: stats.ips_at_limit_24h,
+        ip_limit_per_24h: crate::store::TRIAL_IP_LIMIT_PER_24H,
+        alert_threshold_grants_24h: crate::store::TRIAL_MONITOR_ALERT_GRANTS_24H,
+        alert: stats.alert,
     }))
 }
 

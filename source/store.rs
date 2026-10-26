@@ -3627,6 +3627,114 @@ pub enum TrialGrantOutcome {
     /// the next login sees that active key and provisions nothing, so
     /// no second trial is ever granted for the account.
     TransientError,
+    /// The signup IP already reached the per-IP trial-grant limit
+    /// (TRIAL_IP_LIMIT_PER_24H grants in 24 hours). No row was
+    /// inserted. Unlike AlreadyClaimed, the caller must NOT keep the
+    /// quota key it just issued: it revokes it and issues an empty
+    /// key instead, so the member keeps a usable (quota 0) account
+    /// without a trial.
+    IpLimitHeld,
+}
+
+/// Anti-farming trial (27 Okt 2026, jalur monitoring + throttle):
+/// maksimum grant trial per IP signup dalam 24 jam rolling.
+/// Soft-deny: login/signup tetap jalan; hanya trial yang ditahan.
+/// Nilai ini juga dipakai monitor (ips_at_limit_24h) — ubah di satu
+/// tempat bila admin meminta ambang lain.
+pub(crate) const TRIAL_IP_LIMIT_PER_24H: u64 = 5;
+/// Ambang badge waspada monitor trial: grant 24 jam sebanyak ini
+/// atau lebih menyalakan alert panel (bukan blokir).
+pub(crate) const TRIAL_MONITOR_ALERT_GRANTS_24H: u64 = 20;
+
+/// True when a 24-hour per-IP trial-grant count already reaches the
+/// limit, so the next claim from that IP must be held (soft-deny).
+pub(crate) fn ip_trial_limit_reached(grants_24h: u64) -> bool {
+    grants_24h >= TRIAL_IP_LIMIT_PER_24H
+}
+
+const TRIAL_IP_COUNT_SQL: &str =
+    "SELECT COUNT(*) FROM trial_grants WHERE signup_ip = ? AND granted_at >= ?";
+const TRIAL_GRANT_INSERT_SQL: &str =
+    "INSERT INTO trial_grants (google_sub, member_id, email, quota_hits, granted_at, expires_at, signup_ip) VALUES (?, ?, ?, ?, ?, ?, ?)";
+const TRIAL_MONITOR_ROWS_SQL: &str =
+    "SELECT granted_at, quota_hits, signup_ip FROM trial_grants WHERE granted_at >= ? ORDER BY granted_at DESC";
+
+/// One trial-grant row for the monitor aggregation (7-day window).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct TrialMonitorRow {
+    pub granted_at: chrono::DateTime<Utc>,
+    pub quota_hits: i64,
+    pub signup_ip: Option<String>,
+}
+
+/// One IP in the monitor top list (24-hour window).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrialTopIp {
+    pub ip: String,
+    pub grants: u64,
+}
+
+/// Aggregated trial-monitor numbers. Pure over fetched rows, so the
+/// window math, NULL-IP handling, and alert thresholds are
+/// unit-testable without a database. `rows` must already be the
+/// 7-day window (see trial_monitor_rows); the 24-hour subset is
+/// derived here from `now`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrialMonitorStats {
+    pub grants_24h: u64,
+    pub grants_7d: u64,
+    pub total_grants: u64,
+    pub quota_hits_24h: u64,
+    pub top_ips_24h: Vec<TrialTopIp>,
+    pub ips_at_limit_24h: u64,
+    pub alert: bool,
+}
+
+pub fn aggregate_trial_monitor(
+    rows: &[TrialMonitorRow],
+    total_grants: u64,
+    now: chrono::DateTime<Utc>,
+) -> TrialMonitorStats {
+    let day_ago = now - Duration::hours(24);
+    let mut grants_24h = 0u64;
+    let mut quota_hits_24h = 0u64;
+    let mut ip_counts: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for row in rows {
+        if row.granted_at >= day_ago {
+            grants_24h += 1;
+            quota_hits_24h += row.quota_hits.max(0) as u64;
+            // NULL signup_ip (legacy rows) counts toward grants and
+            // quota, but never toward any IP's total or the limit.
+            if let Some(ip) = row.signup_ip.as_deref() {
+                *ip_counts.entry(ip).or_insert(0) += 1;
+            }
+        }
+    }
+    // Count IPs at the limit BEFORE truncating to top 10: an IP
+    // outside the top 10 still counts toward the alert.
+    let ips_at_limit_24h = ip_counts
+        .values()
+        .filter(|count| ip_trial_limit_reached(**count))
+        .count() as u64;
+    let mut top_ips_24h: Vec<TrialTopIp> = ip_counts
+        .into_iter()
+        .map(|(ip, grants)| TrialTopIp {
+            ip: ip.to_owned(),
+            grants,
+        })
+        .collect();
+    top_ips_24h.sort_by(|a, b| b.grants.cmp(&a.grants).then_with(|| a.ip.cmp(&b.ip)));
+    top_ips_24h.truncate(10);
+    let alert = grants_24h >= TRIAL_MONITOR_ALERT_GRANTS_24H || ips_at_limit_24h > 0;
+    TrialMonitorStats {
+        grants_24h,
+        grants_7d: rows.len() as u64,
+        total_grants,
+        quota_hits_24h,
+        top_ips_24h,
+        ips_at_limit_24h,
+        alert,
+    }
 }
 
 /// True when a sqlx error is a duplicate-key violation: MySQL reports
@@ -3819,44 +3927,139 @@ impl AdminStore {
     /// the insert an atomic claim: under concurrent first sign-ins
     /// exactly one caller wins, and the loser must revoke the trial key
     /// it just issued — but only on `AlreadyClaimed`.
+    /// Grants in the last 24 hours from one signup IP (migration 0034).
+    /// Legacy rows have NULL signup_ip and never match `signup_ip = ?`,
+    /// so they cannot inflate any IP's count. No pool -> 0 (the claim
+    /// path then falls through to the transient outcome, as before).
+    pub async fn trial_grants_for_ip_24h(&self, signup_ip: &str) -> u64 {
+        let Some(pool) = self.pool() else {
+            return 0;
+        };
+        // Cutoff computed in Rust (UTC), never MySQL NOW(): the VPS
+        // clock is UTC+8 while granted_at is stored as UTC, so NOW()
+        // would skew the window by 8 hours.
+        let cutoff = Utc::now() - Duration::hours(24);
+        sqlx::query_scalar::<_, i64>(TRIAL_IP_COUNT_SQL)
+            .bind(signup_ip)
+            .bind(cutoff)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0)
+            .max(0) as u64
+    }
+
     pub async fn record_trial_grant(
         &self,
         member: &crate::models::MemberAccount,
         quota_hits: u64,
         expires_at: chrono::DateTime<Utc>,
+        signup_ip: &str,
     ) -> TrialGrantOutcome {
         let Some(pool) = self.pool() else {
             return TrialGrantOutcome::TransientError;
         };
-        match sqlx::query(
-            "INSERT INTO trial_grants (google_sub, member_id, email, quota_hits, granted_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&member.google_sub)
-        .bind(member.id.to_string())
-        .bind(&member.email)
-        .bind(quota_hits)
-        .bind(Utc::now())
-        .bind(expires_at)
-        .execute(&pool)
-        .await
-        {
-            Ok(result) => {
-                if result.rows_affected() > 0 {
-                    TrialGrantOutcome::Claimed
-                } else {
-                    TrialGrantOutcome::AlreadyClaimed
-                }
-            }
-            Err(error) => {
-                if is_duplicate_key_error(&error) {
-                    tracing::warn!(?error, member_id = %member.id, "Klaim trial kalah balapan pendaftaran");
-                    TrialGrantOutcome::AlreadyClaimed
-                } else {
-                    tracing::warn!(?error, member_id = %member.id, "Klaim trial gagal (error transient — kunci dipertahankan)");
-                    TrialGrantOutcome::TransientError
-                }
-            }
+        let mut conn = match pool.acquire().await {
+            Ok(conn) => conn,
+            Err(_) => return TrialGrantOutcome::TransientError,
+        };
+        // Per-IP named lock: the pre-check in member.rs runs on a
+        // different pooled connection, so it cannot close the race
+        // between two simultaneous same-IP sign-ins. The lock makes
+        // the count + insert below atomic across processes: a second
+        // same-IP claim blocks here until the first commits, then
+        // re-reads the count and sees the first grant.
+        let lock_name = format!("trial_ip:{signup_ip}");
+        let locked: Option<i32> = sqlx::query_scalar::<_, Option<i32>>("SELECT GET_LOCK(?, 10)")
+            .bind(&lock_name)
+            .fetch_one(&mut *conn)
+            .await
+            .ok()
+            .flatten();
+        if locked != Some(1) {
+            // Lock timeout/error: fail soft (K15 transient semantics —
+            // the caller keeps the key it just issued).
+            tracing::warn!("Kunci trial per-IP gagal diperoleh; klaim diperlakukan transient");
+            return TrialGrantOutcome::TransientError;
         }
+        let outcome = match sqlx::query_scalar::<_, i64>(TRIAL_IP_COUNT_SQL)
+            .bind(signup_ip)
+            .bind(Utc::now() - Duration::hours(24))
+            .fetch_one(&mut *conn)
+            .await
+        {
+            Err(error) => {
+                tracing::warn!(?error, "Hitung grant trial per-IP gagal; klaim diperlakukan transient");
+                TrialGrantOutcome::TransientError
+            }
+            Ok(count) if ip_trial_limit_reached(count.max(0) as u64) => {
+                TrialGrantOutcome::IpLimitHeld
+            }
+            Ok(_) => match sqlx::query(TRIAL_GRANT_INSERT_SQL)
+                .bind(&member.google_sub)
+                .bind(member.id.to_string())
+                .bind(&member.email)
+                .bind(quota_hits)
+                .bind(Utc::now())
+                .bind(expires_at)
+                .bind(signup_ip)
+                .execute(&mut *conn)
+                .await
+            {
+                Ok(result) => {
+                    if result.rows_affected() > 0 {
+                        TrialGrantOutcome::Claimed
+                    } else {
+                        TrialGrantOutcome::AlreadyClaimed
+                    }
+                }
+                Err(error) => {
+                    if is_duplicate_key_error(&error) {
+                        tracing::warn!(?error, member_id = %member.id, "Klaim trial kalah balapan pendaftaran");
+                        TrialGrantOutcome::AlreadyClaimed
+                    } else {
+                        tracing::warn!(?error, member_id = %member.id, "Klaim trial gagal (error transient — kunci dipertahankan)");
+                        TrialGrantOutcome::TransientError
+                    }
+                }
+            },
+        };
+        // Always release before the pooled connection goes back: a
+        // leaked named lock would serialize every later same-IP
+        // claim on this connection.
+        let _ = sqlx::query("SELECT RELEASE_LOCK(?)")
+            .bind(&lock_name)
+            .execute(&mut *conn)
+            .await;
+        outcome
+    }
+
+    /// All trial grants ever (for the monitor total). No pool -> 0:
+    /// the monitor shows zeros, never an error.
+    pub async fn trial_grants_total(&self) -> u64 {
+        let Some(pool) = self.pool() else {
+            return 0;
+        };
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM trial_grants")
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(0)
+            .max(0) as u64
+    }
+
+    /// Trial-grant rows of the last 7 days for the monitor
+    /// aggregation (pure Rust aggregation in aggregate_trial_monitor,
+    /// so window math and NULL-IP handling are unit-testable).
+    /// No pool -> empty (monitor shows zeros, never an error).
+    pub async fn trial_monitor_rows(&self) -> Vec<TrialMonitorRow> {
+        let Some(pool) = self.pool() else {
+            return Vec::new();
+        };
+        let cutoff = Utc::now() - Duration::days(7);
+        sqlx::query_as::<_, TrialMonitorRow>(TRIAL_MONITOR_ROWS_SQL)
+            .bind(cutoff)
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default()
     }
 
     /// Build the request context for a key the caller has ALREADY
@@ -6407,5 +6610,110 @@ mod quota_writer_backpressure_tests {
         let write = rx.recv().await.expect("snapshot terkirim");
         assert_eq!(write.prefix, "rv_live_test");
         assert_eq!(write.remaining, 777);
+    }
+}
+
+#[cfg(test)]
+mod trial_antifarm_tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    fn row(hours_ago: i64, quota: i64, ip: Option<&str>, now: chrono::DateTime<Utc>) -> TrialMonitorRow {
+        TrialMonitorRow {
+            granted_at: now - Duration::hours(hours_ago),
+            quota_hits: quota,
+            signup_ip: ip.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn ip_limit_boundary() {
+        assert!(!ip_trial_limit_reached(0));
+        assert!(!ip_trial_limit_reached(4));
+        assert!(ip_trial_limit_reached(5));
+        assert!(ip_trial_limit_reached(6));
+    }
+
+    #[test]
+    fn trial_sql_mentions_signup_ip() {
+        // Migrasi 0034 menambah kolom signup_ip; kedua SQL klaim
+        // harus membawanya, kalau tidak batas per-IP diam-diam mati.
+        assert!(TRIAL_GRANT_INSERT_SQL.contains("signup_ip"));
+        assert!(TRIAL_IP_COUNT_SQL.contains("signup_ip"));
+        assert!(TRIAL_IP_COUNT_SQL.contains("granted_at"));
+        assert!(TRIAL_MONITOR_ROWS_SQL.contains("signup_ip"));
+    }
+
+    #[test]
+    fn aggregate_empty_is_zero_without_alert() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 27, 0, 0, 0).unwrap();
+        let stats = aggregate_trial_monitor(&[], 0, now);
+        assert_eq!(
+            stats,
+            TrialMonitorStats {
+                grants_24h: 0,
+                grants_7d: 0,
+                total_grants: 0,
+                quota_hits_24h: 0,
+                top_ips_24h: vec![],
+                ips_at_limit_24h: 0,
+                alert: false,
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_windows_null_ips_and_top_order() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).unwrap();
+        let rows = vec![
+            row(1, 1000, Some("10.0.0.1"), now),
+            row(2, 1000, Some("10.0.0.1"), now),
+            row(3, 1000, Some("10.0.0.2"), now),
+            // Di luar 24 jam tapi di dalam 7 hari: hanya grants_7d.
+            row(30, 1000, Some("10.0.0.9"), now),
+            // Baris lama NULL: dihitung ke grant + kuota, tapi tidak
+            // ke IP mana pun.
+            row(4, 1000, None, now),
+            // Di luar 24 jam tapi di dalam 7 hari: hanya grants_7d.
+            row(100, 1000, Some("10.0.0.3"), now),
+        ];
+        let stats = aggregate_trial_monitor(&rows, 42, now);
+        assert_eq!(stats.grants_24h, 4);
+        assert_eq!(stats.grants_7d, 6);
+        assert_eq!(stats.total_grants, 42);
+        assert_eq!(stats.quota_hits_24h, 4000);
+        assert_eq!(stats.ips_at_limit_24h, 0);
+        assert!(!stats.alert);
+        assert_eq!(
+            stats.top_ips_24h,
+            vec![
+                TrialTopIp { ip: "10.0.0.1".to_owned(), grants: 2 },
+                TrialTopIp { ip: "10.0.0.2".to_owned(), grants: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregate_alert_on_grant_volume_or_ip_at_limit() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).unwrap();
+        // 19 grant dari IP berbeda-beda: tidak ada IP mencapai batas
+        // dan volume di bawah 20 -> tidak alert.
+        let rows: Vec<TrialMonitorRow> = (0..19)
+            .map(|i| row(1, 1000, Some(Box::leak(format!("10.0.1.{i}").into_boxed_str()) as &str), now))
+            .collect();
+        assert!(!aggregate_trial_monitor(&rows, 19, now).alert);
+        // Grant ke-20 -> alert volume.
+        let mut rows20 = rows.clone();
+        rows20.push(row(1, 1000, Some("10.0.1.99"), now));
+        let stats = aggregate_trial_monitor(&rows20, 20, now);
+        assert_eq!(stats.grants_24h, 20);
+        assert!(stats.alert);
+        // Satu IP mencapai batas 5 meski total grant kecil -> alert.
+        let rows: Vec<TrialMonitorRow> = (0..5)
+            .map(|_| row(1, 1000, Some("10.0.0.7"), now))
+            .collect();
+        let stats = aggregate_trial_monitor(&rows, 5, now);
+        assert_eq!(stats.ips_at_limit_24h, 1);
+        assert!(stats.alert);
     }
 }

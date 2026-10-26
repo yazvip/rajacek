@@ -21,7 +21,9 @@ use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, 
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    api::{effective_client_ip, record_admin_activity, AppState},
+    api::{
+        effective_client_ip, record_admin_activity, record_admin_activity_with_entity, AppState,
+    },
     auth::{
         cookie_value, fetch_google_user, google_authorize_redirect, oauth_state_clear_cookie,
         oauth_state_cookie_from_headers, session_secret, AdminPrincipal, OAuthPurpose,
@@ -32,6 +34,7 @@ use crate::{
         GoogleCallbackQuery, MemberAccount, MemberDailyCount, MemberUsageData,
         ValidationHistoryFilters, ValidationProduct,
     },
+    store::ip_trial_limit_reached,
 };
 
 pub const MEMBER_SESSION_COOKIE: &str = "rajacek_member_session";
@@ -949,6 +952,7 @@ pub async fn google_start(
 
 pub async fn google_callback(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(query): Query<GoogleCallbackQuery>,
 ) -> Result<Response, AppError> {
@@ -1026,6 +1030,7 @@ pub async fn google_callback(
     // revoked-only keys (grant relies on that distinction), so the
     // revoked case is detected here from the returned status.
     let mut reveal_token: Option<String> = None;
+    let mut trial_held = false;
     {
         let _key_lock = state.store.member_key_lock(member.id);
         let _provision_guard = _key_lock.lock().await;
@@ -1050,11 +1055,23 @@ pub async fn google_callback(
                 // costs only trial bookkeeping, never a lost or doubled
                 // trial. The key is still shown once below, so a
                 // hash-only key is not stranded unseen.
-                match state
-                    .store
-                    .record_trial_grant(&member, quota, expires)
-                    .await
-                {
+                // Anti-farming (27 Okt 2026): batas 5 grant trial per
+                // IP signup per 24 jam rolling. Pre-check ini hanya
+                // fast path — klaim bersamaan dari satu IP masih bisa
+                // lolos di sini, dan record_trial_grant menahannya di
+                // bawah named lock per-IP sebelum INSERT.
+                let signup_ip = effective_client_ip(&headers, addr.ip()).to_string();
+                let outcome = if ip_trial_limit_reached(
+                    state.store.trial_grants_for_ip_24h(&signup_ip).await,
+                ) {
+                    crate::store::TrialGrantOutcome::IpLimitHeld
+                } else {
+                    state
+                        .store
+                        .record_trial_grant(&member, quota, expires, &signup_ip)
+                        .await
+                };
+                match outcome {
                     crate::store::TrialGrantOutcome::Claimed
                     | crate::store::TrialGrantOutcome::TransientError => {
                         reveal_token = Some(stash_key_reveal(
@@ -1070,6 +1087,50 @@ pub async fn google_callback(
                         if let Err(error) = state.store.revoke_api_key(created.key.id).await {
                             tracing::warn!(?error, "Gagal mencabut kunci pecundang balapan trial");
                         }
+                    }
+                    crate::store::TrialGrantOutcome::IpLimitHeld => {
+                        // Soft-deny: login/signup tetap jalan, hanya
+                        // trial yang ditahan. Kunci berkuota yang baru
+                        // dibuat direvoke lalu diganti kunci kosong
+                        // (pola akun tanpa trial), sehingga member
+                        // tetap punya akun + kunci yang bisa dibeli
+                        // paket — bukan akun tanpa kunci. Penahanan
+                        // bersifat terminal untuk akun ini: klaim
+                        // hanya jalan saat is_new, jadi tidak ada
+                        // "coba lagi nanti" yang diam-diam memberi
+                        // trial kedua.
+                        if let Err(error) = state.store.revoke_api_key(created.key.id).await {
+                            tracing::warn!(?error, "Gagal mencabut kunci trial yang ditahan (batas IP)");
+                        }
+                        let held_count =
+                            state.store.trial_grants_for_ip_24h(&signup_ip).await;
+                        tracing::warn!(member_id = %member.id, held_count, "Trial ditahan (batas 5 grant per IP per 24 jam)");
+                        record_admin_activity_with_entity(
+                            &state,
+                            &AdminPrincipal {
+                                email: "sistem".to_owned(),
+                                name: String::new(),
+                                source: "trial_antifarm",
+                                jti: String::new(),
+                            },
+                            "Trial ditahan (batas IP)",
+                            format!(
+                                "Trial ditahan: batas 5 grant per IP per 24 jam tercapai (grant 24 jam: {held_count})"
+                            ),
+                            Some("member"),
+                            Some(&member.id.to_string()),
+                        )
+                        .await;
+                        trial_held = true;
+                        let empty = state
+                            .store
+                            .create_member_api_key(&member, 0, None, rate_limit)
+                            .await?;
+                        reveal_token = Some(stash_key_reveal(
+                            &empty.plaintext_key,
+                            member.id,
+                            empty.key.prefix.clone(),
+                        ));
                     }
                 }
             } else {
@@ -1097,6 +1158,17 @@ pub async fn google_callback(
     let target = match &reveal_token {
         Some(token) => format!("/member?reveal={token}"),
         None => "/member".to_owned(),
+    };
+    // Notice sekali tampil untuk trial yang ditahan (portal
+    // menghapus param ini setelah dibaca; lihat member.html).
+    let target = if trial_held {
+        if target.contains('?') {
+            format!("{target}&trial=held")
+        } else {
+            format!("{target}?trial=held")
+        }
+    } else {
+        target
     };
     let mut response = axum::response::Redirect::to(&target).into_response();
     response.headers_mut().append(

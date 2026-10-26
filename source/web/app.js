@@ -339,7 +339,7 @@
     if (view === "admins") loadAdminAccounts().catch(handleApiError);
     if (view === "orders") loadOrders().catch(handleApiError);
     if (view === "analytics") loadAnalytics().catch(handleApiError);
-    if (view === "providers") { loadProviderHealth().catch(handleApiError); loadStreamHealth().catch(handleApiError); loadDlq().catch(handleApiError); }
+    if (view === "providers") { loadProviderHealth().catch(handleApiError); loadStreamHealth().catch(handleApiError); loadTrialMonitor().catch(handleApiError); loadDlq().catch(handleApiError); }
     if (view === "settings") { loadQrisSettings().catch(handleApiError); loadSiteSettings().catch(handleApiError); }
     window.scrollTo({ top: 0, behavior: "smooth" });
     document.body.classList.remove("menu-open");
@@ -1409,6 +1409,28 @@
     if (!chips.length) chips.push(`<span class="ep-sum-chip"><b>Stream &amp; breaker normal</b>${data.redis_available ? ` · ${formatNumber(data.stream_length)} entri stream · DLQ kosong` : " · Redis tidak tersedia"}</span>`);
     chips.push(`<span class="ep-sum-chip"><b>Alert:</b> ${escapeHtml(alertDeliveryText(data.alerts))}</span>`);
     box.innerHTML = chips.join("");
+  }
+
+  async function loadTrialMonitor() {
+    const box = $("#trial-monitor-box");
+    const note = $("#trial-monitor-note");
+    const table = $("#trial-monitor-ips");
+    if (!box) return;
+    const data = await api("/v1/admin/trial-monitor");
+    if (note) {
+      note.textContent = `Grant 24 jam: ${formatNumber(data.grants_24h)} · 7 hari: ${formatNumber(data.grants_7d)} · total: ${formatNumber(data.total_grants)} · kuota trial 24 jam: ${formatNumber(data.quota_hits_24h)} hit · batas ${data.ip_limit_per_24h} grant/IP/24 jam · ambang waspada ${data.alert_threshold_grants_24h} grant/24 jam.`;
+    }
+    const chips = [];
+    if (data.alert) chips.push(`<span class="ep-sum-chip"><b>Waspada: lonjakan trial!</b> ${data.ips_at_limit_24h ? `${formatNumber(data.ips_at_limit_24h)} IP mencapai batas` : `${formatNumber(data.grants_24h)} grant dalam 24 jam`} — periksa apakah ini farming, bukan blokir otomatis.</span>`);
+    if (!chips.length) chips.push(`<span class="ep-sum-chip"><b>Trial normal</b> · ${formatNumber(data.grants_24h)} grant 24 jam · ${formatNumber(data.ips_at_limit_24h)} IP mencapai batas</span>`);
+    box.innerHTML = chips.join("");
+    if (table) {
+      const ips = data.top_ips_24h || [];
+      table.innerHTML = ips.length ? ips.map((item) => `<tr>
+      <td>${escapeHtml(item.ip)}</td>
+      <td><strong>${formatNumber(item.grants)}</strong>${item.grants >= data.ip_limit_per_24h ? ` <span class="status-badge demo">Batas tercapai</span>` : ""}</td>
+    </tr>`).join("") : `<tr><td colspan="2" class="empty-state">Belum ada grant trial ber-IP dalam 24 jam (grant lama tanpa IP tidak tampil).</td></tr>`;
+    }
   }
 
   async function loadDlq() {
@@ -3023,8 +3045,17 @@
       try {
         await loadProviderHealth();
         await loadStreamHealth();
+        await loadTrialMonitor();
         await loadDlq();
         showToast("Kesehatan rute berhasil dimuat ulang.", "success");
+      } catch (error) {
+        handleApiError(error);
+      }
+    });
+    $("#refresh-trial-monitor")?.addEventListener("click", async () => {
+      try {
+        await loadTrialMonitor();
+        showToast("Monitor trial berhasil dimuat ulang.", "success");
       } catch (error) {
         handleApiError(error);
       }
