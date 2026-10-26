@@ -940,6 +940,14 @@
           "remaining_quota": {
             "type": "integer",
             "format": "int64"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Masa aktif paket yang sedang dipakai (kedaluwarsa paket yang paling cepat habis), sama dengan yang tampil di portal member. null berarti kunci tidak pernah kedaluwarsa. Bukan tanggal kunci mati: kunci tetap bisa dipakai selama masih ada paket aktif, dan tanggal ini bergeser otomatis saat paket yang sedang dipakai habis atau lewat masa aktifnya."
           }
         }
       },
@@ -1011,7 +1019,8 @@
             "rajacek_processing_ms": 6,
             "total_latency_ms": 818,
             "cached": false,
-            "remaining_quota": 4999
+            "remaining_quota": 4999,
+            "expires_at": "2027-01-21T10:00:00Z"
           }
         }
       },

@@ -1555,6 +1555,11 @@ pub(crate) async fn execute_validation(
             if let Some(current) = state.store.quota_remaining(&api_key.prefix).await {
                 replay.meta.remaining_quota = current;
             }
+            // Tanggal dari respons tersimpan juga basi: segarkan dari
+            // agregat live, persis seperti remaining_quota di atas.
+            if let Some((summary, _)) = state.store.api_key_account(&api_key.prefix).await {
+                replay.meta.expires_at = summary.expires_at;
+            }
             return Ok(validation_response(replay, None, true));
         }
         IdempotencyDecision::Execute => {}
@@ -1661,6 +1666,17 @@ pub(crate) async fn execute_validation(
 
     let total_latency_ms = request_started.elapsed().as_millis() as u64;
     let rajacek_processing_ms = total_latency_ms.saturating_sub(outcome.provider_latency_ms);
+    // Masa aktif agregat live, definisi SAMA PERSIS dengan overview member
+    // (api_key_account → live_view → bucket_aggregate): expiry bucket
+    // aktif terdekat; None = kunci tidak pernah kedaluwarsa. Bukan
+    // ringkasan tersimpan. Kunci yang lenyap di tengah request (praktis
+    // mustahil) menghasilkan None.
+    let meta_expires_at = state
+        .store
+        .api_key_account(&api_key.prefix)
+        .await
+        .map(|(summary, _)| summary.expires_at)
+        .unwrap_or(None);
     let response = ValidationResponse {
         request_id: request_id.clone(),
         status: outcome.status,
@@ -1691,6 +1707,7 @@ pub(crate) async fn execute_validation(
                     .await
                     .unwrap_or_else(|| remaining_quota.saturating_add(1))
             },
+            expires_at: meta_expires_at,
         },
     };
 

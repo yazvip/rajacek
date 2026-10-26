@@ -362,6 +362,7 @@ components:
         total_latency_ms: { type: integer, minimum: 0, description: Total waktu request yang terukur oleh Rajacek. }
         cached: { type: boolean }
         remaining_quota: { type: integer, minimum: 0 }
+        expires_at: { type: [string, 'null'], format: date-time, description: Masa aktif paket yang sedang dipakai (kedaluwarsa paket yang paling cepat habis), sama dengan yang tampil di portal member. null berarti kunci tidak pernah kedaluwarsa. Bukan tanggal kunci mati: kunci tetap bisa dipakai selama masih ada paket aktif, dan tanggal ini bergeser otomatis saat paket yang sedang dipakai habis atau lewat masa aktifnya. }
     ValidationProduct:
       type: string
       enum: [bank_account, ewallet, whatsapp, pln]

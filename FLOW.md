@@ -300,3 +300,12 @@ Restore dari ZIP ini:
   sehingga paket yang memuat `pln` memberi akses produk ini; kartu
   paket memakai label `PLN` dari `productLabel` yang sama dengan
   riwayat, analitik, dan grup provider.
+- `meta.expires_at` pada respons validasi member (2026-10-26): masa aktif
+  agregat live, definisi sama persis dengan overview member (live_view →
+  bucket_aggregate: expiry bucket aktif terdekat; null = tidak pernah
+  kedaluwarsa). Replay idempotensi menyegarkan tanggal dari agregat live,
+  bukan tanggal basi tersimpan. Semantik beli ulang: pembelian = bucket
+  baru (expiry = beli + valid_days), bucket lama tidak diperpanjang;
+  agregat bisa maju lebih awal bila paket baru lebih cepat kedaluwarsa
+  (dipakai dulu secara FIFO), lalu kembali ke paket lama setelah paket
+  baru habis/lewat; kunci mati hanya bila SEMUA bucket lewat expiry.

@@ -203,6 +203,14 @@ pub struct ValidationMeta {
     pub total_latency_ms: u64,
     pub cached: bool,
     pub remaining_quota: u64,
+    /// Masa aktif agregat kunci ini, definisi SAMA PERSIS dengan overview
+    /// member (live_view → bucket_aggregate): expiry bucket aktif
+    /// terdekat; None = kunci tidak pernah kedaluwarsa. Diserialisasi
+    /// eksplisit sebagai null saat None (tanpa skip_serializing_if),
+    /// konsisten dengan overview. Default None agar JSON idempotensi lama
+    /// yang belum memuat field ini tetap lolos parse.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 fn default_channel() -> String {
@@ -1278,6 +1286,40 @@ mod tests {
 
     fn dt(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn validation_meta_expires_at_serializes_and_defaults() {
+        let meta = ValidationMeta {
+            provider: "Rajacek".to_owned(),
+            provider_latency_ms: 120,
+            attempts: 1,
+            rajacek_processing_ms: 5,
+            total_latency_ms: 125,
+            cached: false,
+            remaining_quota: 42,
+            expires_at: Some(dt("2026-11-25T10:00:00Z")),
+        };
+        let json = serde_json::to_value(&meta).expect("serialize");
+        assert_eq!(json["expires_at"], "2026-11-25T10:00:00Z");
+        // None diserialisasi eksplisit sebagai null, bukan dihilangkan.
+        let meta_null = ValidationMeta {
+            expires_at: None,
+            ..meta
+        };
+        let json_null = serde_json::to_value(&meta_null).expect("serialize");
+        assert!(
+            json_null.get("expires_at").is_some(),
+            "null harus eksplisit, bukan hilang"
+        );
+        assert!(json_null["expires_at"].is_null());
+        // JSON lama (idempotensi tersimpan sebelum field ini ada) tetap
+        // lolos parse, dengan default None.
+        let legacy: ValidationMeta = serde_json::from_str(
+            r#"{"provider":"Rajacek","provider_latency_ms":120,"attempts":1,"rajacek_processing_ms":5,"total_latency_ms":125,"cached":false,"remaining_quota":42}"#,
+        )
+        .expect("meta lama tanpa expires_at harus tetap lolos parse");
+        assert_eq!(legacy.expires_at, None);
     }
 
     // Tes-tes grant lama di bawah ini DIGANTI eksplisit (2026-10-26):
