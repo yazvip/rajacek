@@ -1895,3 +1895,24 @@ td.empty-state { display: table-cell; }
 .row-actions { gap: 12px; }
 #view-history td, #view-admins td { padding: 10px 20px; }
 .chart-wrap { margin-top: 16px; }
+
+/* ------------------------------------------------------------------
+   Perapian tabel Riwayat Cek (2026-10-26, dari screenshot user).
+   Akar: tabel width:100% terjepit + `overflow-wrap: anywhere` global
+   menghancurkan token per huruf ("Rekenin g", "30./499", request ID
+   patah tengah, prefix patah tengah). Perbaikan (CSS saja, scoped ke
+   tabel ini): tabel diberi lebar minimum agar kolom punya ruang baca
+   dan .table-scroll menggeser horizontal; token (nomor, waktu, prefix,
+   produk, target, badge, request ID, detail latensi) tidak membungkus;
+   padding sel diringkas 10px 20px -> 8px 12px agar baris lebih pendek. */
+#view-history .table-scroll table { min-width: 1020px; }
+#history-table td { overflow-wrap: normal; padding: 8px 12px; }
+#history-table td:nth-child(1),
+#history-table td:nth-child(2),
+#history-table td:nth-child(3),
+#history-table td:nth-child(4),
+#history-table td:nth-child(5),
+#history-table td:nth-child(6),
+#history-table td:nth-child(8) { white-space: nowrap; }
+#history-table td:nth-child(7) .cell-sub { white-space: nowrap; }
+#history-table td code { overflow-wrap: normal; }
