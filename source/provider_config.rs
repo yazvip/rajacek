@@ -683,7 +683,7 @@ impl ProviderConfigStore {
         };
         let mut rows_builder = apply_filters(
             sqlx::QueryBuilder::new(
-                "SELECT request_id, api_key_prefix, product_code, outcome, target_masked,                  provider_reference, provider_latency_ms, rajacek_processing_ms, total_latency_ms, attempts, occurred_at, channel                  FROM validation_requests WHERE 1 = 1",
+                "SELECT request_id, api_key_prefix, product_code, outcome, target_masked, target_raw, account_name,                  provider_reference, provider_latency_ms, rajacek_processing_ms, total_latency_ms, attempts, occurred_at, channel                  FROM validation_requests WHERE 1 = 1",
             ),
             filters,
         );
@@ -697,6 +697,8 @@ impl ProviderConfigStore {
             String,
             String,
             String,
+            Option<String>,
+            Option<String>,
             Option<String>,
             u64,
             Option<u64>,
@@ -720,6 +722,8 @@ impl ProviderConfigStore {
                     product_code,
                     outcome,
                     target_masked,
+                    target_raw,
+                    account_name,
                     provider_reference,
                     provider_latency_ms,
                     rajacek_processing_ms,
@@ -740,6 +744,8 @@ impl ProviderConfigStore {
                         product,
                         outcome,
                         target_masked,
+                        target_raw,
+                        account_name,
                         provider_reference,
                         provider_latency_ms,
                         rajacek_processing_ms,

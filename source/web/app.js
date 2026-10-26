@@ -151,6 +151,25 @@
     }).format(date);
   }
 
+  // Formatter khusus riwayat admin: 2 baris ringkas ("26 Okt 26" /
+  // "10:36", detik dibuang dari tampilan) + timestamp lengkap untuk
+  // atribut title sel. formatDate global TIDAK diubah (dipakai view
+  // lain). Pemformatan manual (bukan Intl untuk jam) agar pemisah jam
+  // selalu ":" — Intl id-ID memakai "." ("10.36").
+  function formatHistoryDateTime(value) {
+    if (!value) return { date: "—", time: "", full: "—" };
+    const date = new Date(normalizeDateValue(value));
+    if (Number.isNaN(date.getTime())) return { date: "—", time: "", full: "—" };
+    const monthsShort = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+    const monthsLong = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+    const pad = (n) => String(n).padStart(2, "0");
+    return {
+      date: `${pad(date.getDate())} ${monthsShort[date.getMonth()]} ${pad(date.getFullYear() % 100)}`,
+      time: `${pad(date.getHours())}:${pad(date.getMinutes())}`,
+      full: `${date.getDate()} ${monthsLong[date.getMonth()]} ${date.getFullYear()}, ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
+    };
+  }
+
   function relativeTime(value) {
     if (!value) return "—";
     // K33: relativeTime dulu TIDAK menormalisasi zona, tidak seperti
@@ -1032,16 +1051,22 @@
       provider_error: "Error provider", pending: "Menunggu",
       rate_limited: "Rate limit", quota_exhausted: "Kuota habis",
     };
-    $("#history-table").innerHTML = h.items.length ? h.items.map((item, idx) => `<tr>
+    $("#history-table").innerHTML = h.items.length ? h.items.map((item, idx) => {
+      const occurred = formatHistoryDateTime(item.occurred_at);
+      const target = item.target_raw != null && item.target_raw !== "" ? item.target_raw : item.target_masked;
+      const accountName = item.account_name != null && item.account_name !== "" ? item.account_name : "—";
+      return `<tr>
       <td class="row-num">${formatNumber(h.total - h.offset - idx)}</td>
-      <td>${escapeHtml(formatDate(item.occurred_at))}</td>
+      <td class="history-date" title="${escapeHtml(occurred.full)}">${escapeHtml(occurred.date)}${occurred.time ? `<br /><span>${escapeHtml(occurred.time)}</span>` : ""}</td>
       <td><code>${escapeHtml(item.api_key_prefix)}</code></td>
       <td>${escapeHtml(productLabel(item.product))}</td>
-      <td>${escapeHtml(item.target_masked)}</td>
+      <td>${escapeHtml(target)}</td>
+      <td>${escapeHtml(accountName)}</td>
       <td><span class="status-badge ${escapeHtml(item.outcome)}">${escapeHtml(outcomeLabel[item.outcome] || item.outcome)}</span></td>
       <td>${latencyCell(item)}</td>
       <td><code>${escapeHtml(String(item.request_id).length <= 12 ? String(item.request_id) : String(item.request_id).slice(0, 8) + "…")}</code></td>
-    </tr>`).join("") : `<tr><td colspan="8">Belum ada riwayat yang cocok dengan filter.</td></tr>`;
+    </tr>`;
+    }).join("") : `<tr><td colspan="9">Belum ada riwayat yang cocok dengan filter.</td></tr>`;
     const from = h.total === 0 ? 0 : h.offset + 1;
     const to = Math.min(h.offset + h.limit, h.total);
     $("#history-page-info").textContent = `Menampilkan ${formatNumber(from)}–${formatNumber(to)} dari ${formatNumber(h.total)} riwayat`;

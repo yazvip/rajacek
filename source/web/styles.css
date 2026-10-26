@@ -1904,15 +1904,27 @@ td.empty-state { display: table-cell; }
    tabel ini): tabel diberi lebar minimum agar kolom punya ruang baca
    dan .table-scroll menggeser horizontal; token (nomor, waktu, prefix,
    produk, target, badge, request ID, detail latensi) tidak membungkus;
-   padding sel diringkas 10px 20px -> 8px 12px agar baris lebih pendek. */
-#view-history .table-scroll table { min-width: 1020px; }
+   padding sel diringkas 10px 20px -> 8px 12px agar baris lebih pendek.
+   Tambahan 2026-10-26 (kolom Nama + target utuh + tanggal ringkas):
+   min-width 1020px -> 1180px = 1020 + kolom Nama baru ~150px
+   (nama membungkus di spasi jadi 2 baris, ~2 kata/baris) + target utuh
+   lebih lebar dari target tersamar ~90px - tanggal 2 baris ringkas
+   ("26 Okt 26" / "10:36") yang ~80px lebih ramping dari timestamp
+   satu baris penuh. Urutan kolom kini 9: No./Waktu/Prefix/Produk/
+   Target/Nama/Hasil/Latensi/Request ID — aturan nowrap bergeser ikut
+   nomor kolom baru; hanya kolom Nama (ke-6) yang boleh membungkus,
+   dan HANYA di spasi (overflow-wrap/word-break normal). */
+#view-history .table-scroll table { min-width: 1180px; }
 #history-table td { overflow-wrap: normal; padding: 8px 12px; }
 #history-table td:nth-child(1),
 #history-table td:nth-child(2),
 #history-table td:nth-child(3),
 #history-table td:nth-child(4),
 #history-table td:nth-child(5),
-#history-table td:nth-child(6),
-#history-table td:nth-child(8) { white-space: nowrap; }
-#history-table td:nth-child(7) .cell-sub { white-space: nowrap; }
+#history-table td:nth-child(7),
+#history-table td:nth-child(9) { white-space: nowrap; }
+#history-table td:nth-child(6) { white-space: normal; overflow-wrap: normal; word-break: normal; }
+#history-table td:nth-child(8) .cell-sub { white-space: nowrap; }
 #history-table td code { overflow-wrap: normal; }
+#history-table td.history-date { font-size: 12px; line-height: 1.45; }
+#history-table td.history-date span { white-space: nowrap; }

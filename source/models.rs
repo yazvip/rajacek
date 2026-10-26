@@ -225,6 +225,19 @@ pub struct UsageEvent {
     pub occurred_at: DateTime<Utc>,
     pub target_fingerprint: String,
     pub target_masked: String,
+    /// Raw target exactly as submitted (account number / phone). Stored
+    /// only for the admin history view — never serialized into member
+    /// responses. Defaulted so events queued by older binaries still
+    /// deserialize.
+    #[serde(default)]
+    pub target_raw: Option<String>,
+    /// Holder name exactly as returned upstream (provider-masked for
+    /// Tukangcek, verbatim nickname/accountname for Cutiezy, None for
+    /// WhatsApp and for e-wallet NotKyc). NOT uppercased here: the member
+    /// response uppercases its own copy in validation_response, while the
+    /// stored history keeps the upstream form. Defaulted like target_raw.
+    #[serde(default)]
+    pub account_name: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     /// Internal processing time and end-to-end total for this check, plus how
@@ -245,6 +258,13 @@ pub struct UsageEvent {
 /// One recorded member validation, as shown in the admin history view. Mirrors
 /// the durable `validation_requests` table written by the worker; the target is
 /// always the masked form, never the raw account number.
+///
+/// The raw target and holder name live on this struct for internal use
+/// (admin view, CSV-adjacent logic) but are NEVER serialized from it:
+/// the member history endpoint returns this struct verbatim, so the new
+/// fields carry `skip_serializing` and the admin endpoint converts to
+/// [`AdminValidationHistoryItem`] instead. Adding a field here without
+/// `skip_serializing` would leak raw targets/names to members.
 #[derive(Clone, Debug, Serialize)]
 pub struct ValidationHistoryItem {
     pub request_id: String,
@@ -252,6 +272,15 @@ pub struct ValidationHistoryItem {
     pub product: ValidationProduct,
     pub outcome: String,
     pub target_masked: String,
+    /// Raw target, admin history only. None for rows recorded before
+    /// migration 0024.
+    #[serde(skip_serializing)]
+    pub target_raw: Option<String>,
+    /// Holder name as returned upstream, admin history only. None for rows
+    /// recorded before migration 0024, for WhatsApp, and for e-wallet
+    /// NotKyc (the provider logic already strips the name there).
+    #[serde(skip_serializing)]
+    pub account_name: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     /// Latency breakdown for the admin history view; None for rows recorded
@@ -263,6 +292,49 @@ pub struct ValidationHistoryItem {
     /// "api" | "portal" — where the check was made (default "api").
     #[serde(default = "default_channel")]
     pub channel: String,
+}
+
+/// Admin-only serialization of [`ValidationHistoryItem`]: identical
+/// fields plus the raw target and holder name from migration 0024.
+/// This is the ONLY shape that serializes those two fields; the member
+/// history endpoint keeps returning `ValidationHistoryItem` directly.
+#[derive(Clone, Debug, Serialize)]
+pub struct AdminValidationHistoryItem {
+    pub request_id: String,
+    pub api_key_prefix: String,
+    pub product: ValidationProduct,
+    pub outcome: String,
+    pub target_masked: String,
+    pub target_raw: Option<String>,
+    pub account_name: Option<String>,
+    pub provider_reference: Option<String>,
+    pub provider_latency_ms: u64,
+    pub rajacek_processing_ms: Option<u64>,
+    pub total_latency_ms: Option<u64>,
+    pub attempts: Option<u32>,
+    pub occurred_at: DateTime<Utc>,
+    pub channel: String,
+}
+
+impl From<&ValidationHistoryItem> for AdminValidationHistoryItem {
+    fn from(item: &ValidationHistoryItem) -> Self {
+        Self {
+            request_id: item.request_id.clone(),
+            api_key_prefix: item.api_key_prefix.clone(),
+            product: item.product,
+            outcome: item.outcome.clone(),
+            target_masked: item.target_masked.clone(),
+            target_raw: item.target_raw.clone(),
+            account_name: item.account_name.clone(),
+            provider_reference: item.provider_reference.clone(),
+            provider_latency_ms: item.provider_latency_ms,
+            rajacek_processing_ms: item.rajacek_processing_ms,
+            total_latency_ms: item.total_latency_ms,
+            attempts: item.attempts,
+            occurred_at: item.occurred_at,
+            channel: item.channel.clone(),
+        }
+    }
 }
 
 /// Aggregated member-portal usage, computed either from MySQL
@@ -1408,6 +1480,8 @@ mod history_filter_tests {
             product: ValidationProduct::BankAccount,
             outcome: "valid".to_owned(),
             target_masked: String::new(),
+            target_raw: None,
+            account_name: None,
             provider_reference: None,
             provider_latency_ms: 0,
             rajacek_processing_ms: None,
@@ -1509,5 +1583,80 @@ mod history_filter_tests {
         assert!(!filters.matches(&item("rv_live_other")));
         // Exact, not prefix-based: a longer string sharing the prefix fails.
         assert!(!filters.matches(&item("rv_live_old_extra")));
+    }
+}
+
+#[cfg(test)]
+mod admin_history_fields_tests {
+    use super::*;
+
+    fn history_item_with_raw() -> ValidationHistoryItem {
+        ValidationHistoryItem {
+            request_id: "R9".to_owned(),
+            api_key_prefix: "rv_live_x".to_owned(),
+            product: ValidationProduct::BankAccount,
+            outcome: "valid".to_owned(),
+            target_masked: "***7890".to_owned(),
+            target_raw: Some("1234567890".to_owned()),
+            account_name: Some("Andrias Se****an Su****o".to_owned()),
+            provider_reference: None,
+            provider_latency_ms: 10,
+            rajacek_processing_ms: None,
+            total_latency_ms: None,
+            attempts: None,
+            occurred_at: Utc::now(),
+            channel: "api".to_owned(),
+        }
+    }
+
+    #[test]
+    fn usage_event_new_fields_roundtrip() {
+        let event: UsageEvent = serde_json::from_str(
+            r#"{"event_id":"0199a5a5-0000-7000-8000-000000000009","request_id":"R9","idempotency_key":null,"api_key_prefix":"rv_live_x","product":"bank_account","status":"valid","price_snapshot_id":null,"occurred_at":"2026-10-25T00:00:00Z","target_fingerprint":"f","target_masked":"***7890","target_raw":"1234567890","account_name":"Andrias Se****an Su****o","provider_reference":null,"provider_latency_ms":10,"channel":"api"}"#,
+        )
+        .expect("event dengan field baru harus ter-parse");
+        assert_eq!(event.target_raw.as_deref(), Some("1234567890"));
+        assert_eq!(
+            event.account_name.as_deref(),
+            Some("Andrias Se****an Su****o")
+        );
+        let serialized = serde_json::to_string(&event).expect("serialize");
+        assert!(serialized.contains("\"target_raw\":\"1234567890\""));
+        assert!(serialized.contains("Andrias Se****an Su****o"));
+    }
+
+    #[test]
+    fn usage_event_old_events_without_new_fields_default_to_none() {
+        // Event dari binary lama (sebelum migrasi 0024) yang masih antre
+        // di Redis harus tetap ter-deserialisasi; field baru = None.
+        let event: UsageEvent = serde_json::from_str(
+            r#"{"event_id":"0199a5a5-0000-7000-8000-000000000001","request_id":"R1","idempotency_key":null,"api_key_prefix":"rv_live_x","product":"bank_account","status":"valid","price_snapshot_id":null,"occurred_at":"2026-10-25T00:00:00Z","target_fingerprint":"f","target_masked":"***","provider_reference":null,"provider_latency_ms":10,"channel":"api"}"#,
+        )
+        .expect("event lama tanpa field baru harus ter-parse");
+        assert_eq!(event.target_raw, None);
+        assert_eq!(event.account_name, None);
+    }
+
+    #[test]
+    fn member_item_serialization_never_contains_raw_fields() {
+        // Batas keras: ValidationHistoryItem adalah bentuk yang dipakai
+        // endpoint riwayat member (member::HistoryResponse), jadi
+        // serialisasinya tidak boleh memuat target utuh / nama apa pun.
+        let serialized = serde_json::to_string(&history_item_with_raw()).expect("serialize");
+        assert!(!serialized.contains("target_raw"));
+        assert!(!serialized.contains("account_name"));
+        assert!(!serialized.contains("1234567890"));
+        assert!(!serialized.contains("Andrias Se****an Su****o"));
+        assert!(serialized.contains("\"target_masked\":\"***7890\""));
+    }
+
+    #[test]
+    fn admin_item_serialization_contains_raw_fields() {
+        let item = history_item_with_raw();
+        let admin = AdminValidationHistoryItem::from(&item);
+        let serialized = serde_json::to_string(&admin).expect("serialize");
+        assert!(serialized.contains("\"target_raw\":\"1234567890\""));
+        assert!(serialized.contains("\"account_name\":\"Andrias Se****an Su****o\""));
+        assert!(serialized.contains("\"target_masked\":\"***7890\""));
     }
 }

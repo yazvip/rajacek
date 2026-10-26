@@ -8,6 +8,25 @@ use sqlx::{
 
 use crate::models::UsageEvent;
 
+/// INSERT for `validation_requests`, kept as a named constant so tests
+/// can assert the column list and placeholder count stay in lockstep
+/// with the binds in [`Database::persist_usage_event`] (sqlx `query`
+/// is not compile-time checked, so a forgotten column/bind here would
+/// otherwise surface only at runtime against a live database).
+/// Columns target_raw + account_name come from migration 0024 and are
+/// admin-history only; member responses never read them.
+const PERSIST_VALIDATION_REQUEST_SQL: &str = r#"
+            INSERT IGNORE INTO validation_requests (
+                id, request_id, event_id, api_key_prefix, product_code, outcome,
+                target_fingerprint, target_masked, target_raw, account_name,
+                provider_reference, provider_latency_ms,
+                rajacek_processing_ms, total_latency_ms, attempts,
+                occurred_at, channel
+            ) VALUES (
+                UUID_TO_BIN(?), ?, UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+            "#;
+
 /// MySQL system-of-record access.
 ///
 /// The API hot path does not write directly through this type. The worker consumes durable
@@ -69,38 +88,33 @@ impl Database {
         let product_code = event.product.as_str();
         let outcome = event.status.as_str();
 
-        sqlx::query(
-            r#"
-            INSERT IGNORE INTO validation_requests (
-                id, request_id, event_id, api_key_prefix, product_code, outcome,
-                target_fingerprint, target_masked, provider_reference, provider_latency_ms,
-                rajacek_processing_ms, total_latency_ms, attempts,
-                occurred_at, channel
-            ) VALUES (
-                UUID_TO_BIN(?), ?, UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-            "#,
-        )
-        .bind(&event_id)
-        .bind(&event.request_id)
-        .bind(&event_id)
-        .bind(&event.api_key_prefix)
-        .bind(product_code)
-        .bind(outcome)
-        .bind(&event.target_fingerprint)
-        .bind(&event.target_masked)
-        .bind(&event.provider_reference)
-        .bind(event.provider_latency_ms)
-        .bind(event.rajacek_processing_ms)
-        .bind(event.total_latency_ms)
-        .bind(event.attempts)
-        .bind(event.occurred_at)
-        .bind(&event.channel)
-        .execute(&mut *transaction)
-        .await
-        .context("Gagal menyimpan audit validasi")?;
+        sqlx::query(PERSIST_VALIDATION_REQUEST_SQL)
+            .bind(&event_id)
+            .bind(&event.request_id)
+            .bind(&event_id)
+            .bind(&event.api_key_prefix)
+            .bind(product_code)
+            .bind(outcome)
+            .bind(&event.target_fingerprint)
+            .bind(&event.target_masked)
+            .bind(&event.target_raw)
+            .bind(&event.account_name)
+            .bind(&event.provider_reference)
+            .bind(event.provider_latency_ms)
+            .bind(event.rajacek_processing_ms)
+            .bind(event.total_latency_ms)
+            .bind(event.attempts)
+            .bind(event.occurred_at)
+            .bind(&event.channel)
+            .execute(&mut *transaction)
+            .await
+            .context("Gagal menyimpan audit validasi")?;
 
-        if event.status.is_billable() {
+        // Billing rule 2026-10-25: only actually-charged validations create
+        // a ledger 'charge' row. Free-pool invalid results (charged=false)
+        // and pre-`charged` events (default true) keep the old behavior via
+        // the is_billable() half of this condition.
+        if event.status.is_billable() && event.charged {
             let price_snapshot_id = event.price_snapshot_id.map(|value| value.to_string());
             sqlx::query(
                 r#"
@@ -132,5 +146,23 @@ impl Database {
             .await
             .context("Gagal mengunci transaksi ledger")?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod persist_sql_tests {
+    use super::*;
+
+    #[test]
+    fn validation_request_insert_covers_migration_0024_columns() {
+        // sqlx::query tidak dicek saat compile, jadi kunci guard ini:
+        // kolom baru migrasi 0024 harus ada di INSERT, dan jumlah
+        // placeholder harus sama dengan jumlah bind di
+        // persist_usage_event (17: 15 lama + target_raw + account_name).
+        assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("target_raw"));
+        assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("account_name"));
+        assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("target_masked"));
+        let placeholders = PERSIST_VALIDATION_REQUEST_SQL.matches('?').count();
+        assert_eq!(placeholders, 17, "bind dan placeholder tidak seimbang");
     }
 }

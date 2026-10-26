@@ -1802,3 +1802,48 @@ mod session_binding_tests {
         assert!(!session_key_binding_matches("rv_live_ab12", None));
     }
 }
+
+#[cfg(test)]
+mod member_history_no_raw_fields_tests {
+    use super::*;
+
+    #[test]
+    fn member_history_response_serialization_omits_raw_target_and_name() {
+        // Bukti ujung-ke-ujung di level struct respons member: item yang
+        // membawa target_raw + account_name tetap terserialisasi TANPA
+        // keduanya saat dibungkus HistoryResponse.
+        let item = crate::models::ValidationHistoryItem {
+            request_id: "R9".to_owned(),
+            api_key_prefix: "rv_live_x".to_owned(),
+            product: ValidationProduct::BankAccount,
+            outcome: "valid".to_owned(),
+            target_masked: "***7890".to_owned(),
+            target_raw: Some("1234567890".to_owned()),
+            account_name: Some("Andrias Se****an Su****o".to_owned()),
+            provider_reference: None,
+            provider_latency_ms: 10,
+            rajacek_processing_ms: None,
+            total_latency_ms: None,
+            attempts: None,
+            occurred_at: Utc::now(),
+            channel: "api".to_owned(),
+        };
+        let response = HistoryResponse {
+            items: vec![item],
+            total: 1,
+            limit: 15,
+            offset: 0,
+            source: "database",
+            stats: HistoryStats {
+                hits_last_60s: 0,
+                hits_last_3600s: 0,
+            },
+        };
+        let serialized = serde_json::to_string(&response).expect("serialize");
+        assert!(!serialized.contains("target_raw"));
+        assert!(!serialized.contains("account_name"));
+        assert!(!serialized.contains("1234567890"));
+        assert!(!serialized.contains("Andrias Se****an Su****o"));
+        assert!(serialized.contains("\"target_masked\":\"***7890\""));
+    }
+}

@@ -38,7 +38,8 @@ use crate::{
     idempotency::{IdempotencyCoordinator, IdempotencyDecision},
     models::{
         ActivityItem, AdminAuditEntry, AdminPackage, AdminProduct, AdminProviderTesterRequest,
-        AdminProviderTesterResponse, BankAccountValidationRequest, CreateApiKeyRequest,
+        AdminProviderTesterResponse, AdminValidationHistoryItem, BankAccountValidationRequest,
+        CreateApiKeyRequest,
         CreatePackageRequest, CreateRateLimitPolicyRequest, EwalletValidationRequest,
         GoogleCallbackQuery, HealthResponse, LocalLoginRequest, ProviderEndpoint,
         ProviderEndpointTestResponse, ProviderValidationRequest, UpdatePackageRequest,
@@ -1678,6 +1679,16 @@ pub(crate) async fn execute_validation(
         },
     };
 
+    // Admin history only (migration 0024): the raw target as submitted
+    // and the holder name exactly as returned upstream. The name is taken
+    // from `outcome` BEFORE the reference move below, and is deliberately
+    // NOT uppercased here — validation_response uppercases its own copy
+    // for the member JSON, while history keeps the upstream form. For
+    // e-wallet NotKyc the provider logic already set account_name to None.
+    let history_account_name = outcome
+        .result
+        .as_ref()
+        .and_then(|result| result.account_name.clone());
     let usage_event = UsageEvent {
         event_id: Uuid::now_v7(),
         request_id: request_id.clone(),
@@ -1690,6 +1701,8 @@ pub(crate) async fn execute_validation(
         occurred_at: Utc::now(),
         target_fingerprint: fingerprint.clone(),
         target_masked: mask_target(request.product, &request.target),
+        target_raw: Some(request.target.clone()),
+        account_name: history_account_name,
         provider_reference: outcome.result.and_then(|result| result.reference),
         provider_latency_ms: outcome.provider_latency_ms,
         rajacek_processing_ms,
@@ -1704,6 +1717,8 @@ pub(crate) async fn execute_validation(
         product: usage_event.product,
         outcome: usage_event.status.as_str().to_owned(),
         target_masked: usage_event.target_masked.clone(),
+        target_raw: usage_event.target_raw.clone(),
+        account_name: usage_event.account_name.clone(),
         provider_reference: usage_event.provider_reference.clone(),
         provider_latency_ms: usage_event.provider_latency_ms,
         rajacek_processing_ms: Some(usage_event.rajacek_processing_ms),
@@ -2150,7 +2165,10 @@ struct ValidationHistoryQuery {
 
 #[derive(Serialize)]
 struct ValidationHistoryResponse {
-    items: Vec<ValidationHistoryItem>,
+    // Admin-only shape: carries target_raw + account_name (migration
+    // 0024). The member endpoint returns ValidationHistoryItem directly
+    // and therefore never serializes those fields.
+    items: Vec<AdminValidationHistoryItem>,
     total: u64,
     limit: u32,
     offset: u32,
@@ -2213,7 +2231,11 @@ async fn admin_validation_history(
     };
     let page = fetch_validation_history(&state, &filters, limit, offset).await;
     Ok(Json(ValidationHistoryResponse {
-        items: page.items,
+        items: page
+            .items
+            .iter()
+            .map(AdminValidationHistoryItem::from)
+            .collect(),
         total: page.total,
         limit,
         offset,
@@ -5695,6 +5717,8 @@ mod admin_export_tests {
             product: crate::models::ValidationProduct::BankAccount,
             outcome: outcome.to_owned(),
             target_masked: "***1234".to_owned(),
+            target_raw: None,
+            account_name: None,
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,
@@ -5927,5 +5951,30 @@ mod admin_export_tests {
         };
         let error = crate::auth::require_admin(&config, &HeaderMap::new()).unwrap_err();
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn admin_history_response_contains_raw_fields_member_shape_does_not() {
+        // Respons admin (ValidationHistoryResponse) memakai bentuk admin;
+        // bentuk member untuk item yang sama tetap tanpa field baru
+        // (dibuktikan juga di models/member; di sini di level respons).
+        let mut item = history_fixture("rv_live_x", "valid", "R9");
+        item.target_raw = Some("1234567890".to_owned());
+        item.account_name = Some("Andrias Se****an Su****o".to_owned());
+        let admin_response = ValidationHistoryResponse {
+            items: vec![crate::models::AdminValidationHistoryItem::from(&item)],
+            total: 1,
+            limit: 25,
+            offset: 0,
+            source: "database",
+            stats: ValidationHistoryStats {
+                hits_last_60s: 0,
+                hits_last_3600s: 0,
+            },
+        };
+        let serialized = serde_json::to_string(&admin_response).expect("serialize");
+        assert!(serialized.contains("\"target_raw\":\"1234567890\""));
+        assert!(serialized.contains("\"account_name\":\"Andrias Se****an Su****o\""));
+        assert!(serialized.contains("\"target_masked\":\"***1234\""));
     }
 }
