@@ -117,8 +117,11 @@ fn needs_seed(record: &ApiKeyRecord) -> bool {
 
 /// Isi bucket awal dari agregat kunci lama bila kunci belum punya bucket
 /// sama sekali (jendela deploy campuran / baris bucket hilang). Dipakai
-/// grant + assign-add sebelum menambah bucket baru, agar saldo lama
-/// tidak hilang saat bucket pertama ditambahkan. Kunci kosong (0/0/tanpa
+/// grant + assign-add untuk kunci LEGACY yang memang belum pernah punya
+/// bucket (satu expiry agregat = satu-satunya tanggal yang diketahui).
+/// TIDAK dipakai lagi oleh safety net load (B8): di sana baris bucket
+/// yang hilang bisa menyembunyikan multi-bucket, jadi seed-nya expiry
+/// NULL + ditandai admin — lihat load_persisted. Kunci kosong (0/0/tanpa
 /// expiry) tidak di-seed — tidak ada yang perlu dipertahankan.
 fn seed_bucket_if_needed(record: &mut ApiKeyRecord, now: chrono::DateTime<Utc>) -> bool {
     if !needs_seed(record) {
@@ -218,6 +221,45 @@ async fn update_bucket_row(
     .map(|result| result.rows_affected())
 }
 
+/// Varian transaksi dari insert_bucket_row (B9): dipakai adjust/assign
+/// agar bucket + agregat commit bersamaan, bukan statement terpisah.
+async fn insert_bucket_row_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    bucket: &QuotaBucket,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(bucket.id.to_string())
+    .bind(bucket.key_id.to_string())
+    .bind(bucket.member_id.map(|id| id.to_string()))
+    .bind(bucket.order_id.map(|id| id.to_string()))
+    .bind(bucket.package_id.map(|id| id.to_string()))
+    .bind(bucket.total_hits)
+    .bind(bucket.remaining_hits)
+    .bind(bucket.expires_at)
+    .bind(bucket.created_at)
+    .execute(&mut **tx)
+    .await
+    .map(|_| ())
+}
+
+/// Varian transaksi dari update_bucket_row (B9).
+async fn update_bucket_row_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::MySql>,
+    bucket: &QuotaBucket,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "UPDATE quota_buckets SET total_hits = ?, remaining_hits = ? WHERE id = ?",
+    )
+    .bind(bucket.total_hits)
+    .bind(bucket.remaining_hits)
+    .bind(bucket.id.to_string())
+    .execute(&mut **tx)
+    .await
+    .map(|_| ())
+}
+
 struct StoreData {
     products: HashMap<Uuid, AdminProduct>,
     packages: HashMap<Uuid, AdminPackage>,
@@ -298,6 +340,12 @@ pub struct AdminStore {
 /// outcome. One pool shared by Invalid and NotFound.
 pub const INVALID_FREE_DAILY_LIMIT: u32 = 100;
 
+/// Durasi bucket baru dari adjust positif tanpa bucket aktif (B7):
+/// 30 hari — durasi standar paket — BUKAN NULL-expiry abadi. Adjust
+/// tidak membawa durasi dari admin, jadi tidak ada expiry lain yang
+/// bisa dipakai; kuota abadi diam-diam adalah bug, bukan fitur.
+pub const ADJUST_NEW_BUCKET_VALID_DAYS: i64 = 30;
+
 /// One quota snapshot for the background writer. Values are absolute, so a
 /// later snapshot always supersedes an earlier one for the same key.
 struct QuotaWrite {
@@ -341,6 +389,9 @@ pub struct QuotaAdjustment {
     pub quota_total_after: u64,
     pub quota_remaining_before: u64,
     pub quota_remaining_after: u64,
+    /// Expiry bucket baru yang dibuat adjust positif tanpa bucket aktif
+    /// (B7: sekarang + 30 hari). None bila tidak ada bucket baru.
+    pub new_bucket_expires_at: Option<chrono::DateTime<Utc>>,
 }
 
 /// Pemakaian tertagih satu hari WIB dari `usage_ledger` (hanya baris
@@ -501,6 +552,24 @@ impl AdminStore {
             .entry(member_id)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()
+    }
+
+    /// Lock serialisasi untuk kunci milik member, dicari lewat prefix.
+    /// None untuk kunci non-member (admin) yang tidak pernah disentuh
+    /// assign/grant/regenerasi. URUTAN LOCK (B6, mengikat): lock member
+    /// SELALU diambil sebelum data lock, tidak pernah sebaliknya —
+    /// semua mutasi kuota (assign, grant, regenerasi, adjust, reserve,
+    /// refund, klaim gratis) mematuhi urutan ini sehingga tidak ada
+    /// deadlock dan tidak ada interleaving yang memotong antrean.
+    async fn member_lock_for_prefix(
+        &self,
+        prefix: &str,
+    ) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        let member_id = {
+            let data = self.data.read().await;
+            data.api_keys.get(prefix).and_then(|record| record.member_id)
+        };
+        member_id.map(|id| self.member_key_lock(id))
     }
 
     pub fn default_rate_limit_per_minute(&self) -> u32 {
@@ -711,21 +780,84 @@ impl AdminStore {
                     }
                 }
                 let now = Utc::now();
-                let mut data = self.data.write().await;
-                for record in data.api_keys.values_mut() {
-                    if let Some(buckets) = by_key.remove(&record.summary.id) {
-                        record.buckets = buckets;
-                        crate::models::sort_buckets_fifo(&mut record.buckets);
-                    } else if record.summary.status != "revoked" {
-                        // Safety net: kunci non-revoked tanpa baris bucket
-                        // (dibuat binary lama di jendela deploy campuran,
-                        // INSERT bucket gagal, atau crash replace di
-                        // antara DELETE dan INSERT) mendapat satu bucket
-                        // dari agregatnya — persis aturan backfill 0023.
-                        // Kunci revoked sengaja TIDAK di-seed: bucket-nya
-                        // sudah pindah ke kunci pengganti.
-                        seed_bucket_if_needed(record, now);
+                // B8/K16: kunci non-revoked tanpa baris bucket mendapat
+                // seed DARURAT — lihat seed_missing_bucket_rows di bawah
+                // untuk alasan expiry NULL + persist-nya. Dikumpulkan di
+                // sini, ditulis ke DB + ditandai SETELAH data lock
+                // dilepas (append_activity butuh data lock juga).
+                let mut seeded: Vec<(String, QuotaBucket)> = Vec::new();
+                {
+                    let mut data = self.data.write().await;
+                    for record in data.api_keys.values_mut() {
+                        if let Some(buckets) = by_key.remove(&record.summary.id) {
+                            record.buckets = buckets;
+                            crate::models::sort_buckets_fifo(&mut record.buckets);
+                        } else if record.summary.status != "revoked" {
+                            // Safety net: kunci non-revoked tanpa baris
+                            // bucket (dibuat binary lama di jendela deploy
+                            // campuran, INSERT bucket gagal, atau crash
+                            // replace di antara DELETE dan INSERT).
+                            // B8: agregat HANYA menyimpan expiry terdekat,
+                            // jadi seed dari agregat akan membunuh sisa
+                            // bucket bertanggal jauh saat tanggal terdekat
+                            // lewat. Seed darurat memakai expiry NULL
+                            // (tidak pernah kedaluwarsa) — member tidak
+                            // kehilangan kuota berbayar karena baris yang
+                            // hilang — dan kunci ditandai untuk peninjauan
+                            // admin di bawah. Kunci revoked sengaja TIDAK
+                            // di-seed: bucket-nya sudah pindah ke kunci
+                            // pengganti.
+                            if needs_seed(record) {
+                                let seed = crate::models::backfill_bucket_for_key(
+                                    record.summary.id,
+                                    record.member_id,
+                                    record.package_id,
+                                    record.quota_total,
+                                    record.remaining_quota,
+                                    None,
+                                    now,
+                                );
+                                record.buckets.push(seed.clone());
+                                seeded.push((record.summary.prefix.clone(), seed));
+                            }
+                        }
                     }
+                }
+                // K16: baris seed DITULIS ke DB (bukan hanya di memori)
+                // — writer bucket tidak lagi warn 0-baris di setiap
+                // gerakan, dan inspeksi DB langsung melihat bucket-nya.
+                // Best-effort dengan INSERT IGNORE implisit lewat
+                // penanganan duplikat: gagal tulis = warn + seed ulang
+                // pada boot berikutnya (agregat tetap tersimpan).
+                for (prefix, bucket) in &seeded {
+                    if let Some(pool) = self.pool() {
+                        if let Err(error) = insert_bucket_row(&pool, bucket).await {
+                            tracing::warn!(?error, prefix = %prefix, "Baris seed bucket darurat gagal ditulis; dicoba lagi pada boot berikutnya");
+                        }
+                    }
+                    tracing::warn!(prefix = %prefix, "Seed bucket darurat (expiry NULL, tanpa batas waktu) karena baris bucket hilang — perlu peninjauan admin");
+                    self.persist_admin_audit(
+                        "sistem",
+                        "Seed bucket darurat",
+                        &format!(
+                            "Kunci {prefix} tanpa baris bucket mendapat seed darurat expiry NULL (sisa dipertahankan, bukan kedaluwarsa tanggal terdekat) — periksa dan koreksi masa aktifnya bila perlu"
+                        ),
+                        Some("api_key"),
+                        Some(&bucket.key_id.to_string()),
+                    )
+                    .await;
+                    self.append_activity(crate::models::ActivityItem {
+                        id: Uuid::now_v7(),
+                        title: "Seed bucket darurat".to_owned(),
+                        detail: format!(
+                            "Kunci {prefix} tanpa baris bucket di-seed expiry NULL — perlu peninjauan admin"
+                        ),
+                        product: None,
+                        status: "info".to_owned(),
+                        occurred_at: Utc::now(),
+                        provider_latency_ms: None,
+                    })
+                    .await;
                 }
                 tracing::info!("Bucket kuota dimuat dari database");
             }
@@ -2444,6 +2576,10 @@ impl AdminStore {
         key_id: Uuid,
         delta: i64,
     ) -> Result<QuotaAdjustment, AppError> {
+        // B6: lock member dulu, baru data lock (urutan mengikat) — adjust
+        // tidak boleh menyalip regenerasi/assign/grant untuk member ini.
+        let member_lock = self.member_key_lock(member_id);
+        let _member_guard = member_lock.lock().await;
         if delta == 0 {
             return Err(AppError::bad_request("Delta kuota tidak boleh 0"));
         }
@@ -2480,11 +2616,13 @@ impl AdminStore {
                 let remainder =
                     crate::models::add_hits_to_buckets(&mut buckets, now, delta as u64);
                 if remainder > 0 {
-                    // Tidak ada bucket aktif sama sekali: bucket baru.
-                    // Expiry = expiry agregat lama bila masih future,
-                    // else tanpa expiry (input adjust tidak membawa
-                    // durasi, jadi tidak ada expiry yang bisa ditebak).
-                    let expiry = record.expires_at.filter(|expiry| *expiry > now);
+                    // B7: tidak ada bucket aktif sama sekali → bucket baru
+                    // dengan expiry = sekarang + 30 hari (durasi standar
+                    // paket). DULU cabang ini memakai expiry agregat lama
+                    // yang pada state konsisten TIDAK PERNAH future,
+                    // sehingga bucket baru SELALU NULL-expiry (kuota
+                    // abadi diam-diam). Cabang future-palsu itu dihapus.
+                    let expiry = now + chrono::Duration::days(ADJUST_NEW_BUCKET_VALID_DAYS);
                     new_bucket = Some(QuotaBucket {
                         id: Uuid::now_v7(),
                         key_id,
@@ -2493,7 +2631,7 @@ impl AdminStore {
                         package_id: record.package_id,
                         total_hits: remainder,
                         remaining_hits: remainder,
-                        expires_at: expiry,
+                        expires_at: Some(expiry),
                         created_at: now,
                     });
                     buckets.push(new_bucket.clone().expect("bucket baru dibuat"));
@@ -2504,47 +2642,58 @@ impl AdminStore {
                         AppError::bad_request("Penyesuaian membuat sisa kuota negatif")
                     })?;
             }
-            let (new_total, new_remaining, _) =
+            let (new_total, new_remaining, new_expiry) =
                 crate::models::bucket_aggregate(&buckets, now);
             let prefix = record.summary.prefix.clone();
+            // B9: bucket + agregat dalam SATU transaksi DB. Dulu INSERT
+            // bucket baru, loop update, lalu UPDATE agregat adalah
+            // statement terpisah — gagal di tengah meninggalkan bucket
+            // yatim yang mengembang setelah restart (retry membuat UUID
+            // baru lagi). Kini gagal = rollback penuh, memori tidak
+            // berubah (record.buckets baru diganti setelah commit).
             if let Some(pool) = self.pool() {
-                // Baris bucket dulu (nilai absolut = idempotent saat
-                // retry), lalu agregat absolut. Guard status tetap ada;
-                // guard lantai sisa tidak dipakai di sini karena lantai
-                // sudah ditegakkan pada data bucket live di atas (nilai
-                // agregat database bisa basi bila expiry lewat tanpa
-                // mutasi, sehingga guard SQL bisa menolak adjust yang sah).
+                let mut tx = pool.begin().await.map_err(|error| {
+                    tracing::warn!(?error, prefix = %prefix, "Gagal memulai transaksi adjust");
+                    AppError::internal("Adjust kuota tidak dapat disimpan")
+                })?;
                 if let Some(bucket) = &new_bucket {
-                    insert_bucket_row(&pool, bucket).await.map_err(|error| {
+                    insert_bucket_row_tx(&mut tx, bucket).await.map_err(|error| {
                         tracing::warn!(?error, prefix = %prefix, "Gagal menulis bucket baru saat adjust");
                         AppError::internal("Adjust kuota tidak dapat disimpan")
                     })?;
                 }
                 for bucket in &buckets {
-                    update_bucket_row(&pool, bucket).await.map_err(|error| {
+                    update_bucket_row_tx(&mut tx, bucket).await.map_err(|error| {
                         tracing::warn!(?error, prefix = %prefix, "Gagal menulis bucket saat adjust");
                         AppError::internal("Adjust kuota tidak dapat disimpan")
                     })?;
                 }
                 let updated = sqlx::query(
-                    "UPDATE admin_api_keys SET quota_remaining = ?, quota_total = ? WHERE id = ? AND member_id = ? AND status = 'active'",
+                    "UPDATE admin_api_keys SET quota_remaining = ?, quota_total = ?, expires_at = ? WHERE id = ? AND member_id = ? AND status = 'active'",
                 )
                 .bind(new_remaining)
                 .bind(new_total)
+                .bind(new_expiry)
                 .bind(key_id.to_string())
                 .bind(member_id.to_string())
-                .execute(&pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|error| {
                     tracing::warn!(?error, prefix = %prefix, "Gagal menulis adjust kuota ke database");
                     AppError::internal("Adjust kuota tidak dapat disimpan")
                 })?;
                 if updated.rows_affected() == 0 {
+                    tx.rollback().await.ok();
                     return Err(AppError::conflict(
                         "Kunci berubah selama adjust; muat ulang dan coba lagi",
                     ));
                 }
+                tx.commit().await.map_err(|error| {
+                    tracing::warn!(?error, prefix = %prefix, "Gagal commit adjust kuota");
+                    AppError::internal("Adjust kuota tidak dapat disimpan")
+                })?;
             }
+            let new_bucket_expiry = new_bucket.as_ref().and_then(|bucket| bucket.expires_at);
             record.buckets = buckets;
             // Sinkronisasi agregat juga menyegarkan expiry agregat ke
             // nilai turunan bucket (koreksi tampilan, bukan perubahan
@@ -2560,6 +2709,7 @@ impl AdminStore {
                 quota_total_after: new_total,
                 quota_remaining_before: before_remaining,
                 quota_remaining_after: new_remaining,
+                new_bucket_expires_at: new_bucket_expiry,
             });
         }
         let (new_total, new_remaining) =
@@ -2620,6 +2770,7 @@ impl AdminStore {
             quota_total_after: new_total,
             quota_remaining_before,
             quota_remaining_after: new_remaining,
+            new_bucket_expires_at: None,
         })
     }
 
@@ -2741,28 +2892,40 @@ impl AdminStore {
         package_id: Option<Uuid>,
         plan_kind: &str,
     ) -> Result<(AdminApiKeySummary, u64, Vec<QuotaBucket>), AppError> {
-        // Compute the new record without mutating yet.
-
-        let mut record = {
-            let data = self.data.read().await;
-            let record = data
-                .api_keys
-                .values()
-                .filter(|record| record.member_id == Some(member_id))
-                .max_by_key(|record| {
-                    (
-                        record.summary.status != "revoked",
-                        record.summary.created_at,
-                    )
-                })
-                .ok_or_else(|| AppError::not_found("Member belum memiliki kunci API"))?;
-            if record.summary.status == "revoked" {
-                return Err(AppError::conflict(
-                    "Kunci member sudah dicabut; regenerasi kunci terlebih dahulu",
-                ));
-            }
-            record.clone()
-        };
+        // B6/B9: SELURUH assign berjalan di bawah lock member + data
+        // write lock — hitung → tulis DB (transaksi) → swap memori dalam
+        // satu bagian kritis. DULU record di-clone di bawah read lock,
+        // DB ditulis tanpa lock, baru swap di akhir: grant yang commit
+        // di tengah assign-replace ikut ter-DELETE, reserve in-flight
+        // bisa tertimpa swap, dan dua assign bersamaan bisa swap
+        // berurutan terbalik dari urutan DB-nya. Kini tidak ada jalur
+        // grant/reserve/adjust/regenerasi yang bisa menyalip assign.
+        // Mode divalidasi dulu agar input buruk tidak menahan lock.
+        if mode != "replace" && mode != "add" {
+            return Err(AppError::bad_request("Mode paket tidak dikenal"));
+        }
+        let member_lock = self.member_key_lock(member_id);
+        let _member_guard = member_lock.lock().await;
+        let mut data = self.data.write().await;
+        let stored = data
+            .api_keys
+            .values_mut()
+            .filter(|record| record.member_id == Some(member_id))
+            .max_by_key(|record| {
+                (
+                    record.summary.status != "revoked",
+                    record.summary.created_at,
+                )
+            })
+            .ok_or_else(|| AppError::not_found("Member belum memiliki kunci API"))?;
+        if stored.summary.status == "revoked" {
+            return Err(AppError::conflict(
+                "Kunci member sudah dicabut; regenerasi kunci terlebih dahulu",
+            ));
+        }
+        // Kerja di atas klon: gagal DB = memori tidak berubah sama
+        // sekali (B9); hanya setelah commit klon ditulis kembali.
+        let mut record = stored.clone();
         // K18: potret bucket lama SEBELUM mode replace menghapusnya.
         // Potret diambil dari record yang sama yang akan di-DELETE dari
         // database di bawah, jadi isinya persis baris yang musnah —
@@ -2801,7 +2964,7 @@ impl AdminStore {
                 }
                 record.buckets.push(new_bucket.clone());
             }
-            _ => return Err(AppError::bad_request("Mode paket tidak dikenal")),
+            _ => unreachable!("mode sudah divalidasi di atas"),
         }
         record.sync_aggregates_from_buckets(now);
         if let Some(rate) = rate_limit_per_minute {
@@ -2809,67 +2972,80 @@ impl AdminStore {
         }
         record.package_id = package_id;
         record.summary.package_id = package_id;
-        // Database FIRST (audit 2026-10-25, B5): a failed persist now fails
-        // the assign instead of diverging silently, and a crash between the
-        // database write and the memory update reloads the assigned values
-        // on startup. Only then apply the mutation and enqueue the quota
-        // snapshot under the same lock, so the writer applies snapshots in
-        // true order (an older queued snapshot can no longer land after
-        // the assign and erase it from the database).
-        // Urutan tulis database: baris bucket DULU, baru agregat kunci.
-        // Bila crash di antara keduanya, load synthesis membangun ulang
-        // bucket dari agregat baru — hasil akhirnya tetap assign yang
-        // dimaksud, bukan saldo ganda/hilang.
+        // B9: DELETE + INSERT bucket + agregat kunci + plan_kind member
+        // dalam SATU transaksi. Dulu statement terpisah: crash di antara
+        // DELETE dan INSERT meninggalkan kunci tanpa bucket (lalu
+        // di-seed runtuh saat restart, B8), dan gagal persist setelah
+        // DELETE membuat DB dan memori divergen.
         if let Some(pool) = self.pool() {
-            match mode {
-                "replace" => {
-                    sqlx::query("DELETE FROM quota_buckets WHERE key_id = ?")
-                        .bind(record.summary.id.to_string())
-                        .execute(&pool)
-                        .await
-                        .map_err(|error| {
-                            tracing::warn!(?error, "Gagal menghapus bucket lama saat assign-replace");
-                            AppError::internal("Assign paket tidak dapat disimpan")
-                        })?;
-                    insert_bucket_row(&pool, &new_bucket).await.map_err(|error| {
-                        tracing::warn!(?error, "Gagal menulis bucket baru saat assign-replace");
+            let mut tx = pool.begin().await.map_err(|error| {
+                tracing::warn!(?error, "Gagal memulai transaksi assign");
+                AppError::internal("Assign paket tidak dapat disimpan")
+            })?;
+            if mode == "replace" {
+                sqlx::query("DELETE FROM quota_buckets WHERE key_id = ?")
+                    .bind(record.summary.id.to_string())
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(?error, "Gagal menghapus bucket lama saat assign-replace");
                         AppError::internal("Assign paket tidak dapat disimpan")
                     })?;
-                }
-                "add" => {
-                    if let Some(seed) = &seeded_bucket {
-                        insert_bucket_row(&pool, seed).await.map_err(|error| {
-                            tracing::warn!(?error, "Gagal menulis bucket seed saat assign-add");
-                            AppError::internal("Assign paket tidak dapat disimpan")
-                        })?;
-                    }
-                    insert_bucket_row(&pool, &new_bucket).await.map_err(|error| {
-                        tracing::warn!(?error, "Gagal menulis bucket baru saat assign-add");
-                        AppError::internal("Assign paket tidak dapat disimpan")
-                    })?;
-                }
-                _ => unreachable!("mode sudah divalidasi di atas"),
             }
-        }
-        self.persist_key(&record).await?;
-        {
-            let mut data = self.data.write().await;
-            let Some(stored) = data.api_keys.get_mut(&record.summary.prefix) else {
-                // The key vanished from memory mid-assign (concurrent admin
-                // delete): the database already holds the assign, so a
-                // restart reconciles; report the conflict loudly instead of
-                // pretending the in-memory state matches.
+            if let Some(seed) = &seeded_bucket {
+                insert_bucket_row_tx(&mut tx, seed).await.map_err(|error| {
+                    tracing::warn!(?error, "Gagal menulis bucket seed saat assign-add");
+                    AppError::internal("Assign paket tidak dapat disimpan")
+                })?;
+            }
+            insert_bucket_row_tx(&mut tx, &new_bucket).await.map_err(|error| {
+                tracing::warn!(?error, "Gagal menulis bucket baru saat assign");
+                AppError::internal("Assign paket tidak dapat disimpan")
+            })?;
+            let updated = sqlx::query(
+                "UPDATE admin_api_keys SET quota_total = ?, quota_remaining = ?, expires_at = ?, rate_limit_per_minute = ?, package_id = ? WHERE id = ? AND member_id = ?",
+            )
+            .bind(record.quota_total)
+            .bind(record.remaining_quota)
+            .bind(record.expires_at)
+            .bind(record.summary.rate_limit_per_minute)
+            .bind(package_id.map(|id| id.to_string()))
+            .bind(record.summary.id.to_string())
+            .bind(member_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                tracing::warn!(?error, "Gagal menulis agregat kunci saat assign");
+                AppError::internal("Assign paket tidak dapat disimpan")
+            })?;
+            if updated.rows_affected() == 0 {
+                tx.rollback().await.ok();
                 return Err(AppError::conflict(
                     "Kunci member berubah selama assign; muat ulang dan coba lagi",
                 ));
-            };
-            *stored = record.clone();
-            self.persist_key_quota(&record.summary.prefix, record.remaining_quota)
-                .await;
+            }
+            sqlx::query("UPDATE members SET plan_kind = ? WHERE id = ?")
+                .bind(plan_kind)
+                .bind(member_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(?error, "Gagal memperbarui jenis paket member saat assign");
+                    AppError::internal("Assign paket tidak dapat disimpan")
+                })?;
+            tx.commit().await.map_err(|error| {
+                tracing::warn!(?error, "Gagal commit assign");
+                AppError::internal("Assign paket tidak dapat disimpan")
+            })?;
         }
-        self.set_member_plan_kind(member_id, plan_kind).await?;
-        Ok((record.summary, record.remaining_quota, deleted_buckets))
-
+        // Commit memori: swap di bawah data lock yang sama, lalu
+        // snapshot kuota lewat writer FIFO (urutan terjaga).
+        let prefix = record.summary.prefix.clone();
+        let remaining = record.remaining_quota;
+        let summary = record.summary.clone();
+        *stored = record;
+        self.persist_key_quota(&prefix, remaining).await;
+        Ok((summary, remaining, deleted_buckets))
     }
 
     /// Hasil grant pembelian paket yang sudah dibayar (atomik).
@@ -2882,6 +3058,13 @@ impl AdminStore {
         package_rate: u32,
         package_id: Uuid,
     ) -> Result<GrantOutcome, AppError> {
+        // B6: grant memegang lock member selama fungsi berjalan — tanpa
+        // ini, regenerasi (yang memegang lock itu) bisa menyalip grant:
+        // grant mendarat di kunci pengganti di antara penerbitan dan
+        // pemindahan bucket, lalu terbuang dari memori sampai restart.
+        // Urutan mengikat: lock member dulu, baru data lock di bawah.
+        let member_lock = self.member_key_lock(member_id);
+        let _member_guard = member_lock.lock().await;
         let Some(pool) = self.pool() else {
             return Err(AppError::internal(
                 "Database tidak tersedia untuk grant paket",
@@ -3030,8 +3213,32 @@ impl AdminStore {
                 )),
             };
         }
-        // Bucket baru (+ seed bila ada) masuk transaksi yang sama:
-        // gagal di sini = rollback total, bukan grant tanpa bucket.
+        // B14 (defense-in-depth, di dalam transaksi grant — baris order
+        // sudah terkunci oleh UPDATE di atas, jadi refund-record yang
+        // commit bersamaan tidak bisa menyalip cek ini): order yang
+        // SUDAH di-refund penuh tidak boleh di-grant lewat jalur mana
+        // pun (verify maupun resolve) — member akan menerima uang
+        // kembali + kuota untuk order yang sama. Refund parsial (<
+        // nominal) tidak memblokir grant; penolakan eksplisit dengan
+        // pesan jelas terjadi di resolve (cek awal), di sini cukup
+        // konflik agar grant_row memarkir order ke needs_review, bukan
+        // meng-grant.
+        let (order_amount, refund_total): (u64, i64) = sqlx::query_as(
+            "SELECT o.amount_idr, CAST(COALESCE(SUM(r.amount_idr), 0) AS SIGNED) \
+             FROM package_orders o LEFT JOIN refund_records r ON r.order_id = o.id \
+             WHERE o.id = ? GROUP BY o.id",
+        )
+        .bind(order_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| AppError::internal("Total refund order tidak dapat dibaca"))?
+        .unwrap_or((0, 0));
+        if refund_total > 0 && (refund_total as u64) >= order_amount {
+            tx.rollback().await.ok();
+            return Err(AppError::conflict(
+                "Order sudah di-refund penuh; grant ditolak",
+            ));
+        }
         for bucket in seeded_bucket.iter().chain(std::iter::once(&new_bucket)) {
             sqlx::query(
                 "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -3180,14 +3387,26 @@ impl AdminStore {
     ) -> Result<CreatedApiKey, AppError> {
         let _key_lock = self.member_key_lock(member.id);
         let _provision_guard = _key_lock.lock().await;
-        // Capture the pre-revoke status: a disabled member's replacement key
-        // must stay disabled (issuance always creates active keys, which
-        // would otherwise silently reactivate a suspended account).
-        let mut previous_status = String::new();
+        // K32 — all-or-nothing, dengan titik komit tunggal:
+        // 1. Klon kunci lama TANPA mutasi apa pun (bukan revoke di
+        //    memori dulu seperti dulu — dulu persist/issue yang gagal
+        //    sesudahnya meninggalkan member dengan kunci revoked saja
+        //    dan kuota terdampar, karena login berikutnya menerbitkan
+        //    kunci kosong tanpa memindahkan bucket lama).
+        // 2. Terbitkan kunci pengganti kuota 0 (BUKAN kuota lama: issue
+        //    dengan kuota lama membuat bucket segar yang harus dihapus
+        //    lagi saat bucket lama dipindah). Selama jendela ini kunci
+        //    lama masih aktif penuh di memori + DB; grant/assign/adjust/
+        //    reserve/refund member ini terblokir lock member, jadi tidak
+        //    ada mutasi kuota yang bisa menyalip komit di bawah.
+        // 3. Komit: SATU transaksi DB (revoke lama + pindah baris bucket
+        //    + agregat kunci baru) lalu SATU swap memori di bawah data
+        //    lock. Gagal di langkah 3 = kunci baru dihapus (memori + DB)
+        //    dan kunci lama UTUH — tidak ada keadaan "revoked saja".
         let old = {
-            let mut data = self.data.write().await;
+            let data = self.data.read().await;
             data.api_keys
-                .values_mut()
+                .values()
                 .filter(|record| record.member_id == Some(member.id))
                 .max_by_key(|record| {
                     (
@@ -3195,21 +3414,12 @@ impl AdminStore {
                         record.summary.created_at,
                     )
                 })
-                .map(|record| {
-                    previous_status = record.summary.status.clone();
-                    record.summary.status = "revoked".to_owned();
-                    record.clone()
-                })
+                .cloned()
         };
         let Some(old) = old else {
             return Err(AppError::not_found("Member belum memiliki kunci API"));
         };
-        self.persist_key(&old).await?;
-        // Terbitkan kunci pengganti dengan kuota 0 (BUKAN old.quota_total):
-        // issue dengan kuota lama akan membuat satu bucket segar (total
-        // lama, expiry lama) yang lalu harus dihapus lagi saat bucket
-        // lama dipindah — jendela ganda yang tidak perlu. Kuota + bucket
-        // diatur dari kunci lama di blok adjusted di bawah.
+        let previous_status = old.summary.status.clone();
         let mut created = self
             .issue_api_key(
                 old.summary.name.clone(),
@@ -3221,103 +3431,132 @@ impl AdminStore {
                 Some(member.id),
             )
             .await?;
-        // Pindahkan saldo ke kunci baru (bucket ikut pindah — bucket
-        // dimiliki KEY, dan regenerasi memindahkan kepemilikan itu) dan
-        // pertahankan status sebelumnya (kunci disabled yang diganti
-        // tetap disabled).
-        let adjusted = {
-            let mut data = self.data.write().await;
-            let mut result = None;
-            if let Some(record) = data.api_keys.get_mut(&created.key.prefix) {
-                if !old.buckets.is_empty() {
-                    // Bucket pindah dengan key_id ditulis ulang ke kunci
-                    // baru; agregat dihitung ulang dari bucket yang
-                    // pindah (sisa AKTIF — sisa bucket kedaluwarsa mati
-                    // bersama kunci lama, konsisten dengan semantik
-                    // bucket; bucket segar dari issue dibuang).
-                    let now = Utc::now();
-                    record.buckets = old
-                        .buckets
-                        .iter()
-                        .map(|bucket| {
-                            let mut moved = bucket.clone();
-                            moved.key_id = record.summary.id;
-                            moved
-                        })
-                        .collect();
-                    record.sync_aggregates_from_buckets(now);
-                } else {
-                    // Kunci legacy tanpa bucket: pulihkan agregat lama
-                    // persis (dulu: remaining lama dibatasi total baru —
-                    // total baru kini 0 dari issue, jadi pemulihan
-                    // eksplisit ini wajib agar saldo tidak lenyap).
-                    record.quota_total = old.quota_total;
-                    record.remaining_quota = old.remaining_quota;
-                    record.expires_at = old.expires_at;
-                    record.summary.quota_total = old.quota_total;
-                    record.summary.expires_at = old.expires_at;
+        // Bangun record pengganti dari klon lama (bucket ikut pindah —
+        // bucket dimiliki KEY; agregat dihitung ulang dari bucket yang
+        // pindah; kunci legacy tanpa bucket memulihkan agregat lama
+        // persis). Status sebelumnya dipertahankan (kunci disabled yang
+        // diganti tetap disabled, bukan reaktivasi diam-diam).
+        let now = Utc::now();
+        let mut new_record = {
+            let data = self.data.read().await;
+            data.api_keys
+                .get(&created.key.prefix)
+                .cloned()
+                .ok_or_else(|| AppError::internal("Kunci pengganti tidak ditemukan"))?
+        };
+        if !old.buckets.is_empty() {
+            new_record.buckets = old
+                .buckets
+                .iter()
+                .map(|bucket| {
+                    let mut moved = bucket.clone();
+                    moved.key_id = new_record.summary.id;
+                    moved
+                })
+                .collect();
+            new_record.sync_aggregates_from_buckets(now);
+        } else {
+            new_record.quota_total = old.quota_total;
+            new_record.remaining_quota = old.remaining_quota;
+            new_record.expires_at = old.expires_at;
+            new_record.summary.quota_total = old.quota_total;
+            new_record.summary.expires_at = old.expires_at;
+        }
+        if previous_status == "disabled" {
+            new_record.summary.status = "disabled".to_owned();
+        }
+        new_record.package_id = old.package_id;
+        new_record.summary.package_id = old.package_id;
+        let moved_buckets = new_record.buckets.clone();
+        // Transaksi komit (bila ada pool). Tanpa pool (mode memori/dev),
+        // swap memori di bawah adalah komitnya — tidak ada langkah DB
+        // yang bisa gagal di tengah.
+        if let Some(pool) = self.pool() {
+            let commit = async {
+                let mut tx = pool.begin().await?;
+                sqlx::query("UPDATE admin_api_keys SET status = 'revoked' WHERE id = ?")
+                    .bind(old.summary.id.to_string())
+                    .execute(&mut *tx)
+                    .await?;
+                sqlx::query("DELETE FROM quota_buckets WHERE key_id = ?")
+                    .bind(old.summary.id.to_string())
+                    .execute(&mut *tx)
+                    .await?;
+                for bucket in &moved_buckets {
+                    sqlx::query(
+                        "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    )
+                    .bind(bucket.id.to_string())
+                    .bind(bucket.key_id.to_string())
+                    .bind(bucket.member_id.map(|id| id.to_string()))
+                    .bind(bucket.order_id.map(|id| id.to_string()))
+                    .bind(bucket.package_id.map(|id| id.to_string()))
+                    .bind(bucket.total_hits)
+                    .bind(bucket.remaining_hits)
+                    .bind(bucket.expires_at)
+                    .bind(bucket.created_at)
+                    .execute(&mut *tx)
+                    .await?;
                 }
-                if previous_status == "disabled" {
-                    record.summary.status = "disabled".to_owned();
-                }
-                result = Some(record.clone());
+                sqlx::query(
+                    "UPDATE admin_api_keys SET quota_total = ?, quota_remaining = ?, expires_at = ?, status = ?, package_id = ? WHERE id = ?",
+                )
+                .bind(new_record.quota_total)
+                .bind(new_record.remaining_quota)
+                .bind(new_record.expires_at)
+                .bind(&new_record.summary.status)
+                .bind(new_record.package_id.map(|id| id.to_string()))
+                .bind(new_record.summary.id.to_string())
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await
             }
-            // Kunci lama kehilangan bucket-nya (sudah pindah); agregat
-            // lamanya tetap sebagai tampilan historis lewat jalur legacy
-            // (buckets kosong = fallback nilai tersimpan).
+            .await;
+            if let Err(error) = commit {
+                // Rollback: kunci baru dihapus total, kunci lama utuh.
+                // Transaksi di atas sudah rollback otomatis (drop tanpa
+                // commit); yang tersisa hanya baris kunci baru dari
+                // issue_api_key + entri memorinya — keduanya dihapus di
+                // sini (best-effort; gagal hapus = warn keras, admin
+                // bisa menghapus kunci pengganti yatim itu dari panel).
+                tracing::warn!(?error, "Regenerasi gagal di komit; kunci baru dihapus dan kunci lama dipertahankan");
+                {
+                    let mut data = self.data.write().await;
+                    data.api_keys.remove(&created.key.prefix);
+                }
+                if let Err(error) = sqlx::query("DELETE FROM quota_buckets WHERE key_id = ?")
+                    .bind(created.key.id.to_string())
+                    .execute(&pool)
+                    .await
+                {
+                    tracing::warn!(?error, "Gagal menghapus baris bucket kunci pengganti yatim");
+                }
+                if let Err(error) = sqlx::query("DELETE FROM admin_api_keys WHERE id = ?")
+                    .bind(created.key.id.to_string())
+                    .execute(&pool)
+                    .await
+                {
+                    tracing::warn!(?error, "Gagal menghapus baris kunci pengganti yatim; hapus manual dari panel");
+                }
+                return Err(AppError::internal(
+                    "Regenerasi kunci tidak dapat disimpan; kunci lama tetap berlaku",
+                ));
+            }
+        }
+        // Swap memori — satu-satunya mutasi kunci lama dalam fungsi ini.
+        {
+            let mut data = self.data.write().await;
             if let Some(old_record) = data.api_keys.get_mut(&old.summary.prefix) {
+                old_record.summary.status = "revoked".to_owned();
                 old_record.buckets.clear();
             }
-            result
-        };
-        if let Some(record) = adjusted {
-            // A failed adjust persist must fail the whole regeneration: a
-            // disabled member's replacement key must never stay active in
-            // the database (it would reactivate the account on restart).
-            self.persist_key(&record).await?;
-            // Pindah baris bucket di database dalam satu transaksi
-            // (hapus baris kunci lama, tulis baris yang pindah). Gagal
-            // di sini = warn saja, bukan gagal total: kunci pengganti
-            // sudah sah + agregatnya sudah tersimpan, dan safety net
-            // load (synthesis) membangun ulang bucket-nya dari agregat
-            // saat restart; baris kunci lama yang tertinggal tidak bisa
-            // dibelanjakan karena kunci lama sudah revoked.
-            if let Some(pool) = self.pool() {
-                let moved = record.buckets.clone();
-                let old_id = old.summary.id.to_string();
-                let move_result = async {
-                    let mut tx = pool.begin().await?;
-                    sqlx::query("DELETE FROM quota_buckets WHERE key_id = ?")
-                        .bind(&old_id)
-                        .execute(&mut *tx)
-                        .await?;
-                    for bucket in &moved {
-                        sqlx::query(
-                            "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        )
-                        .bind(bucket.id.to_string())
-                        .bind(bucket.key_id.to_string())
-                        .bind(bucket.member_id.map(|id| id.to_string()))
-                        .bind(bucket.order_id.map(|id| id.to_string()))
-                        .bind(bucket.package_id.map(|id| id.to_string()))
-                        .bind(bucket.total_hits)
-                        .bind(bucket.remaining_hits)
-                        .bind(bucket.expires_at)
-                        .bind(bucket.created_at)
-                        .execute(&mut *tx)
-                        .await?;
-                    }
-                    tx.commit().await
-                }
-                .await;
-                if let Err(error) = move_result {
-                    tracing::warn!(?error, "Gagal memindahkan baris bucket saat regenerasi; dipulihkan synthesis saat load");
-                }
+            if let Some(record) = data.api_keys.get_mut(&created.key.prefix) {
+                *record = new_record.clone();
             }
-            // The response must reflect the adjusted record (preserved
-            // status/balance), not the just-issued snapshot.
-            created.key = record.summary;
         }
+        // Respons mencerminkan record yang sudah disesuaikan (status /
+        // saldo yang dipertahankan), bukan snapshot issue.
+        created.key = new_record.summary;
         Ok(created)
     }
 
@@ -3721,6 +3960,13 @@ impl AdminStore {
         &self,
         prefix: &str,
     ) -> Result<(u64, Option<Uuid>), AppError> {
+        // B6: lock member dulu (urutan mengikat) — reserve tidak boleh
+        // menyalip regenerasi/assign/grant untuk member ini.
+        let member_lock = self.member_lock_for_prefix(prefix).await;
+        let _member_guard = match &member_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let mut data = self.data.write().await;
         let record = data
             .api_keys
@@ -3797,6 +4043,12 @@ impl AdminStore {
     /// (kunci legacy) atau fallback bucket FIFO-pertama bila kunci
     /// ternyata ber-bucket.
     pub async fn refund_quota(&self, prefix: &str, bucket_id: Option<Uuid>) {
+        // B6: lock member dulu (urutan mengikat), seperti reserve.
+        let member_lock = self.member_lock_for_prefix(prefix).await;
+        let _member_guard = match &member_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
         let mut data = self.data.write().await;
         let now = Utc::now();
         let movement = match data.api_keys.get_mut(prefix) {
@@ -3807,7 +4059,14 @@ impl AdminStore {
                             record.sync_aggregates_from_buckets(now);
                             Some((record.remaining_quota, Some((id, bucket_remaining))))
                         }
-                        None => None,
+                        // K1/K13: refund hilang — tidak ada bucket aktif
+                        // yang punya ruang. Dicatat keras di sini (satu
+                        // -satunya tempat kehilangan ini terlihat), bukan
+                        // dikreditkan diam-diam ke bucket mati/penuh.
+                        None => {
+                            tracing::warn!(prefix = %prefix, bucket_id = ?bucket_id, "Refund kuota hilang: tidak ada bucket aktif yang punya ruang — 1 hit tidak dikembalikan ke bucket mana pun");
+                            None
+                        }
                     }
                 } else {
                     // Jalur legacy: cap di total agregat, seperti dulu.
@@ -3886,22 +4145,196 @@ impl AdminStore {
         }
     }
 
+    /// Klaim slot gratis + refund sebagai SATU langkah atomik (K2).
+    /// Menggantikan pasangan claim-lalu-refund di execute_validation.
+    /// Dulu keduanya adalah dua operasi terpisah: proses yang mati
+    /// persis di antaranya membuat member kehilangan 1 hit DAN 1 slot
+    /// gratis sekaligus (slot ter-klaim di DB, refund memori tak pernah
+    /// terjadi). Kini, dengan pool: klaim pool + snapshot kuota refund
+    /// ditulis dalam SATU transaksi DB, dan mutasi memori diterapkan
+    /// bersamaan di bawah data lock — commit transaksi berarti kedua
+    /// sisi mendarat, gagal/rollback berarti keduanya batal (memori
+    /// dikembalikan dari snapshot). Proses yang mati SEBELUM commit
+    /// tidak menghilangkan keduanya: restart memuat state pra-klaim
+    /// (slot belum terpakai; hit reserve tetap terpotong sampai refund
+    /// berikutnya — rugi maksimal 1 hit, bukan 1 hit + 1 slot).
+    /// Mengembalikan true bila hasil GRATIS (slot terpakai + refund
+    /// mendarat), false bila pool habis, refund tidak bisa mendarat
+    /// (tidak ada bucket aktif punya ruang — slot TIDAK dikonsumsi
+    /// untuk hasil yang tetap tertagih), atau database gagal
+    /// (fail-closed ke penagihan, seperti klaim lama).
+    pub async fn claim_free_slot_with_refund(
+        &self,
+        prefix: &str,
+        bucket_id: Option<Uuid>,
+        wib_day: chrono::NaiveDate,
+    ) -> bool {
+        let member_lock = self.member_lock_for_prefix(prefix).await;
+        let _member_guard = match &member_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        let mut data = self.data.write().await;
+        let now = Utc::now();
+        let Some(record) = data.api_keys.get_mut(prefix) else {
+            return false;
+        };
+        // Snapshot untuk revert bila klaim gagal sesudah refund memori.
+        let buckets_before = record.buckets.clone();
+        let remaining_before = record.remaining_quota;
+        let total_before = record.quota_total;
+        let expires_before = record.expires_at;
+        let summary_total_before = record.summary.quota_total;
+        let summary_expires_before = record.summary.expires_at;
+        let bucket_delta: Option<(Uuid, u64)>;
+        if !record.buckets.is_empty() {
+            match crate::models::refund_bucket(&mut record.buckets, now, bucket_id) {
+                Some(delta) => {
+                    record.sync_aggregates_from_buckets(now);
+                    bucket_delta = Some(delta);
+                }
+                None => {
+                    tracing::warn!(prefix = %prefix, "Klaim gratis dibatalkan: refund tidak bisa mendarat (tidak ada bucket aktif punya ruang) — slot tidak dikonsumsi");
+                    return false;
+                }
+            }
+        } else if record.remaining_quota < record.quota_total {
+            record.remaining_quota =
+                record.remaining_quota.saturating_add(1).min(record.quota_total);
+            bucket_delta = None;
+        } else {
+            // Refund legacy akan no-op karena cap total: jangan konsumsi
+            // slot untuk hasil yang tidak benar-benar di-refund.
+            return false;
+        }
+        let new_remaining = record.remaining_quota;
+        if let Some(pool) = self.pool() {
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(error) => {
+                    tracing::warn!(?error, prefix = %prefix, "Klaim gratis gagal (transaksi tidak dapat dimulai); hasil ditagih");
+                    record.buckets = buckets_before;
+                    record.remaining_quota = remaining_before;
+                    record.quota_total = total_before;
+                    record.expires_at = expires_before;
+                    record.summary.quota_total = summary_total_before;
+                    record.summary.expires_at = summary_expires_before;
+                    return false;
+                }
+            };
+            let step = async {
+                sqlx::query(
+                    "INSERT IGNORE INTO invalid_free_daily (api_key_prefix, wib_date, free_used) VALUES (?, ?, 0)",
+                )
+                .bind(prefix)
+                .bind(wib_day)
+                .execute(&mut *tx)
+                .await?;
+                let claimed = sqlx::query(
+                    "UPDATE invalid_free_daily SET free_used = free_used + 1 WHERE api_key_prefix = ? AND wib_date = ? AND free_used < ?",
+                )
+                .bind(prefix)
+                .bind(wib_day)
+                .bind(INVALID_FREE_DAILY_LIMIT)
+                .execute(&mut *tx)
+                .await?;
+                if claimed.rows_affected() != 1 {
+                    return Err(sqlx::Error::RowNotFound);
+                }
+                sqlx::query(
+                    "UPDATE admin_api_keys SET quota_remaining = ? WHERE prefix = ?",
+                )
+                .bind(new_remaining)
+                .bind(prefix)
+                .execute(&mut *tx)
+                .await?;
+                if let Some((bucket_id, bucket_remaining)) = bucket_delta {
+                    sqlx::query(
+                        "UPDATE quota_buckets SET remaining_hits = ? WHERE id = ?",
+                    )
+                    .bind(bucket_remaining)
+                    .bind(bucket_id.to_string())
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await
+            }
+            .await;
+            if let Err(error) = step {
+                // Pool habis (RowNotFound dari guard) maupun galat DB:
+                // rollback otomatis (tx drop tanpa commit) + revert
+                // memori — pasangan ini batal total, bukan setengah.
+                tracing::warn!(?error, prefix = %prefix, "Klaim gratis batal (pool habis / galat DB); hasil ditagih, memori dikembalikan");
+                record.buckets = buckets_before;
+                record.remaining_quota = remaining_before;
+                record.quota_total = total_before;
+                record.expires_at = expires_before;
+                record.summary.quota_total = summary_total_before;
+                record.summary.expires_at = summary_expires_before;
+                return false;
+            }
+        } else {
+            let mut map = self
+                .invalid_free_fallback
+                .lock()
+                .expect("invalid free map");
+            let used = map.entry((prefix.to_owned(), wib_day)).or_insert(0);
+            if *used >= INVALID_FREE_DAILY_LIMIT {
+                record.buckets = buckets_before;
+                record.remaining_quota = remaining_before;
+                record.quota_total = total_before;
+                record.expires_at = expires_before;
+                record.summary.quota_total = summary_total_before;
+                record.summary.expires_at = summary_expires_before;
+                return false;
+            }
+            *used += 1;
+        }
+        // Snapshot writer dengan nilai yang sama (FIFO setelah snapshot
+        // reserve) — idempotent terhadap tulis transaksi di atas, dan
+        // menjaga urutan bila writer memproses antrean lebih lambat.
+        self.persist_key_quota_with_bucket(prefix, new_remaining, bucket_delta)
+            .await;
+        true
+    }
+
     /// Best-effort release of a previously claimed free slot, used only when
     /// the usage event failed to enqueue after a free claim — a result the
     /// member never received must not consume the pool. Never below zero.
+    /// K19: release DI-RETRY (dulu hasil UPDATE diabaikan begitu saja —
+    /// satu blip DB membuat member kehilangan 1 slot untuk hasil yang
+    /// tak pernah diterima). Retry 5x dengan backoff singkat; gagal
+    /// total setelah itu tetap dicatat keras (slot hangus, tapi hanya
+    /// setelah usaha berulang — bukan satu percobaan).
     pub async fn release_invalid_free_slot(
         &self,
         prefix: &str,
         wib_day: chrono::NaiveDate,
     ) {
         if let Some(pool) = self.pool() {
-            let _ = sqlx::query(
-                "UPDATE invalid_free_daily SET free_used = GREATEST(free_used - 1, 0) WHERE api_key_prefix = ? AND wib_date = ?",
-            )
-            .bind(prefix)
-            .bind(wib_day)
-            .execute(&pool)
-            .await;
+            let mut delay_ms = 50u64;
+            for attempt in 1..=5 {
+                match sqlx::query(
+                    "UPDATE invalid_free_daily SET free_used = GREATEST(free_used - 1, 0) WHERE api_key_prefix = ? AND wib_date = ?",
+                )
+                .bind(prefix)
+                .bind(wib_day)
+                .execute(&pool)
+                .await
+                {
+                    Ok(_) => return,
+                    Err(error) => {
+                        if attempt == 5 {
+                            tracing::warn!(?error, prefix = %prefix, "Release slot gratis gagal setelah 5 percobaan; 1 slot hangus untuk hasil yang tak pernah diterima");
+                        } else {
+                            tracing::warn!(?error, prefix = %prefix, attempt, "Release slot gratis gagal; dicoba lagi");
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                .await;
+                            delay_ms *= 2;
+                        }
+                    }
+                }
+            }
             return;
         }
         let mut map = self
@@ -5698,6 +6131,88 @@ mod quota_bucket_tests {
         assert_eq!(buckets.len(), 1);
         assert_eq!(buckets[0].total_hits, 200);
         assert_eq!(buckets[0].remaining_hits, 200);
+    }
+
+    #[tokio::test]
+    async fn adjust_positive_without_active_bucket_creates_30_day_bucket() {
+        // B7: semua bucket kedaluwarsa + adjust positif DULU membuat
+        // bucket NULL-expiry (kuota abadi diam-diam); kini bucket baru
+        // ber-expiry sekarang + 30 hari (durasi standar paket).
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let member = member_fixture();
+        let now = Utc::now();
+        let key = key_with_expiry(
+            &store,
+            &member,
+            50,
+            Some(now - chrono::Duration::days(1)),
+        )
+        .await;
+        let before = Utc::now();
+        let outcome = store
+            .adjust_member_key_quota(member.id, key.id, 100)
+            .await
+            .expect("adjust positif lolos");
+        assert_eq!(outcome.quota_remaining_after, 100);
+        assert_eq!(outcome.quota_total_after, 150);
+        let expiry = outcome
+            .new_bucket_expires_at
+            .expect("adjust tanpa bucket aktif harus melaporkan expiry bucket baru");
+        let expected = before + chrono::Duration::days(30);
+        assert!(
+            (expiry - expected).num_seconds().abs() <= 5,
+            "expiry bucket baru harus ~30 hari dari sekarang: {expiry} vs {expected}"
+        );
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        let fresh = buckets
+            .iter()
+            .find(|bucket| bucket.total_hits == 100)
+            .expect("bucket baru 100 hit");
+        assert_eq!(fresh.expires_at, Some(expiry));
+        assert!(fresh.expires_at.is_some(), "bucket baru TIDAK BOLEH NULL-expiry");
+    }
+
+    #[tokio::test]
+    async fn refund_to_expired_bucket_falls_back_to_active_bucket() {
+        // K1: reserve dari bucket aktif, lalu bucket itu kedaluwarsa
+        // sebelum refund — refund tidak boleh masuk bucket mati.
+        let store = AdminStore::new(None, 60).expect("store baru");
+        let member = member_fixture();
+        let (key, first_id, second_id) = two_bucket_key(&store, &member).await;
+        let (_, bucket_id) = store
+            .reserve_quota(&key.prefix)
+            .await
+            .expect("reserve lolos");
+        assert_eq!(bucket_id, Some(first_id));
+        // Kedaluwarsakan bucket pertama lewat manipulasi langsung
+        // (tes mode memori): set expiry-nya ke kemarin.
+        {
+            let mut data = store.data.write().await;
+            let record = data.api_keys.get_mut(&key.prefix).unwrap();
+            for bucket in record.buckets.iter_mut() {
+                if bucket.id == first_id {
+                    bucket.expires_at = Some(Utc::now() - chrono::Duration::days(1));
+                }
+            }
+        }
+        store.refund_quota(&key.prefix, bucket_id).await;
+        let buckets = store.key_bucket_list(&key.prefix).await;
+        // Bucket mati tidak bertambah (99 tetap 99, bukan 100).
+        assert_eq!(
+            buckets.iter().find(|b| b.id == first_id).unwrap().remaining_hits,
+            99
+        );
+        // Bucket aktif kedua tidak ikut berubah di sini karena refund
+        // jatuh ke bucket aktif FIFO-pertama yang punya ruang — dalam
+        // susunan ini bucket kedua adalah satu-satunya aktif; tapi
+        // karena bucket kedua penuh (50/50), refund tidak punya tempat
+        // mendarat dan hilang tercatat (bukan dikreditkan paksa).
+        // Skenario ini menegaskan: tidak ada bucket yang dikreditkan
+        // melewati cap atau ke bucket mati.
+        assert_eq!(
+            buckets.iter().find(|b| b.id == second_id).unwrap().remaining_hits,
+            50
+        );
     }
 
     #[tokio::test]

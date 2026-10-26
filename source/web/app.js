@@ -1236,6 +1236,76 @@
     renderOrders();
     loadRecon().catch(() => {});
     loadAlertStatus().catch(() => {});
+    loadOrphanQr().catch(() => {});
+  }
+
+  // K26: daftar QR yatim (QR Cutiezy berbayar tanpa baris order) +
+  // form resolve-berbukti (pilih paket + RRN dashboard). QR yatim yang
+  // gagal dibatalkan dulu hanya meninggalkan log; kini admin bisa
+  // meng-grant-nya dari panel bila check-status membuktikan lunas.
+  async function loadOrphanQr() {
+    const box = $("#orphan-qr-box");
+    if (!box) return;
+    try {
+      const items = await api("/v1/admin/orphan-qr");
+      if (!items.length) {
+        box.innerHTML = "";
+        return;
+      }
+      if (!state.packages.length) {
+        try { state.packages = await api("/v1/admin/packages"); } catch (_) { /* dropdown paket diisi seadanya */ }
+      }
+      const pkgOptions = state.packages.length
+        ? state.packages.map((pkg) => `<option value="${escapeHtml(pkg.id)}">${escapeHtml(pkg.name)} — ${formatNumber(pkg.included_hits)} hit</option>`).join("")
+        : `<option value="">(paket belum dimuat)</option>`;
+      box.innerHTML = `<div class="order-section"><h3 class="order-section-title">QR yatim (belum punya order)</h3>
+        <p class="tester-audit-note">QR yang sudah terbit di Cutiezy tapi gagal dibatalkan saat create gagal. Bila member membayar QR ini, resolve-berbukti di bawah (cocokkan RRN + nominal lewat check-status) akan membuat order + grant — tanpa ini uangnya menggantung.</p>
+        ${items.map((item) => `<article class="order-card" data-orphan="${escapeHtml(item.id)}">
+          <div><strong>${escapeHtml(item.member_email || "—")}</strong> · ${formatRupiah(item.amount_idr)} · status: ${escapeHtml(item.status)}${item.resolved_order_id ? ` · order tertaut: <code>${escapeHtml(item.resolved_order_id)}</code>` : ""} · ${escapeHtml(formatDate(item.created_at))}</div>
+          <form class="form-grid orphan-resolve-form">
+            <label>Paket yang di-grant<select class="orphan-package" required>${pkgOptions}</select></label>
+            <label>RRN mutasi (dashboard Cutiezy)<input class="orphan-rrn" maxlength="191" placeholder="opsional, dianjurkan"></label>
+            <div class="form-actions"><button class="button button-primary" type="submit">Resolve &amp; grant</button><span class="order-resolve-msg orphan-msg"></span></div>
+          </form>
+        </article>`).join("")}</div>`;
+      $$("#orphan-qr-box .orphan-resolve-form").forEach((form) => {
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const card = form.closest("[data-orphan]");
+          const orphanId = card.dataset.orphan;
+          const btn = form.querySelector('button[type="submit"]');
+          const msg = form.querySelector(".orphan-msg");
+          if (btn) btn.disabled = true;
+          if (msg) msg.textContent = "Memproses…";
+          try {
+            const result = await api(`/v1/admin/orphan-qr/${orphanId}/resolve`, {
+              method: "POST",
+              body: {
+                package_id: form.querySelector(".orphan-package").value,
+                mutation_ref: form.querySelector(".orphan-rrn").value || null,
+              },
+            });
+            // Kontrak resolve-berbukti: outcome eksplisit WAJIB
+            // ditampilkan apa adanya — jangan menebak dari HTTP 200.
+            const outcome = typeof result?.outcome === "string" ? result.outcome.toLowerCase() : "";
+            const texts = {
+              granted: "Kuota berhasil di-grant.",
+              already_granted: "Kuota sudah ter-grant sebelumnya.",
+              alreadygranted: "Kuota sudah ter-grant sebelumnya.",
+              needs_review: "Grant ditahan (perlu tinjauan) — lanjutkan lewat tombol Grant ulang pada order tertaut.",
+              rejected: "Ditolak — check-status membuktikan QR ini belum lunas.",
+            };
+            if (msg) msg.textContent = texts[outcome] || "Resolve selesai.";
+            await loadOrders();
+          } catch (error) {
+            if (msg) msg.textContent = error.message || "Resolve QR yatim gagal.";
+            if (btn) btn.disabled = false;
+          }
+        });
+      });
+    } catch (_) {
+      box.innerHTML = "";
+    }
   }
 
   // AREA 3: kartu ringkasan rekonsiliasi untuk rentang yang sama
@@ -1288,6 +1358,11 @@
       $("#order-refund-form")?.addEventListener("submit", async (event) => {
         event.preventDefault();
         const msg = $("#order-refund-msg");
+        const btn = event.target.querySelector('button[type="submit"]');
+        // B11 (panel): tombol submit dinonaktifkan selama permintaan
+        // berjalan — klik ganda tidak boleh mencatat refund ganda
+        // (server kini juga mengunci baris order, ini lapis keduanya).
+        if (btn) btn.disabled = true;
         if (msg) msg.textContent = "Mencatat…";
         try {
           await api(`/v1/admin/orders/${orderId}/refund-record`, {
@@ -1303,6 +1378,7 @@
           await renderOrderRefunds(orderId);
         } catch (error) {
           if (msg) msg.textContent = error.message || "Pencatatan refund gagal.";
+          if (btn) btn.disabled = false;
         }
       });
     } catch (error) {
@@ -1367,9 +1443,31 @@
       // last_error tidak dibersihkan saat grant sukses (menjadi
       // "Grant ulang oleh admin"), jadi callout hanya untuk needs_review.
       const showCallout = order.status === "needs_review" && !!order.last_error;
-      const heroAction = order.status === "needs_review" ? ((order.last_error || "").includes("Nominal bayar tidak sama")
-        ? `<span class="order-resolve-msg">Penanganan manual: nominal tidak sama.</span>`
-        : `<button class="button button-primary" type="button" id="order-resolve-btn">Grant ulang</button><span id="order-resolve-msg" class="order-resolve-msg"></span>`) : "";
+      // B14: total refund tercatat ditampilkan di samping tombol Grant
+      // ulang — grant diblokir server bila total sudah penuh.
+      let refundTotal = 0;
+      try {
+        const refunds = await api(`/v1/admin/orders/${orderId}/refunds`);
+        refundTotal = refunds.reduce((sum, r) => sum + (Number(r.amount_idr) || 0), 0);
+      } catch (_) { /* total opsional; form refund memuat daftarnya sendiri */ }
+      const refundFull = refundTotal > 0 && refundTotal >= order.amount_idr;
+      const refundNote = refundTotal > 0 ? `<span class="order-resolve-msg">Total refund tercatat: ${formatRupiah(refundTotal)}${refundFull ? " — sudah penuh, grant diblokir server sampai refund-record dikoreksi." : ""}</span>` : "";
+      const mismatch = (order.last_error || "").includes("Nominal bayar tidak sama");
+      const resolveBtnHtml = (label) => `<button class="button button-primary" type="button" id="order-resolve-btn">${label}</button><span id="order-resolve-msg" class="order-resolve-msg"></span>`;
+      let heroAction = "";
+      if (order.status === "needs_review") {
+        heroAction = mismatch
+          ? `<span class="order-resolve-msg">Penanganan manual: nominal tidak sama.</span>`
+          : resolveBtnHtml("Grant ulang");
+      } else if (order.status === "expired" || order.status === "canceled") {
+        // B10: tombol resolve untuk order terminal yang ternyata lunas
+        // (bayar telat) — server re-check Cutiezy dulu dan hanya
+        // meng-grant bila terbukti Paid + nominal cocok.
+        heroAction = mismatch
+          ? `<span class="order-resolve-msg">Penanganan manual: nominal tidak sama.</span>`
+          : resolveBtnHtml("Grant ulang (cek bayar telat)");
+      }
+      if (heroAction && refundNote) heroAction += refundNote;
       $("#order-detail-body").innerHTML = `
         <div class="order-hero">
           <div class="order-hero-main">
@@ -1394,12 +1492,15 @@
             <div class="order-field"><span class="order-field-label">Dibayar</span><span class="order-field-value">${order.paid_at ? escapeHtml(formatDate(order.paid_at)) : "—"}</span></div>
             <div class="order-field"><span class="order-field-label">Ter-grant</span><span class="order-field-value">${grantedInfo}</span></div>
             <div class="order-field"><span class="order-field-label">Referensi mutasi</span><span class="order-field-value mono">${escapeHtml(order.mutation_ref || "—")}</span></div>
+            <div class="order-field"><span class="order-field-label">Total refund tercatat</span><span class="order-field-value">${formatRupiah(refundTotal)}</span></div>
           </div>
         </div>`;
       $("#order-detail").hidden = false;
-      // AREA 3: form refund-record hanya untuk order yang pernah
-      // lunas (paid_at terisi) — server tetap menolak yang tak-lunas.
-      if (order.paid_at) {
+      // AREA 3: form refund-record untuk order yang pernah lunas.
+      // K23: gerbang server kini status paid/granted ATAU paid_at —
+      // form ditampilkan untuk ketiganya (server tetap menolak yang
+      // tak-lunas).
+      if (order.paid_at || order.status === "paid" || order.status === "granted") {
         $("#order-detail-body").insertAdjacentHTML("beforeend", `<div id="order-refunds"></div>`);
         renderOrderRefunds(orderId).catch(() => {});
       }
@@ -1420,10 +1521,23 @@
             await loadOrders();
             await showOrderDetail(orderId);
             // Setelah render ulang, tombol+pesan hanya ada bila order
-            // masih needs_review; bila ter-grant, badge-nya sendiri
-            // yang berbicara.
+            // masih needs_review/expired/canceled; bila ter-grant,
+            // badge-nya sendiri yang berbicara. Outcome WAJIB
+            // ditampilkan apa adanya (B10): "belum berhasil" generik
+            // menyembunyikan beda rejected (terbukti belum lunas) vs
+            // needs_review (tertahan) vs expired (tetap terminal).
+            const outcomeTexts = {
+              granted: "Kuota berhasil di-grant.",
+              already_granted: "Kuota sudah ter-grant sebelumnya.",
+              alreadygranted: "Kuota sudah ter-grant sebelumnya.",
+              needs_review: "Grant ditahan (perlu tinjauan) — kuota belum di-grant.",
+              rejected: "Ditolak — order terbukti belum lunas, kuota tidak di-grant.",
+              expired: "Order tetap kedaluwarsa — kuota tidak di-grant.",
+              canceled: "Order tetap dibatalkan — kuota tidak di-grant.",
+              waiting: "Order masih menunggu bayar — kuota tidak di-grant.",
+            };
             const msgAfter = $("#order-resolve-msg");
-            if (msgAfter) msgAfter.textContent = granted ? "Kuota berhasil di-grant." : "Grant belum berhasil — order masih perlu tinjauan.";
+            if (msgAfter) msgAfter.textContent = outcomeTexts[outcome] || (granted ? "Kuota berhasil di-grant." : "Grant belum berhasil.");
           } catch (error) {
             if (msg) msg.textContent = error.message || "Grant ulang gagal.";
             resolveBtn.disabled = false;

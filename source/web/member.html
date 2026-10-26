@@ -1406,12 +1406,27 @@
           const payload = { product: sb.product, target: $('sbTarget').value.trim() };
           if (sb.product === 'bank_account') payload.bank_code = $('sbBank').value;
           if (sb.product === 'ewallet') payload.ewallet_provider = $('sbWallet').value;
+          // K11: kunci idempotensi disimpan di state halaman (per
+          // produk+target+provider) dan dipakai ulang untuk retry submit
+          // yang sama — submit ulang setelah error/timeout me-replay
+          // hasil sebelumnya, bukan menagih cek baru. Kunci dihapus
+          // begitu submit BERHASIL, sehingga submit berikutnya untuk
+          // target yang sama adalah cek baru yang sah.
+          const sbKeyId = [sb.product, payload.target, payload.bank_code || payload.ewallet_provider || ''].join('|');
+          const sbStoreKey = 'sb-idem:' + sbKeyId;
+          let sbIdemKey = null;
+          try { sbIdemKey = sessionStorage.getItem(sbStoreKey); } catch (_) { /* storage tak tersedia: kunci per submit */ }
+          if (!sbIdemKey) {
+            sbIdemKey = 'portal-' + (crypto.randomUUID ? crypto.randomUUID().replace(/-/g, '') : String(Date.now()) + Math.random().toString(36).slice(2));
+            try { sessionStorage.setItem(sbStoreKey, sbIdemKey); } catch (_) {}
+          }
           const res = await api('/v1/member/check', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': sbIdemKey },
             body: JSON.stringify(payload),
           });
           const d = await res.json().catch(() => ({}));
           if (!res.ok) throw new Error(d.message || 'Cek gagal dijalankan.');
+          try { sessionStorage.removeItem(sbStoreKey); } catch (_) {}
           const r = d.result || {};
           const plnExtraBox = sb.product === 'pln'
             ? `${r.tarif ? `<div><span>Tarif</span><strong>${escHtml(r.tarif)}</strong></div>` : ''}${r.daya ? `<div><span>Daya</span><strong>${escHtml(r.daya)}</strong></div>` : ''}`

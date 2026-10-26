@@ -1177,23 +1177,30 @@ pub fn consume_buckets_fifo(
 }
 
 /// Kembalikan 1 hit ke satu bucket, dibatasi total bucket itu (refund
-/// tidak pernah mencetak hit). Target: bucket_id bila ditemukan; bila
-/// tidak (mis. bucket terhapus replace di tengah jalan), jatuh ke bucket
-/// aktif FIFO-pertama, lalu bucket FIFO-pertama mana pun. None bila tidak
-/// ada bucket sama sekali (pemanggil memakai jalur agregat lama).
+/// tidak pernah mencetak hit). Aturan pendaratan (audit flow K1/K13):
+/// 1. bucket asal (`bucket_id`) bila masih AKTIF dan masih punya ruang
+///    (sisa < total);
+/// 2. bila tidak, bucket aktif FIFO-pertama yang masih punya ruang;
+/// 3. bila tidak ada bucket aktif yang punya ruang sama sekali, kembalikan
+///    None — refund DICATAT HILANG oleh pemanggil (log), bukan dikreditkan
+///    ke bucket kedaluwarsa (hitnya takkan pernah bisa dipakai lagi) dan
+///    bukan dikreditkan melewati cap total bucket lain (menggelembungkan
+///    total). None juga bila tidak ada bucket sama sekali (pemanggil
+///    memakai jalur agregat lama).
 pub fn refund_bucket(
     buckets: &mut [QuotaBucket],
     now: DateTime<Utc>,
     bucket_id: Option<Uuid>,
 ) -> Option<(Uuid, u64)> {
+    let has_room = |bucket: &QuotaBucket| bucket.remaining_hits < bucket.total_hits;
     let target = bucket_id
         .and_then(|id| buckets.iter().position(|bucket| bucket.id == id))
+        .filter(|&index| bucket_is_active(&buckets[index], now) && has_room(&buckets[index]))
         .or_else(|| {
-            fifo_indices(buckets)
-                .into_iter()
-                .find(|&index| bucket_is_active(&buckets[index], now))
-        })
-        .or_else(|| fifo_indices(buckets).into_iter().next());
+            fifo_indices(buckets).into_iter().find(|&index| {
+                bucket_is_active(&buckets[index], now) && has_room(&buckets[index])
+            })
+        });
     let index = target?;
     let bucket = &mut buckets[index];
     bucket.remaining_hits = bucket.remaining_hits.saturating_add(1).min(bucket.total_hits);
@@ -1435,12 +1442,43 @@ mod tests {
         let (id, remaining) = refund_bucket(&mut buckets, now, Some(first_id)).unwrap();
         assert_eq!(id, first_id);
         assert_eq!(remaining, 10);
-        // Refund kedua tidak mencetak hit: cap di total bucket.
-        let (_, remaining) = refund_bucket(&mut buckets, now, Some(first_id)).unwrap();
-        assert_eq!(remaining, 10);
-        // Bucket tak dikenal jatuh ke FIFO-pertama aktif (bucket Nov).
-        let (id, _) = refund_bucket(&mut buckets, now, Some(Uuid::now_v7())).unwrap();
-        assert_eq!(id, first_id);
+        // Refund kedua tidak mencetak hit dan tidak menggelembungkan
+        // bucket lain: kedua bucket sudah penuh → refund hilang (None),
+        // pemanggil wajib mencatatnya di log, bukan mengkredit diam-diam.
+        assert!(refund_bucket(&mut buckets, now, Some(first_id)).is_none());
+        // Bucket tak dikenal jatuh ke FIFO-pertama aktif yang punya ruang.
+        let mut buckets = vec![
+            bucket(10, 10, Some(dt("2026-11-01T00:00:00Z")), now),
+            bucket(20, 19, Some(dt("2026-12-01T00:00:00Z")), now),
+        ];
+        let second_id = buckets[1].id;
+        let (id, remaining) =
+            refund_bucket(&mut buckets, now, Some(Uuid::now_v7())).unwrap();
+        assert_eq!(id, second_id);
+        assert_eq!(remaining, 20);
+    }
+
+    #[test]
+    fn refund_never_lands_in_expired_bucket() {
+        let now = dt("2026-10-25T00:00:00Z");
+        // Asal kedaluwarsa (sisa 9/10) + satu bucket aktif punya ruang:
+        // refund pindah ke bucket aktif, bukan ke bucket mati.
+        let mut buckets = vec![
+            bucket(10, 9, Some(dt("2026-10-01T00:00:00Z")), now),
+            bucket(20, 19, Some(dt("2026-12-01T00:00:00Z")), now),
+        ];
+        let expired_id = buckets[0].id;
+        let active_id = buckets[1].id;
+        let (id, remaining) =
+            refund_bucket(&mut buckets, now, Some(expired_id)).unwrap();
+        assert_eq!(id, active_id);
+        assert_eq!(remaining, 20);
+        assert_eq!(buckets[0].remaining_hits, 9);
+        // Asal kedaluwarsa dan TIDAK ADA bucket aktif sama sekali:
+        // refund hilang (None), bukan dikreditkan ke bucket mati.
+        let mut buckets = vec![bucket(10, 9, Some(dt("2026-10-01T00:00:00Z")), now)];
+        assert!(refund_bucket(&mut buckets, now, Some(expired_id)).is_none());
+        assert_eq!(buckets[0].remaining_hits, 9);
     }
 
     #[test]

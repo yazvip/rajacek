@@ -460,6 +460,33 @@ impl HttpProvider {
             self.provider_configs
                 .verify_destination(&endpoint.base_url)
                 .await?;
+            // B3: kunci provider kosong = galat konfigurasi Rajacek, bukan
+            // jawaban bisnis — gagal netral SEBELUM request dikirim (0-hit,
+            // refund penuh lewat jalur AppError pemanggil). Cakupan
+            // sengaja sempit: hanya endpoint yang mendeklarasikan
+            // ketergantungan kunci (key_param terisi, mis. PLN Chikamm
+            // yang mengirim api_key di query) atau produk PLN yang
+            // kontraknya memang memakai kunci. Endpoint tanpa key_param
+            // yang sengaja tanpa kunci (publik) tidak tersentuh.
+            // BATAS: kunci SALAH (non-kosong) belum bisa dibedakan dari
+            // ID tidak valid — bentuk galat auth Chikamm pada badan 200
+            // belum pernah teramati (tidak ada field error di bentuk
+            // yang ter-probe), jadi success:false dengan kunci non-kosong
+            // tetap Invalid sampai bentuk itu teramati; menebaknya akan
+            // menggratiskan semua ID PLN yang benar-benar tidak valid.
+            if endpoint.api_key.trim().is_empty()
+                && (matches!(request.product, ValidationProduct::Pln)
+                    || endpoint.key_param.is_some())
+            {
+                tracing::warn!(
+                    endpoint = %endpoint.name,
+                    product = %request.product.as_str(),
+                    "Kunci provider kosong: cek dibatalkan netral sebelum dikirim"
+                );
+                return Err(AppError::service_unavailable(
+                    "Provider validasi sedang tidak tersedia. Silakan ulangi beberapa saat lagi.",
+                ));
+            }
             let prepared = match endpoint.request_mode {
                 ProviderRequestMode::Cutiezy => PreparedCall::CutiezyGet,
                 ProviderRequestMode::Generic
@@ -1158,12 +1185,28 @@ fn ewallet_not_kyc(account_name: Option<&str>, target: &str) -> bool {
         Some(name) => name,
         None => return false,
     };
+    // K9: placeholder dikenali sebagai SUBSTRING setelah normalisasi
+    // tanda baca → spasi (bukan hanya bentuk eksak). Ini menangkap
+    // varian yang teramati: "BELUM PREMIUM.", "BELUM PREMIUM - GOPAY",
+    // "AKUN BELUM PREMIUM". Bentuk tanpa spasi ("BELUMPREMIUM") ikut
+    // tertangkap lewat versi squashed. Sengaja TIDAK diperluas ke
+    // singkatan yang belum teramati (mis. "BLM PREMIUM") — menebak pola
+    // berisiko mengubah nama pemegang asli menjadi NotKyc.
     let normalized = name
+        .chars()
+        .map(|ch| {
+            if ch.is_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
-        .join(" ")
-        .to_uppercase();
-    if normalized == "BELUM PREMIUM" || normalized == "BELUMPREMIUM" {
+        .join(" ");
+    let squashed: String = normalized.chars().filter(|ch| *ch != ' ').collect();
+    if normalized.contains("BELUM PREMIUM") || squashed.contains("BELUMPREMIUM") {
         return true;
     }
     let name_digits: String = name.chars().filter(|ch| ch.is_ascii_digit()).collect();
@@ -1321,6 +1364,33 @@ fn normalize_provider_payload(
         }
     };
 
+    // K10: nama pemegang kosong pada hasil Valid = jawaban yang tidak
+    // bisa dikonfirmasi → provider error netral (0-hit), bukan Valid
+    // berbayar dengan account_name kosong. Untuk status non-Valid, nama
+    // kosong cukup dinormalisasi menjadi None. Produk yang mapping-nya
+    // tidak memetakan nama (account_name None) tidak tersentuh.
+    if status == ValidationStatus::Valid {
+        if let Some(data) = result.as_mut() {
+            if data
+                .account_name
+                .as_deref()
+                .is_some_and(|name| name.trim().is_empty())
+            {
+                return Err(AppError::service_unavailable(
+                    "Nama pemegang dari provider kosong; hasil tidak dapat dikonfirmasi",
+                ));
+            }
+        }
+    } else if let Some(data) = result.as_mut() {
+        if data
+            .account_name
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            data.account_name = None;
+        }
+    }
+
     // B1, e-wallet only: a placeholder/echoed name is never a holder name
     // and never evidence of a registered account. The placeholder/echo is
     // stripped from the result in every case (never echo it back as a
@@ -1340,6 +1410,20 @@ fn normalize_provider_payload(
                         message = canonical_member_message(status).to_owned();
                     }
                 }
+            } else if status == ValidationStatus::Valid {
+                // K9: nama Valid yang mengandung "BELUM" tapi lolos
+                // deteksi placeholder dicatat — varian placeholder baru
+                // harus ketahuan dari log, bukan dari keluhan member.
+                if data
+                    .account_name
+                    .as_deref()
+                    .is_some_and(|name| name.to_uppercase().contains("BELUM"))
+                {
+                    tracing::warn!(
+                        name = data.account_name.as_deref().unwrap_or(""),
+                        "Nama e-wallet Valid mengandung BELUM tapi bukan placeholder yang dikenali"
+                    );
+                }
             }
         }
     }
@@ -1349,7 +1433,7 @@ fn normalize_provider_payload(
 
 fn map_status(
     raw: &str,
-    registered: Option<bool>,
+    _registered: Option<bool>,
     mapping: &crate::models::ProviderResponseMapping,
 ) -> Option<ValidationStatus> {
     let value = raw.trim();
@@ -1367,13 +1451,14 @@ fn map_status(
     } else if contains(&mapping.pending_values) {
         Some(ValidationStatus::Pending)
     } else {
-        registered.map(|value| {
-            if value {
-                ValidationStatus::Valid
-            } else {
-                ValidationStatus::NotFound
-            }
-        })
+        // B4 (audit flow): status tak dikenal TIDAK BOLEH jatuh ke Valid
+        // lewat flag registered — string galat/typo ("suspended",
+        // "error") akan menagih member untuk jawaban Valid palsu. Status
+        // yang tidak ada di daftar eksplisit mana pun = None → pemanggil
+        // mengubahnya menjadi provider error netral (0-hit). Tidak ada
+        // mode "registered-only": admin yang memakai registered_path
+        // wajib mencantumkan nilai status yang diakui di daftar mapping.
+        None
     }
 }
 
@@ -1439,6 +1524,13 @@ fn json_path<'a>(root: &'a Value, path: &str) -> Option<&'a Value> {
 ///   deliberately NO Invalid-vs-NotFound split for PLN: the failure shape
 ///   has never been observed, so a failed lookup is one defensive
 ///   Invalid, never a guessed NotFound.
+/// - B3 guard lives one level up, not here: a PLN check with an EMPTY
+///   key never reaches this mapping — validate_upstream_endpoint fails
+///   neutral (ProviderError, 0-hit) before sending, so an empty-key
+///   `success:false` can no longer be billed as Invalid. A WRONG
+///   (non-empty) key still maps `success:false` to Invalid until
+///   Chikamm's auth-error body shape is observed; see the B3 comment
+///   at the pre-check for why guessing further would be unsafe.
 /// - `name` is the holder name verbatim (the member path uppercases its
 ///   own copy, like every other product); `nickname` is ignored — it
 ///   duplicates `name` in the probed shape.
@@ -1581,9 +1673,9 @@ fn tukangcek_mapping(product: ValidationProduct) -> crate::models::ProviderRespo
 #[cfg(test)]
 mod mapping_tests {
     use super::{
-        build_provider_request, cutiezy_mapping, map_provider_http_error,
-        normalize_provider_payload, read_raw_response, tukangcek_mapping, with_raw_error,
-        MAX_RAW_RESPONSE_BYTES,
+        build_provider_request, cutiezy_mapping, ewallet_not_kyc, map_provider_http_error,
+        map_status, normalize_provider_payload, read_raw_response, tukangcek_mapping,
+        with_raw_error, MAX_RAW_RESPONSE_BYTES,
     };
     use crate::models::{
         ProviderRequestMode, ProviderResponseMapping, ProviderValidationRequest, ValidationProduct,
@@ -1683,7 +1775,10 @@ mod mapping_tests {
         let mut mapping = ProviderResponseMapping::default_for(ValidationProduct::Ewallet);
         mapping.status_path = "payload.state".to_owned();
         mapping.registered_path = Some("payload.is_registered".to_owned());
-        let payload = json!({"payload":{"state":"unknown","is_registered":true,"account_name":"PRIVATE NAME"}});
+        // "registered" ada di valid_values default — status dikenali, jadi
+        // Valid; nama tidak dipetakan (account_name_path default None
+        // untuk e-wallet) sehingga hasilnya None, bukan echo payload.
+        let payload = json!({"payload":{"state":"registered","is_registered":true,"account_name":"PRIVATE NAME"}});
         let (status, _, result) = normalize_provider_payload(
             ValidationProduct::Ewallet,
             &payload,
@@ -1698,6 +1793,93 @@ mod mapping_tests {
         assert_eq!(result.registered, Some(true));
         assert_eq!(result.provider, None);
         assert_eq!(result.reference, None);
+    }
+
+    #[test]
+    fn unknown_status_with_registered_true_is_provider_error_not_valid() {
+        // B4: status tak dikenal + registered=true DULU menjadi Valid
+        // palsu berbayar; kini map_status mengembalikan None dan
+        // normalize menjadi Err (provider error netral, 0-hit).
+        let mapping = ProviderResponseMapping {
+            status_path: "status".to_owned(),
+            valid_values: vec!["valid".to_owned()],
+            invalid_values: vec!["invalid".to_owned()],
+            not_found_values: vec![],
+            pending_values: vec![],
+            message_path: None,
+            account_name_path: Some("name".to_owned()),
+            provider_path: None,
+            registered_path: Some("registered".to_owned()),
+            reference_path: None,
+        };
+        assert!(map_status("suspended", Some(true), &mapping).is_none());
+        assert!(map_status("suspended", Some(false), &mapping).is_none());
+        let payload = json!({"status":"suspended","registered":true,"name":"Seseorang"});
+        assert!(normalize_provider_payload(
+            ValidationProduct::BankAccount,
+            &payload,
+            &mapping,
+            "1234567890",
+            false,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ewallet_placeholder_variants_are_not_kyc() {
+        // K9: varian teramati — titik, sufiks provider, prefiks kata.
+        assert!(ewallet_not_kyc(Some("BELUM PREMIUM."), "081234567890"));
+        assert!(ewallet_not_kyc(
+            Some("BELUM PREMIUM - GOPAY"),
+            "081234567890"
+        ));
+        assert!(ewallet_not_kyc(
+            Some("AKUN BELUM PREMIUM"),
+            "081234567890"
+        ));
+        assert!(ewallet_not_kyc(Some("belum premium"), "081234567890"));
+        assert!(ewallet_not_kyc(Some("BELUMPREMIUM"), "081234567890"));
+        // Nama asli bukan placeholder.
+        assert!(!ewallet_not_kyc(Some("BUDI SANTOSO"), "081234567890"));
+        assert!(!ewallet_not_kyc(Some("BELUM"), "081234567890"));
+    }
+
+    #[test]
+    fn valid_with_empty_name_is_provider_error() {
+        // K10: Valid + nama kosong = tidak bisa dikonfirmasi → Err.
+        let mapping = ProviderResponseMapping {
+            status_path: "status".to_owned(),
+            valid_values: vec!["valid".to_owned()],
+            invalid_values: vec!["invalid".to_owned()],
+            not_found_values: vec![],
+            pending_values: vec![],
+            message_path: None,
+            account_name_path: Some("name".to_owned()),
+            provider_path: None,
+            registered_path: None,
+            reference_path: None,
+        };
+        let payload = json!({"status":"valid","name":""});
+        assert!(normalize_provider_payload(
+            ValidationProduct::BankAccount,
+            &payload,
+            &mapping,
+            "1234567890",
+            false,
+        )
+        .is_err());
+        // Non-Valid + nama kosong: lolos dengan nama None (bukan Err).
+        let payload = json!({"status":"invalid","name":"   "});
+        let (status, _, result) = normalize_provider_payload(
+            ValidationProduct::BankAccount,
+            &payload,
+            &mapping,
+            "1234567890",
+            false,
+        )
+        .expect("invalid dengan nama kosong tetap dipetakan");
+        assert_eq!(status, ValidationStatus::Invalid);
+        assert_eq!(result.expect("result").account_name, None);
     }
 
     #[test]

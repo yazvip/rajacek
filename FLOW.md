@@ -84,7 +84,14 @@ Request
 
 - Jatah gratis dicatat di tabel `invalid_free_daily` (kunci, tanggal WIB,
   `free_used`), klaim atomik (`INSERT IGNORE` + `UPDATE ... WHERE free_used
-  < 100`, fail-closed ke penagihan bila DB error).
+  < 100`, fail-closed ke penagihan bila DB error). Klaim pool + refund
+  1 hit-nya adalah SATU transaksi (Fase 1, K2): proses mati di antaranya
+  tidak boleh menghilangkan 1 hit + 1 slot sekaligus; bila tidak ada
+  bucket aktif yang bisa menampung refund, slot tidak dikonsumsi
+  (hasil tetap berbayar).
+- Pool TERIKAT PREFIX kunci, bukan member, by design (K15): regenerasi
+  menerbitkan prefix baru → jatah hari itu dimulai baru untuk kunci baru;
+  jatah kunci lama tidak terbawa dan tidak terlihat di overview kunci baru.
 - Kunci bersaldo 0 tetap 402 sebelum validasi (reserve gagal) — jatah gratis
   hanya terpakai selama saldo > 0.
 - Kuota ditulis background writer FIFO (channel mpsc 8192); mutasi + snapshot
@@ -125,6 +132,11 @@ Request
 - Memakai handler validasi yang sama dengan API → aturan billing yang sama
   (sandbox MEMOTONG kuota). Portal: Ringkasan / Penggunaan / Info Kunci /
   Beli Paket / Coba Cek Live / Riwayat, auto-refresh 5 detik.
+- Submit ulang sandbox memakai kunci idempotensi yang SAMA dari state
+  halaman per (produk+target+provider) sehingga retry setelah error/
+  timeout me-replay, bukan menagih cek baru; kunci dihapus begitu submit
+  berhasil (Fase 1, K11). Server memakai kunci klien bila dikirim, dan
+  hanya menggenerate bila tidak ada.
 
 ---
 
@@ -158,10 +170,38 @@ Portal member: pilih paket → preview (harga diskon dikunci saat order dibuat)
   → 409; member nonaktif → 409. Respons membawa field `outcome`
   (granted / already_granted / needs_review / rejected) — pemanggil WAJIB cek
   `outcome`, bukan status HTTP (resolve mengembalikan 200 untuk semua outcome).
+  Panel menampilkan tombol resolve juga untuk order `expired`/`canceled`
+  (Fase 1, B10: bayar telat — server re-check Cutiezy dulu, grant hanya
+  bila terbukti Paid + nominal cocok; `rejected` berarti terbukti belum
+  lunas, status terminal tidak berubah).
+- Resolve MENOLAK bila order sudah refund penuh (Fase 1, B14): cek
+  kumulatif `refund_records` ≥ nominal dilakukan sebelum grant dan diulang
+  persis sebelum grant; refund parsial tidak memblokir grant. Koreksi
+  refund-record yang salah masih manual di DB (tidak ada endpoint koreksi).
+- Sweep berketahanan (Fase 1, B12/B13, migrasi 0029): tiap menit, 4 pass
+  masing-masing LIMIT 20 (paid tertua → waiting melewati expiry lokal →
+  waiting segar berumur >120 detik → expired/canceled 24 jam terakhir) +
+  sweep webhook LIMIT 50. Order yang check-nya gagal berturut-turut
+  ≥5 kali dikarantina (`check_fail_count`, tidak lagi diproses) + satu
+  alert admin; order paid yang lebih baru tidak pernah tersumbat antrean
+  poison tanpa batas.
+- QR yatim (Fase 1, K26, tabel `orphan_qr` migrasi 0029): QR Cutiezy yang
+  gagal dibatalkan saat create order gagal, lalu dibayar member, dicatat
+  (token tidak pernah ke panel). Panel orders menampilkan daftarnya +
+  form resolve-berbukti (`POST /v1/admin/orphan-qr/:id/resolve`, peran
+  Support, body `package_id` + `mutation_ref` opsional): server memverifikasi
+  Paid + nominal persis + RRN bila kedua nilai ada, lalu membuat order
+  `paid` dan meng-grant; grant conflict → order diparkir `needs_review`
+  dan QR tertaut ke order itu (lanjutkan lewat tombol resolve order).
 - Refund: Cutiezy TIDAK punya endpoint refund uang (terverifikasi dari kode).
   Maka refund = pencatatan admin (jumlah, alasan, referensi eksternal,
   kumulatif ≤ nominal, wajib bukti lunas) + kompensasi kuota opsional lewat
   adjust kuota beraudit. Uang dikembalikan manual lewat dashboard Cutiezy.
+  Pencatatan memakai row lock pada baris order (Fase 1, B11): dua pencatatan
+  bersamaan tidak bisa melampaui nominal. Order lunas tapi `paid_at` NULL
+  (string `paid_at` Cutiezy gagal diparse) tetap bisa dicatat refund-nya
+  bila statusnya `paid`/`granted` (Fase 1, K23) — bukti alternatifnya
+  check-status Paid + nominal cocok.
 - Kill switch off → tombol beli hilang, tapi order berbayar tetap grant via
   sweep. Webhook URL: https://www.rajacek.com/v1/payments/qris/webhook
   (event asli `qris.payment`; balas 200 ≤5 detik via background).
@@ -208,7 +248,16 @@ di tiap handler (UI saja tidak cukup):
   order, pemakaian tertagih 30 hari). Adjust kuota: `POST
   /v1/admin/members/:id/keys/:key_id/adjust` — HANYA delta relatif
   (≠0, |delta| ≤ 10.000.000, alasan 5–500 karakter, member disabled → 409,
-  kunci non-active → 409, kunci bukan milik member → 404).
+  kunci non-active → 409, kunci bukan milik member → 404). Adjust positif
+  tanpa bucket aktif membuat bucket baru berexpiry now+30 hari (Fase 1,
+  B7 — bukan NULL abadi); bucket + agregat + snapshot ditulis dalam satu
+  transaksi (B9); refund kuota kembali ke bucket ASAL bila masih aktif,
+  bila tidak ke bucket aktif terdekat yang masih punya ruang, bila tidak
+  ada bucket aktif sama sekali refund dicatat hilang di log (K1/K13).
+  Semua mutasi kuota (assign, regenerasi, grant, reserve, refund, adjust)
+  terserialisasi lewat lock per-member lalu data lock, urutan yang sama
+  di semua jalur (Fase 1, B6); regenerasi all-or-nothing — gagal di tengah
+  = kunci lama utuh (K32).
 - Produk: kartu produk TIDAK menampilkan harga rupiah per hit (dihapus
   25 Okt malam; kolom DB `base_price_idr` dibiarkan, tidak dipakai billing).
   Harga yang sah dalam rupiah: harga PAKET (per paket) + nominal order.

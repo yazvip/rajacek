@@ -478,9 +478,43 @@ pub enum QrisPaymentStatus {
 struct CheckResponse {
     status: Option<String>,
     paid_at: Option<String>,
+    /// K25: nominal Cutiezy TIDAK selalu u64 JSON — terima juga string
+    /// numerik ("150000") dan float integral (150000.0). Bentuk yang
+    /// tidak bisa diparse (string non-numerik, float berpecahan)
+    /// menjadi None → cabang Paid memakai 0 → mismatch nominal (tidak
+    /// pernah grant buta). Dulu field ini Option<u64> ketat sehingga
+    /// satu nominal string menggagalkan SELURUH parsing check-status.
+    #[serde(default, deserialize_with = "de_flexible_amount")]
     amount: Option<u64>,
     mutation_ref: Option<String>,
     remaining_seconds: Option<i64>,
+}
+
+/// Deserializer fleksibel untuk nominal check-status (K25).
+fn de_flexible_amount<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    Ok(match value {
+        serde_json::Value::Number(number) => number.as_u64().or_else(|| {
+            number.as_f64().filter(|float| float.fract() == 0.0 && *float >= 0.0)
+                .map(|float| float as u64)
+        }),
+        serde_json::Value::String(text) => {
+            let text = text.trim();
+            text.parse::<u64>().ok().or_else(|| {
+                text.parse::<f64>()
+                    .ok()
+                    .filter(|float| float.fract() == 0.0 && *float >= 0.0)
+                    .map(|float| float as u64)
+            })
+        }
+        _ => None,
+    })
 }
 
 fn parse_cutiezy_datetime(value: &str) -> Option<NaiveDateTime> {
@@ -1456,17 +1490,27 @@ pub async fn record_refund(
         .begin()
         .await
         .map_err(|_| AppError::internal("Refund tidak dapat dicatat"))?;
-    let order = sqlx::query_as::<_, (u64, Option<NaiveDateTime>)>(
-        "SELECT amount_idr, paid_at FROM package_orders WHERE id = ?",
+    // B11: kunci baris order di dalam transaksi (SELECT ... FOR UPDATE)
+    // SEBELUM membaca SUM refund — dulu SELECT biasa tanpa lock, jadi
+    // dua pencatatan bersamaan sama-sama membaca total lama 0 dan
+    // sama-sama lolos cap, total tercatat bisa 2x nominal order.
+    let order = sqlx::query_as::<_, (u64, String, Option<NaiveDateTime>)>(
+        "SELECT amount_idr, status, paid_at FROM package_orders WHERE id = ? FOR UPDATE",
     )
     .bind(order_id.to_string())
     .fetch_optional(&mut *tx)
     .await
     .map_err(|_| AppError::internal("Order tidak dapat dibaca"))?;
-    let Some((order_amount_idr, paid_at)) = order else {
+    let Some((order_amount_idr, order_status, paid_at)) = order else {
         return Err(AppError::not_found("Order tidak ditemukan"));
     };
-    if paid_at.is_none() {
+    // K23: gerbang refund = status paid/granted ATAU paid_at terisi.
+    // Dulu hanya paid_at: order yang sah lunas tapi paid_at-nya NULL
+    // (string paid_at Cutiezy gagal diparsing di cabang Paid) tidak
+    // bisa dicatat refund-nya sama sekali. Status paid/granted sendiri
+    // hanya tercapai setelah Paid + nominal cocok, jadi status adalah
+    // bukti lunas yang sah tanpa paid_at.
+    if paid_at.is_none() && order_status != "paid" && order_status != "granted" {
         return Err(AppError::conflict(
             "Order belum pernah lunas (tidak ada bukti paid); refund tidak dapat dicatat",
         ));
@@ -1508,6 +1552,22 @@ pub async fn record_refund(
     .map_err(|_| AppError::internal("Refund tidak dapat dibaca kembali"))
 }
 
+/// Total refund tercatat untuk satu order (B14). Dipakai gerbang
+/// resolve; 0 bila belum ada refund tercatat.
+pub async fn refund_total_for_order(
+    pool: &MySqlPool,
+    order_id: &str,
+) -> Result<u64, AppError> {
+    let total: i64 = sqlx::query_scalar(
+        "SELECT CAST(COALESCE(SUM(amount_idr), 0) AS SIGNED) FROM refund_records WHERE order_id = ?",
+    )
+    .bind(order_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| AppError::internal("Total refund order tidak dapat dibaca"))?;
+    Ok(if total < 0 { 0 } else { total as u64 })
+}
+
 /// Daftar refund yang tercatat untuk satu order (terbaru dulu).
 pub async fn list_refunds_for_order(
     pool: &MySqlPool,
@@ -1537,6 +1597,303 @@ pub async fn waiting_order_for_member(
     .fetch_optional(pool)
     .await
     .map_err(|_| AppError::internal("Order menunggu tidak dapat dibaca"))
+}
+
+/// Baris QR yatim (K26) — token TIDAK PERNAH masuk view panel.
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct OrphanQrRow {
+    id: String,
+    member_id: String,
+    qris_token: String,
+    amount_idr: u64,
+    status: String,
+}
+
+/// Tampilan QR yatim untuk panel admin (tanpa token).
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct OrphanQrView {
+    pub id: String,
+    pub member_id: String,
+    pub member_email: Option<String>,
+    pub amount_idr: u64,
+    pub status: String,
+    pub resolved_order_id: Option<String>,
+    pub note: Option<String>,
+    pub created_at: NaiveDateTime,
+    pub updated_at: NaiveDateTime,
+}
+
+/// Catat QR yatim yang gagal dibatalkan (K26, best-effort). Dulu yang
+/// tersisa hanya log error: bila member membayar QR itu, uang masuk
+/// tanpa baris order dan tidak ada jalur grant aplikasi sama sekali
+/// (hanya manual lewat dashboard Cutiezy). Kini barisnya tersimpan di
+/// `orphan_qr` sehingga admin bisa me-resolve-berbukti dari panel.
+pub async fn record_orphan_qr(
+    pool: &MySqlPool,
+    member_id: &Uuid,
+    token: &str,
+    amount_idr: u64,
+) {
+    let id = Uuid::now_v7().to_string();
+    if let Err(error) = sqlx::query(
+        "INSERT INTO orphan_qr (id, member_id, qris_token, amount_idr, status, created_at) \
+         VALUES (?, ?, ?, ?, 'open', UTC_TIMESTAMP(6))",
+    )
+    .bind(&id)
+    .bind(member_id.to_string())
+    .bind(token)
+    .bind(amount_idr)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(?error, "QR yatim gagal dicatat ke orphan_qr (hanya log yang tersisa)");
+    }
+}
+
+/// Daftar QR yatim yang belum selesai (open + linked) untuk panel admin.
+pub async fn list_orphan_qrs(pool: &MySqlPool) -> Result<Vec<OrphanQrView>, AppError> {
+    sqlx::query_as::<_, OrphanQrView>(
+        "SELECT o.id, o.member_id, m.email AS member_email, o.amount_idr, o.status, \
+         o.resolved_order_id, o.note, o.created_at, o.updated_at \
+         FROM orphan_qr o LEFT JOIN members m ON m.id = o.member_id \
+         WHERE o.status IN ('open', 'linked') ORDER BY o.created_at DESC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::internal("Daftar QR yatim tidak dapat dibaca"))
+}
+
+/// Resolve-berbukti untuk QR yatim (K26): admin memilih paket + RRN
+/// dari dashboard Cutiezy, server memverifikasi lewat check-status —
+/// hanya `Paid` + nominal SAMA PERSIS dengan nominal QR yatim + RRN
+/// cocok (bila check-status mengembalikan mutation_ref) yang dilanjutkan
+/// ke pembuatan order `paid` + grant. RRN yang diberikan admin tapi
+/// tidak dikembalikan check-status dicatat sebagai referensi (atestasi
+/// admin dari dashboard), bukan ditolak buta — nominal tetap gerbang
+/// kerasnya. Hasil:
+/// - `Granted`/`AlreadyGranted`: kuota mendarat, orphan `resolved`.
+/// - `NeedsReview`: grant tertahan (kunci/member tidak aktif) — order
+///   `needs_review` sudah dibuat dan orphan `linked` ke order itu agar
+///   tidak bisa di-resolve ganda; lanjutkan lewat tombol resolve order.
+/// - `Rejected`: check-status membuktikan belum lunas — orphan tetap
+///   `open`, tidak ada order yang dibuat, tidak ada grant.
+/// Retry aman: order `paid` yang sudah dibuat oleh percobaan sebelumnya
+/// ditemukan lewat token dan dipakai ulang (bukan dibuat ganda).
+pub async fn resolve_orphan_qr(
+    store: &AdminStore,
+    config: &AppConfig,
+    orphan_id: Uuid,
+    package_id: Uuid,
+    mutation_ref_input: Option<&str>,
+) -> Result<(Option<MemberOrderView>, VerifyOutcome), AppError> {
+    let pool = pool_or_unavailable(store)?;
+    let orphan = sqlx::query_as::<_, OrphanQrRow>(
+        "SELECT id, member_id, qris_token, amount_idr, status FROM orphan_qr WHERE id = ?",
+    )
+    .bind(orphan_id.to_string())
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_| AppError::internal("QR yatim tidak dapat dibaca"))?
+    .ok_or_else(|| AppError::not_found("QR yatim tidak ditemukan"))?;
+    if orphan.status != "open" {
+        return Err(AppError::conflict(
+            "QR yatim ini sudah ditangani (resolved/linked); lanjutkan lewat order yang tertaut.",
+        ));
+    }
+    let member_uuid = Uuid::parse_str(&orphan.member_id)
+        .map_err(|_| AppError::internal("Member QR yatim tidak valid"))?;
+    match store.member_by_id(member_uuid).await? {
+        Some(member) if member.status == "active" => {}
+        Some(_) => {
+            return Err(AppError::conflict(
+                "Member masih dinonaktifkan; aktifkan member dulu, baru resolve QR yatim.",
+            ));
+        }
+        None => {
+            return Err(AppError::conflict(
+                "Member tidak ditemukan; resolve QR yatim tidak dapat dilanjutkan.",
+            ));
+        }
+    }
+    let package = store
+        .list_packages()
+        .await
+        .into_iter()
+        .find(|package| package.id == package_id)
+        .filter(|package| package.active)
+        .ok_or_else(|| AppError::bad_request("Paket tidak ditemukan atau tidak aktif"))?;
+    // Order dari percobaan sebelumnya (retry aman): pakai ulang, jangan
+    // buat ganda.
+    let existing = sqlx::query_as::<_, PackageOrderRow>(&format!(
+        "SELECT {ORDER_COLUMNS} FROM package_orders WHERE qris_token = ? \
+         ORDER BY created_at DESC LIMIT 1"
+    ))
+    .bind(&orphan.qris_token)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|_| AppError::internal("Order QR yatim tidak dapat dibaca"))?;
+    if let Some(row) = &existing {
+        match row.status.as_str() {
+            "granted" => {
+                mark_orphan(&pool, &orphan.id, "resolved", Some(&row.id)).await;
+                return Ok((Some(row.member_view()), VerifyOutcome::AlreadyGranted));
+            }
+            "needs_review" => {
+                return Err(AppError::conflict(
+                    "QR yatim ini sudah tertaut ke order needs_review; lanjutkan lewat tombol Grant ulang pada order itu.",
+                ));
+            }
+            "paid" => {
+                // Lanjut ke grant di bawah (order sudah ada).
+            }
+            _ => {
+                return Err(AppError::conflict(
+                    "Sudah ada order lain untuk token QR ini; tangani lewat order itu.",
+                ));
+            }
+        }
+    }
+    let client = QrisClient::new(&config.qris_base_url)?;
+    // Order `paid` dari percobaan sebelumnya sudah terbukti lunas —
+    // langsung grant tanpa check ulang (check yang kini non-Paid tidak
+    // boleh membatalkan bukti lama).
+    let reuse_paid = matches!(
+        existing.as_ref().map(|row| row.status.as_str()),
+        Some("paid")
+    );
+    let (paid_at, check_ref) = if reuse_paid {
+        (None, None)
+    } else {
+        let status = client.check(&orphan.qris_token).await.map_err(|error| {
+            tracing::warn!(?error, "Cek status QRIS (resolve yatim) gagal");
+            error.to_app_error()
+        })?;
+        match status {
+            QrisPaymentStatus::Paid {
+                amount,
+                mutation_ref,
+                paid_at,
+            } => {
+                if amount != orphan.amount_idr {
+                    return Err(AppError::conflict(
+                        "Nominal bayar dari Cutiezy tidak sama dengan nominal QR yatim — grant tidak diizinkan.",
+                    ));
+                }
+                if let (Some(input), Some(check)) =
+                    (mutation_ref_input.map(str::trim).filter(|value| !value.is_empty()), mutation_ref.as_deref())
+                {
+                    if input != check {
+                        return Err(AppError::conflict(
+                            "RRN dari dashboard tidak cocok dengan mutation_ref check-status — grant tidak diizinkan.",
+                        ));
+                    }
+                }
+                (paid_at, mutation_ref)
+            }
+            // Terbukti belum lunas: tolak, orphan tetap open.
+            _ => return Ok((None, VerifyOutcome::Rejected)),
+        }
+    };
+    let mutation_ref = check_ref
+        .or_else(|| mutation_ref_input.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned));
+    let settings = load_qris_settings(&pool).await?;
+    let order_uuid = match &existing {
+        Some(row) => Uuid::parse_str(&row.id)
+            .map_err(|_| AppError::internal("ID order QR yatim tidak valid"))?,
+        None => {
+            let order_id = Uuid::now_v7();
+            let now = Utc::now();
+            sqlx::query(
+                "INSERT INTO package_orders (id, member_id, package_id, package_name, \
+                 price_idr, quota_hits, rate_limit_per_minute, valid_days, amount_idr, \
+                 status, qris_token, qris_string, qris_image_url, qris_expires_at, paid_at, \
+                 mutation_ref, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'paid', ?, NULL, NULL, ?, ?, ?, ?)",
+            )
+            .bind(order_id.to_string())
+            .bind(orphan.member_id.clone())
+            .bind(package.id.to_string())
+            .bind(&package.name)
+            .bind(orphan.amount_idr)
+            .bind(package.included_hits)
+            .bind(package.rate_limit_per_minute)
+            .bind(settings.valid_days)
+            .bind(orphan.amount_idr)
+            .bind(&orphan.qris_token)
+            .bind(now.naive_utc())
+            .bind(paid_at)
+            .bind(mutation_ref.as_deref())
+            .bind(now.naive_utc())
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::internal("Order QR yatim tidak dapat dibuat"))?;
+            order_id
+        }
+    };
+    let order_row = get_order(&pool, &order_uuid)
+        .await?
+        .ok_or_else(|| AppError::internal("Order QR yatim tidak ditemukan"))?;
+    match store
+        .grant_package_order(
+            order_uuid,
+            member_uuid,
+            package.included_hits,
+            settings.valid_days,
+            package.rate_limit_per_minute,
+            package.id,
+        )
+        .await
+    {
+        Ok(GrantOutcome::Granted { .. }) => {
+            mark_orphan(&pool, &orphan.id, "resolved", Some(&order_row.id)).await;
+            let row = get_order(&pool, &order_uuid)
+                .await?
+                .unwrap_or(order_row);
+            Ok((Some(row.member_view()), VerifyOutcome::Granted))
+        }
+        Ok(GrantOutcome::AlreadyGranted) => {
+            mark_orphan(&pool, &orphan.id, "resolved", Some(&order_row.id)).await;
+            let row = get_order(&pool, &order_uuid)
+                .await?
+                .unwrap_or(order_row);
+            Ok((Some(row.member_view()), VerifyOutcome::AlreadyGranted))
+        }
+        Err(error) if error.status == StatusCode::CONFLICT => {
+            // Grant tertahan (kunci/member tidak aktif): parkir order ke
+            // needs_review dan tautkan orphan agar tidak di-resolve ganda.
+            let changed = set_order_status(
+                &pool,
+                &order_row.id,
+                "paid",
+                "needs_review",
+                None,
+                Some("Grant QR yatim ditahan untuk admin (kunci/member tidak aktif atau status berubah)"),
+            )
+            .await?;
+            let row = get_order(&pool, &order_uuid)
+                .await?
+                .unwrap_or(order_row);
+            if changed {
+                mark_orphan(&pool, &orphan.id, "linked", Some(&row.id)).await;
+            }
+            Ok((Some(row.member_view()), VerifyOutcome::NeedsReview))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn mark_orphan(pool: &MySqlPool, orphan_id: &str, status: &str, order_id: Option<&str>) {
+    if let Err(error) = sqlx::query(
+        "UPDATE orphan_qr SET status = ?, resolved_order_id = ?, updated_at = UTC_TIMESTAMP(6) WHERE id = ?",
+    )
+    .bind(status)
+    .bind(order_id)
+    .bind(orphan_id)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(?error, "Status QR yatim gagal diperbarui");
+    }
 }
 
 async fn set_order_status(
@@ -1746,7 +2103,9 @@ pub async fn create_member_order(
             if let Some(token) = error.orphan_token() {
                 if let Err(cancel_error) = client.cancel(&api_key, token).await {
                     tracing::error!(?cancel_error, member_id = %member_id, token_ref = %token_log_ref(token), amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
-
+                    // K26: simpan QR yatim agar bisa di-resolve-berbukti
+                    // dari panel (bukan hanya log).
+                    record_orphan_qr(&pool, &member_id, token, effective).await;
                 }
             }
             return Err(error.to_app_error());
@@ -1807,7 +2166,8 @@ pub async fn create_member_order(
         if let Err(cancel_error) = client.cancel(&api_key, &invoice.token).await {
             // Loud: a paid orphan QR cannot be granted without an order row.
             tracing::error!(?cancel_error, member_id = %member_id, token_ref = %token_log_ref(&invoice.token), amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
-
+            // K26: simpan QR yatim agar bisa di-resolve-berbukti dari panel.
+            record_orphan_qr(&pool, &member_id, &invoice.token, effective).await;
         }
         return Err(AppError::internal("Order tidak dapat dibuat. Coba lagi."));
     }
@@ -1852,6 +2212,108 @@ fn verdict_for_status(status: &str) -> VerifyOutcome {
     }
 }
 
+/// Re-check satu order terminal (`expired`/`canceled`) — B10.
+/// Order yang ditandai expired oleh sweep lokal bisa ternyata lunas di
+/// Cutiezy (bayar telat / settlement lag): dulu verify langsung pulang
+/// `Expired`/`Canceled` tanpa re-check, dan sweep rutin tidak pernah
+/// memungut status terminal, sehingga uang lunas menggantung tanpa
+/// grant sampai admin memanggil resolve mentah. Kini SATU re-check
+/// Cutiezy dilakukan: hanya `Paid` + nominal COCOK yang dilanjutkan ke
+/// mark-paid + grant (CAS dari status terminal saat ini); hasil lain
+/// mengembalikan outcome terminal aslinya TANPA mengubah status.
+/// Check yang error dipropagasikan (bukan disamarkan jadi Expired)
+/// agar sweep menghitungnya sebagai kegagalan dan tombol member
+/// menampilkan galat, bukan status yang menyesatkan.
+async fn verify_terminal_order(
+    store: &AdminStore,
+    config: &AppConfig,
+    order: &PackageOrderRow,
+) -> Result<(MemberOrderView, VerifyOutcome), AppError> {
+    let pool = pool_or_unavailable(store)?;
+    let view = order.member_view();
+    let original = if order.status == "expired" {
+        VerifyOutcome::Expired
+    } else {
+        VerifyOutcome::Canceled
+    };
+    let order_uuid = Uuid::parse_str(&order.id)
+        .map_err(|_| AppError::internal("Member order tidak valid"))?;
+    let member_uuid = Uuid::parse_str(&order.member_id)
+        .map_err(|_| AppError::internal("Member order tidak valid"))?;
+    // Member tidak aktif = grant tidak bisa mendarat; kembalikan outcome
+    // terminal apa adanya (status tidak berubah, resolve admin menjadi
+    // jalurnya setelah member diaktifkan lagi).
+    match store.member_by_id(member_uuid).await? {
+        Some(member) if member.status == "active" => {}
+        _ => return Ok((view, original)),
+    }
+    let Some(token) = order.qris_token.clone() else {
+        return Ok((view, original));
+    };
+    let client = QrisClient::new(&config.qris_base_url)?;
+    let status = client.check(&token).await.map_err(|error| {
+        tracing::warn!(?error, "Cek status QRIS gagal (re-check order terminal)");
+        error.to_app_error()
+    })?;
+    match status {
+        QrisPaymentStatus::Paid {
+            amount,
+            mutation_ref,
+            paid_at,
+        } => {
+            if amount != order.amount_idr {
+                // Bukti bayar ada tapi nominal beda: parkir needs_review
+                // dengan penanda mismatch (resolve berikutnya fast-refuse
+                // lewat guard yang sama seperti jalur waiting).
+                let changed = set_order_status(
+                    &pool,
+                    &order.id,
+                    &order.status,
+                    "needs_review",
+                    mutation_ref.as_deref(),
+                    Some("Nominal bayar tidak sama dengan order"),
+                )
+                .await?;
+                let row = get_order(&pool, &order_uuid).await?.unwrap_or_else(|| order.clone());
+                if !changed {
+                    return Ok(match row.status.as_str() {
+                        "granted" => (row.member_view(), VerifyOutcome::AlreadyGranted),
+                        "paid" => grant_row(store, &pool, &row).await?,
+                        _ => (row.member_view(), verdict_for_status(&row.status)),
+                    });
+                }
+                return Ok((row.member_view(), VerifyOutcome::NeedsReview));
+            }
+            let marked = sqlx::query(
+                "UPDATE package_orders SET status = 'paid', paid_at = ?, \
+                 mutation_ref = ?, updated_at = UTC_TIMESTAMP(6) \
+                 WHERE id = ? AND status = ?",
+            )
+            .bind(paid_at)
+            .bind(mutation_ref.as_deref())
+            .bind(order.id.clone())
+            .bind(order.status.clone())
+            .execute(&pool)
+            .await
+            .map_err(|_| AppError::internal("Order tidak dapat ditandai lunas"))?;
+            if marked.rows_affected() != 1 {
+                let row = get_order(&pool, &order_uuid).await?.unwrap_or_else(|| order.clone());
+                return Ok(match row.status.as_str() {
+                    "granted" => (row.member_view(), VerifyOutcome::AlreadyGranted),
+                    "paid" => grant_row(store, &pool, &row).await?,
+                    _ => (row.member_view(), original),
+                });
+            }
+            let row = get_order(&pool, &order_uuid)
+                .await?
+                .ok_or_else(|| AppError::internal("Order tidak ditemukan setelah ditandai lunas"))?;
+            grant_row(store, &pool, &row).await
+        }
+        // Belum/tidak lunas menurut Cutiezy: outcome terminal dipertahankan.
+        _ => Ok((view, original)),
+    }
+}
+
 /// Verifikasi satu order sampai tuntas (dipakai webhook, tombol cek, sweep).
 /// Tidak pernah menurunkan status paid, tidak pernah grant tanpa nominal
 /// cocok, dan grant hanya lewat store::grant_package_order (atomik).
@@ -1867,9 +2329,12 @@ pub async fn verify_and_grant(
     let view = |row: &PackageOrderRow| row.member_view();
     match order.status.as_str() {
         "granted" => return Ok((view(&order), VerifyOutcome::AlreadyGranted)),
-        "expired" => return Ok((view(&order), VerifyOutcome::Expired)),
-        "canceled" => return Ok((view(&order), VerifyOutcome::Canceled)),
         "needs_review" => return Ok((view(&order), VerifyOutcome::NeedsReview)),
+        // B10: expired/canceled TIDAK langsung pulang — satu re-check
+        // Cutiezy dulu (bayar telat yang terbukti lunas tetap di-grant).
+        "expired" | "canceled" => {
+            return verify_terminal_order(store, config, &order).await;
+        }
         _ => {}
     }
     let member_uuid = Uuid::parse_str(&order.member_id)
@@ -2139,6 +2604,21 @@ pub async fn resolve_needs_review_order(
             ));
         }
     }
+    // B14: order yang SUDAH di-refund penuh TIDAK BOLEH di-grant —
+    // member akan menerima uang kembali + kuota untuk order yang sama.
+    // Cek di awal (pesan jelas, tanpa mengubah status) dan diulang
+    // tepat sebelum grant_row di kedua jalur di bawah (refund yang
+    // tercatat bersamaan dengan re-check tidak boleh menyalip).
+    // Koreksi refund-record (batalkan/koreksi catatan) dilakukan manual
+    // di database — tidak ada endpoint hapus refund-record — sampai
+    // saat itu grant tetap diblokir. Defense-in-depth terakhir ada di
+    // dalam transaksi grant_package_order sendiri.
+    let refund_total = refund_total_for_order(&pool, &order.id).await?;
+    if refund_total > 0 && refund_total >= order.amount_idr {
+        return Err(AppError::conflict(
+            "Order sudah di-refund penuh (total refund tercatat >= nominal order); grant ditolak sampai refund-record dikoreksi.",
+        ));
+    }
     // B7: order tanpa bukti bayar WAJIB re-verifikasi dulu.
     if order.paid_at.is_none() {
         let token = order
@@ -2205,6 +2685,14 @@ pub async fn resolve_needs_review_order(
                 let row = get_order(&pool, &order_id).await?.ok_or_else(|| {
                     AppError::internal("Order tidak ditemukan setelah ditandai lunas")
                 })?;
+                // B14: ulang cek refund tepat sebelum grant (refund yang
+                // tercatat selama re-check tidak boleh menyalip).
+                let refund_total = refund_total_for_order(&pool, &row.id).await?;
+                if refund_total > 0 && refund_total >= row.amount_idr {
+                    return Err(AppError::conflict(
+                        "Order sudah di-refund penuh; grant ditolak.",
+                    ));
+                }
                 return grant_row(store, &pool, &row).await;
             }
             // Terbukti BELUM lunas: tolak grant, status tidak diubah.
@@ -2244,6 +2732,13 @@ pub async fn resolve_needs_review_order(
     let row = get_order(&pool, &order_id)
         .await?
         .ok_or_else(|| AppError::internal("Order tidak ditemukan setelah reset"))?;
+    // B14: ulang cek refund tepat sebelum grant.
+    let refund_total = refund_total_for_order(&pool, &row.id).await?;
+    if refund_total > 0 && refund_total >= row.amount_idr {
+        return Err(AppError::conflict(
+            "Order sudah di-refund penuh; grant ditolak.",
+        ));
+    }
     grant_row(store, &pool, &row).await
 }
 
@@ -2375,6 +2870,7 @@ pub async fn sweep_open_orders_now(store: Arc<AdminStore>, config: Arc<AppConfig
     let candidates = sqlx::query_as::<_, PackageOrderRow>(&format!(
         "SELECT {ORDER_COLUMNS} FROM package_orders \
          WHERE status IN ('waiting_payment', 'paid') \
+         AND check_fail_count < {SWEEP_MAX_CONSECUTIVE_CHECK_FAILURES} \
          ORDER BY created_at ASC LIMIT 50"
     ))
     .fetch_all(&pool)
@@ -2406,30 +2902,152 @@ pub async fn sweep_loop(store: Arc<AdminStore>, config: Arc<AppConfig>) {
     }
 }
 
+/// Ambang karantina sweep (B13): order yang check-nya gagal N kali
+/// berturut-turut dikeluarkan dari kandidat sweep rutin (dan sweep
+/// pemicu webhook) sampai resolve manual / verify sukses. N=5: cukup
+/// besar untuk mentolerir blip Cutiezy sesaat, cukup kecil agar 20
+/// order racun tidak pernah mengisi seluruh LIMIT pass selama
+/// berjam-jam. Pelampauan ambang memicu alert admin (sekali, tepat
+/// saat hitungan mencapai N — order yang sudah dikarantina tidak lagi
+/// diproses sehingga alert tidak berulang tiap menit).
+pub const SWEEP_MAX_CONSECUTIVE_CHECK_FAILURES: i64 = 5;
+
+/// Jendela re-check order terminal oleh sweep rutin (B10): order yang
+/// ditandai expired/canceled dalam 24 jam terakhir masih bisa jadi
+/// bayar telat. Yang lebih lama ditangani on-demand (tombol "Saya sudah
+/// bayar" member / tombol resolve admin) agar sweep tidak me-re-check
+/// seluruh riwayat terminal setiap menit.
+const SWEEP_TERMINAL_RECENT_HOURS: i64 = 24;
+
+/// Umur minimum order waiting segar untuk digilir sweep rutin (B12):
+/// order yang baru dibuat (< 120 detik) dibiarkan menunggu webhook
+/// dulu, agar sweep tidak memborbardir check-status tiap menit untuk
+/// order yang baru saja dibuat — tetapi order yang webhook-nya hilang
+/// tetap ter-grant dalam ~1–3 menit, bukan menunggu sampai expiry
+/// lokal 15 menit.
+const SWEEP_FRESH_WAITING_MIN_AGE_SECS: i64 = 120;
+
 async fn sweep_once(store: &AdminStore, config: &AppConfig) {
     let Ok(pool) = pool_or_unavailable(store) else {
         return;
     };
-    let candidates = sqlx::query_as::<_, PackageOrderRow>(&format!(
-        "SELECT {ORDER_COLUMNS} FROM package_orders \
-         WHERE (status = 'waiting_payment' AND qris_expires_at < UTC_TIMESTAMP(6)) \
-            OR status = 'paid' ORDER BY created_at ASC LIMIT 20"
-    ))
-    .fetch_all(&pool)
-    .await;
-    let candidates = match candidates {
-        Ok(rows) => rows,
-        Err(error) => {
-            tracing::warn!(?error, "Sweep order gagal membaca kandidat");
-            return;
-        }
-    };
-    for candidate in candidates {
-        let Ok(order_id) = Uuid::parse_str(&candidate.id) else {
-            continue;
+    // B12/B13: EMPAT pass dengan LIMIT masing-masing, bukan satu LIMIT
+    // 20 untuk semua — dulu 20 order racun tertua bisa mengisi seluruh
+    // kuota pass dan order paid yang lebih baru tidak pernah digilir.
+    // Pass paid didahulukan (grant tertinggal adalah yang paling
+    // merugikan member), lalu waiting-lewat-expiry, waiting-segar
+    // (webhook hilang), dan terminal-terbaru (bayar telat, B10).
+    // Kandidat yang sudah dikarantina (check_fail_count >= N) tidak
+    // diambil di pass mana pun.
+    let passes: [(&str, String); 4] = [
+        (
+            "paid",
+            format!(
+                "SELECT {{ORDER_COLUMNS}} FROM package_orders \
+                 WHERE status = 'paid' AND check_fail_count < {SWEEP_MAX_CONSECUTIVE_CHECK_FAILURES} \
+                 ORDER BY created_at ASC LIMIT 20"
+            ),
+        ),
+        (
+            "waiting-expired",
+            format!(
+                "SELECT {{ORDER_COLUMNS}} FROM package_orders \
+                 WHERE status = 'waiting_payment' AND qris_expires_at < UTC_TIMESTAMP(6) \
+                 AND check_fail_count < {SWEEP_MAX_CONSECUTIVE_CHECK_FAILURES} \
+                 ORDER BY created_at ASC LIMIT 20"
+            ),
+        ),
+        (
+            "waiting-fresh",
+            format!(
+                "SELECT {{ORDER_COLUMNS}} FROM package_orders \
+                 WHERE status = 'waiting_payment' AND qris_expires_at >= UTC_TIMESTAMP(6) \
+                 AND created_at < UTC_TIMESTAMP(6) - INTERVAL {SWEEP_FRESH_WAITING_MIN_AGE_SECS} SECOND \
+                 AND check_fail_count < {SWEEP_MAX_CONSECUTIVE_CHECK_FAILURES} \
+                 ORDER BY created_at ASC LIMIT 20"
+            ),
+        ),
+        (
+            "terminal-recent",
+            format!(
+                "SELECT {{ORDER_COLUMNS}} FROM package_orders \
+                 WHERE status IN ('expired', 'canceled') \
+                 AND updated_at > UTC_TIMESTAMP(6) - INTERVAL {SWEEP_TERMINAL_RECENT_HOURS} HOUR \
+                 AND check_fail_count < {SWEEP_MAX_CONSECUTIVE_CHECK_FAILURES} \
+                 ORDER BY updated_at DESC LIMIT 20"
+            ),
+        ),
+    ];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (pass_name, query) in passes {
+        let query = query.replace("{ORDER_COLUMNS}", ORDER_COLUMNS);
+        let candidates = match sqlx::query_as::<_, PackageOrderRow>(&query)
+            .fetch_all(&pool)
+            .await
+        {
+            Ok(rows) => rows,
+            Err(error) => {
+                tracing::warn!(?error, pass = pass_name, "Sweep order gagal membaca kandidat");
+                continue;
+            }
         };
-        if let Err(error) = verify_and_grant(store, config, order_id).await {
+        for candidate in candidates {
+            if !seen.insert(candidate.id.clone()) {
+                continue;
+            }
+            sweep_process_candidate(store, config, &pool, &candidate).await;
+        }
+    }
+}
+
+/// Satu kandidat sweep: sukses (outcome apa pun, termasuk Waiting)
+/// me-reset hitungan gagal ke 0; error check menaikkan hitungan, dan
+/// tepat saat mencapai ambang, order dikarantina + alert admin.
+async fn sweep_process_candidate(
+    store: &AdminStore,
+    config: &AppConfig,
+    pool: &MySqlPool,
+    candidate: &PackageOrderRow,
+) {
+    let Ok(order_id) = Uuid::parse_str(&candidate.id) else {
+        return;
+    };
+    match verify_and_grant(store, config, order_id).await {
+        Ok(_) => {
+            let _ = sqlx::query(
+                "UPDATE package_orders SET check_fail_count = 0 WHERE id = ? AND check_fail_count <> 0",
+            )
+            .bind(&candidate.id)
+            .execute(pool)
+            .await;
+        }
+        Err(error) => {
             tracing::warn!(?error, order_id = %candidate.id, "Sweep order gagal");
+            let _ = sqlx::query(
+                "UPDATE package_orders SET check_fail_count = check_fail_count + 1 WHERE id = ?",
+            )
+            .bind(&candidate.id)
+            .execute(pool)
+            .await;
+            let count: Option<i64> = sqlx::query_scalar(
+                "SELECT check_fail_count FROM package_orders WHERE id = ?",
+            )
+            .bind(&candidate.id)
+            .fetch_optional(pool)
+            .await
+            .ok()
+            .flatten();
+            if count == Some(SWEEP_MAX_CONSECUTIVE_CHECK_FAILURES) {
+                crate::alerts::alert_with_store(
+                    store,
+                    "Order sweep dikarantina",
+                    &format!(
+                        "Order {} gagal check-status {}x berturut-turut; dikeluarkan dari sweep rutin sampai resolve manual (tombol Grant ulang panel).",
+                        candidate.id, SWEEP_MAX_CONSECUTIVE_CHECK_FAILURES
+                    ),
+                )
+                .await;
+            }
         }
     }
 }
@@ -2437,6 +3055,30 @@ async fn sweep_once(store: &AdminStore, config: &AppConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn check_status_amount_accepts_string_and_float() {
+        // K25: nominal string/float tidak boleh menggagalkan parsing.
+        let numeric: CheckResponse =
+            serde_json::from_str(r#"{"status":"paid","amount":150000}"#).unwrap();
+        assert_eq!(numeric.amount, Some(150000));
+        let string: CheckResponse =
+            serde_json::from_str(r#"{"status":"paid","amount":"150000"}"#).unwrap();
+        assert_eq!(string.amount, Some(150000));
+        let float: CheckResponse =
+            serde_json::from_str(r#"{"status":"paid","amount":150000.0}"#).unwrap();
+        assert_eq!(float.amount, Some(150000));
+        // String non-numerik / float berpecahan -> None (bukan gagal
+        // parse seluruh bodi); cabang Paid memakai 0 -> mismatch.
+        let bad: CheckResponse =
+            serde_json::from_str(r#"{"status":"paid","amount":"seratus"}"#).unwrap();
+        assert_eq!(bad.amount, None);
+        let frac: CheckResponse =
+            serde_json::from_str(r#"{"status":"paid","amount":150000.5}"#).unwrap();
+        assert_eq!(frac.amount, None);
+        let missing: CheckResponse = serde_json::from_str(r#"{"status":"paid"}"#).unwrap();
+        assert_eq!(missing.amount, None);
+    }
 
     #[test]
     fn token_log_ref_never_contains_full_token() {

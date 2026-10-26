@@ -261,6 +261,11 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/orders/:id/refunds",
             get(list_order_refunds),
         )
+        .route("/v1/admin/orphan-qr", get(list_orphan_qrs))
+        .route(
+            "/v1/admin/orphan-qr/:id/resolve",
+            post(resolve_orphan_qr_order),
+        )
         .route("/v1/admin/alerts/status", get(get_alert_status))
         .route("/", get(public_landing))
         .with_state(state.clone());
@@ -1659,14 +1664,15 @@ pub(crate) async fn execute_validation(
     let mut charged = outcome.status.is_billable();
     let mut free_invalid = false;
     if outcome.status.is_invalid_pool() {
+        // K2: klaim + refund atomik (satu transaksi) — bukan dua
+        // operasi terpisah yang bisa terbelah oleh crash di antaranya.
         if state
             .store
-            .claim_invalid_free_slot(&api_key.prefix, wib_day)
+            .claim_free_slot_with_refund(&api_key.prefix, reserved_bucket, wib_day)
             .await
         {
             free_invalid = true;
             charged = false;
-            state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
         }
     } else if !outcome.status.is_billable() {
         state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
@@ -3668,8 +3674,14 @@ fn quota_adjust_audit_detail(
     outcome: &crate::store::QuotaAdjustment,
     reason: &str,
 ) -> String {
+    let bucket_note = match outcome.new_bucket_expires_at {
+        // B7: pembuatan bucket baru adjust WAJIB terlihat di jejak audit
+        // (dulu kuota abadi tercipta tanpa jejak expiry apa pun).
+        Some(expiry) => format!("; bucket baru s/d {}", expiry.format("%Y-%m-%d")),
+        None => String::new(),
+    };
     format!(
-        "Member {email}: kunci {} delta {:+} (sisa {} → {}, total {} → {}); alasan: {reason}",
+        "Member {email}: kunci {} delta {:+} (sisa {} → {}, total {} → {}){bucket_note}; alasan: {reason}",
         outcome.prefix,
         outcome.delta,
         outcome.quota_remaining_before,
@@ -4359,7 +4371,7 @@ fn api_key_from_headers(headers: &HeaderMap) -> Option<&str> {
 /// reports whether the key was generated server-side (the caller echoes it
 /// back in the response headers so the client can learn and reuse it). A
 /// key the client DID supply is still validated strictly.
-fn idempotency_key_or_generate(headers: &HeaderMap) -> Result<(String, bool), AppError> {
+pub(crate) fn idempotency_key_or_generate(headers: &HeaderMap) -> Result<(String, bool), AppError> {
     let supplied = headers
         .get("idempotency-key")
         .and_then(|value| value.to_str().ok())
@@ -4432,6 +4444,13 @@ pub(crate) fn normalize_ewallet_request(
     {
         return Err(AppError::bad_request("Provider e-wallet tidak valid"));
     }
+    // K3: slug harus ada di daftar 9 slug yang didukung — diperiksa DI
+    // SINI (sebelum idempotensi/rate-limit/reserve di execute_validation),
+    // bukan baru di dalam attempt provider setelah reserve (yang
+    // menghanguskan slot rate-limit dan memberi 400 terlambat).
+    if !crate::ewallet_codes::is_supported_slug(&provider) {
+        return Err(AppError::bad_request("Kode e-wallet tidak didukung"));
+    }
     let account_number = normalize_numeric(&input.account_number, 6, 32, "Nomor akun e-wallet")?;
     Ok(ProviderValidationRequest {
         product: ValidationProduct::Ewallet,
@@ -4464,6 +4483,17 @@ pub(crate) fn normalize_whatsapp_request(
     let original = input.phone_number.trim();
     if original.len() > 32 {
         return Err(AppError::bad_request("Nomor WhatsApp terlalu panjang"));
+    }
+    // K4: karakter selain digit, '+', spasi, dan '-' DITOLAK — huruf
+    // tidak boleh lagi dibuang diam-diam (nomor salah ketik yang
+    // mengandung huruf bisa tervalidasi untuk nomor yang berbeda).
+    if !original
+        .chars()
+        .all(|character| character.is_ascii_digit() || matches!(character, '+' | ' ' | '-'))
+    {
+        return Err(AppError::bad_request(
+            "Nomor WhatsApp hanya boleh berisi digit, '+', spasi, dan '-'",
+        ));
     }
     let mut phone = original
         .chars()
@@ -5420,6 +5450,75 @@ async fn list_order_refunds(
     ))
 }
 
+/// QR yatim (K26): daftar untuk panel admin. Peran: Viewer (read-only).
+async fn list_orphan_qrs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::qris::OrphanQrView>>, AppError> {
+    require_admin_role(&state, &headers, Role::Viewer).await?;
+    let pool = qris_pool(&state).await?;
+    Ok(Json(crate::qris::list_orphan_qrs(&pool).await?))
+}
+
+#[derive(serde::Deserialize)]
+struct ResolveOrphanQrRequest {
+    package_id: String,
+    /// RRN mutasi dari dashboard Cutiezy (opsional, tapi dianjurkan).
+    mutation_ref: Option<String>,
+}
+
+/// Resolve-berbukti QR yatim (K26): admin memilih paket + RRN, server
+/// memverifikasi Paid + nominal + RRN lewat check-status sebelum grant.
+/// Respons membawa `outcome` eksplisit (granted/already_granted/
+/// needs_review/rejected) + order bila ada — pemanggil panel WAJIB
+/// menampilkan outcome itu, bukan menebak dari status HTTP.
+/// Peran: Support (sama seperti resolve order).
+#[derive(serde::Serialize)]
+struct ResolveOrphanQrResponse {
+    outcome: crate::qris::VerifyOutcome,
+    order: Option<crate::qris::MemberOrderView>,
+}
+
+async fn resolve_orphan_qr_order(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(orphan_id): Path<String>,
+    Json(input): Json<ResolveOrphanQrRequest>,
+) -> Result<Json<ResolveOrphanQrResponse>, AppError> {
+    let principal = require_admin_role(&state, &headers, Role::Support).await?;
+    let orphan_uuid =
+        Uuid::parse_str(&orphan_id).map_err(|_| AppError::bad_request("ID QR yatim tidak valid"))?;
+    let package_uuid =
+        Uuid::parse_str(&input.package_id).map_err(|_| AppError::bad_request("ID paket tidak valid"))?;
+    let (order, outcome) = crate::qris::resolve_orphan_qr(
+        &state.store,
+        &state.config,
+        orphan_uuid,
+        package_uuid,
+        input.mutation_ref.as_deref(),
+    )
+    .await?;
+    let detail = match outcome {
+        crate::qris::VerifyOutcome::Granted => {
+            format!("QR yatim {orphan_uuid} di-resolve: kuota di-grant.")
+        }
+        crate::qris::VerifyOutcome::AlreadyGranted => {
+            format!("QR yatim {orphan_uuid} sudah ter-grant sebelumnya.")
+        }
+        crate::qris::VerifyOutcome::NeedsReview => {
+            format!("QR yatim {orphan_uuid} DITAHAN (needs_review) — grant belum terjadi; lanjutkan lewat order tertaut.")
+        }
+        crate::qris::VerifyOutcome::Rejected => {
+            format!("QR yatim {orphan_uuid} DITOLAK — check-status membuktikan belum lunas.")
+        }
+        other => {
+            format!("QR yatim {orphan_uuid} di-resolve (hasil: {other:?}).")
+        }
+    };
+    record_admin_activity(&state, &principal, "Resolve QR yatim", detail).await;
+    Ok(Json(ResolveOrphanQrResponse { outcome, order }))
+}
+
 // Peran: Viewer (ditegakkan server-side via require_admin_role).
 // Status alert: aktif hanya bila env Telegram ter-set. Respons ini
 // TIDAK PERNAH memuat nilai env apa pun, hanya boolean.
@@ -5939,6 +6038,7 @@ mod member_detail_adjust_tests {
             quota_total_after: 1250,
             quota_remaining_before: 900,
             quota_remaining_after: 1150,
+            new_bucket_expires_at: None,
         };
         let detail =
             quota_adjust_audit_detail("member-tes@example.test", &outcome, "koreksi paket");

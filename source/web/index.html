@@ -323,6 +323,7 @@
             <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Daftar order</span><h2>Order terbaru</h2></div><span class="count-chip" id="orders-count">Memuat...</span></div>
             <form id="orders-filter" class="form-grid"><label>Cari (email/id order/paket)<input id="orders-q" type="text" placeholder="mis. ani@contoh.id" autocomplete="off" /></label><label>Filter status<select id="orders-status-filter"><option value="">Semua status</option><option value="waiting_payment">Menunggu bayar</option><option value="paid">Lunas (belum grant)</option><option value="granted">Ter-grant</option><option value="expired">Kedaluwarsa</option><option value="canceled">Dibatalkan</option><option value="needs_review">Perlu tinjauan</option></select></label><label>Dari tanggal<input id="orders-from-filter" type="date"></label><label>Sampai tanggal<input id="orders-to-filter" type="date"></label><div class="form-actions full-width"><button class="button button-primary" id="orders-apply-filter" type="button">Terapkan filter</button><button class="button button-secondary" id="export-orders" type="button">Export CSV order</button></div><p class="tester-audit-note full-width">Rentang tanggal maksimal 366 hari; isi keduanya sekaligus. Ringkasan di bawah memakai rentang yang sama.</p></form>
             <div id="orders-recon" class="metric-grid"></div>
+            <div id="orphan-qr-box"></div>
             <p id="alert-status" class="tester-audit-note"></p>
             <div class="table-scroll"><table><thead><tr><th>Waktu</th><th>Member</th><th>Paket</th><th>Nominal</th><th>Status</th><th></th></tr></thead><tbody id="orders-table"></tbody></table></div>
             <div class="form-actions full-width"><button class="button button-secondary" id="orders-prev" type="button">← Sebelumnya</button><span id="orders-page-info" class="tester-audit-note"></span><button class="button button-secondary" id="orders-next" type="button">Berikutnya →</button></div>
@@ -394,6 +395,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261026-13" defer></script>
+    <script src="/app.js?v=20261026-14" defer></script>
   </body>
 </html>

@@ -1373,16 +1373,17 @@ pub async fn sandbox_check(
         }
     };
     let client_ip = effective_client_ip(&headers, address.ip());
-    // K11(b) (audit 2026-10-25): sandbox dulu tidak mengembalikan kunci
-    // idempotensinya, sehingga retry sandbox tidak pernah bisa replay.
-    // Kunci yang digenerate kini dikembalikan di header `idempotency-key`
-    // — nama header yang sama dengan yang dipakai jalur API publik di
-    // api.rs (validate() mengembalikan kunci generated-nya di header yang
-    // sama, dan CORS sudah mengeksposnya). Perubahan portal JS TIDAK
-    // diperlukan: header ini hanya perlu ada bagi klien yang mau me-retry
-    // dengan kunci yang sama; portal yang mengabaikannya berperilaku
-    // seperti sebelumnya (klik baru = kunci baru = cek baru).
-    let sandbox_key = format!("portal-{}", uuid::Uuid::new_v4().simple());
+    // K11: sandbox memakai kunci idempotensi yang SAMA untuk retry
+    // submit yang sama. Dulu server selalu menggenerate kunci baru per
+    // submit dan portal mengabaikan header yang dikembalikan, sehingga
+    // submit ulang setelah error/timeout selalu menagih cek baru.
+    // Kini: portal mengirim kunci yang disimpannya (state halaman) di
+    // header `Idempotency-Key`; server memakai kunci itu (divalidasi
+    // seperti jalur API publik) dan hanya menggenerate bila klien tidak
+    // mengirim. Kunci yang digenerate tetap dikembalikan di header
+    // `idempotency-key` untuk klien yang menyimpannya belakangan.
+    let (sandbox_key, key_generated) =
+        crate::api::idempotency_key_or_generate(&headers)?;
     let mut response = crate::api::execute_validation(
         state,
         context,
@@ -1394,10 +1395,12 @@ pub async fn sandbox_check(
         "portal",
     )
     .await?;
-    if let Ok(value) = HeaderValue::from_str(&sandbox_key) {
-        response
-            .headers_mut()
-            .insert(HeaderName::from_static("idempotency-key"), value);
+    if key_generated {
+        if let Ok(value) = HeaderValue::from_str(&sandbox_key) {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("idempotency-key"), value);
+        }
     }
     Ok(response)
 }

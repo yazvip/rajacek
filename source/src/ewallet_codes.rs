@@ -29,6 +29,13 @@ pub fn list() -> &'static [(&'static str, &'static str)] {
     ]
 }
 
+/// True bila slug e-wallet ada di daftar 9 slug yang didukung (K3:
+/// validasi di handler, sebelum reserve — bukan di dalam attempt
+/// provider setelah rate-limit + reserve).
+pub fn is_supported_slug(public_code: &str) -> bool {
+    list().iter().any(|(code, _)| *code == public_code)
+}
+
 pub fn tukangcek_id(public_code: &str) -> Result<&'static str, AppError> {
     TUKANGCEK_IDS
         .iter()
