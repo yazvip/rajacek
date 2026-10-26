@@ -1914,7 +1914,7 @@ td.empty-state { display: table-cell; }
    Target/Nama/Hasil/Latensi/Request ID — aturan nowrap bergeser ikut
    nomor kolom baru; hanya kolom Nama (ke-6) yang boleh membungkus,
    dan HANYA di spasi (overflow-wrap/word-break normal). */
-#view-history .table-scroll table { min-width: 1180px; }
+#view-history .table-scroll table { min-width: 960px; }
 #history-table td { overflow-wrap: normal; padding: 8px 12px; }
 #history-table td:nth-child(1),
 #history-table td:nth-child(2),
@@ -1924,7 +1924,7 @@ td.empty-state { display: table-cell; }
 #history-table td:nth-child(7),
 #history-table td:nth-child(9) { white-space: nowrap; }
 #history-table td:nth-child(6) { white-space: normal; overflow-wrap: normal; word-break: normal; }
-#history-table td:nth-child(8) .cell-sub { white-space: nowrap; }
+#history-table td:nth-child(8) .cell-sub { white-space: normal; }
 #history-table td code { overflow-wrap: normal; }
 #history-table td.history-date { font-size: 12px; line-height: 1.45; }
 #history-table td.history-date span { white-space: nowrap; }
