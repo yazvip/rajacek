@@ -489,9 +489,9 @@
         <div id="login-banner-maintenance" class="site-banner maintenance" hidden></div>
         <h1>Masuk Portal Member</h1>
         <p class="sub">Lihat sisa kuota, riwayat validasi, dan penggunaan API Anda.</p>
-        <a class="google-btn" href="/v1/auth/google/member/start" style="margin-top:18px;">
+        <a class="google-btn" id="googleBtn" href="/v1/auth/google/member/start" style="margin-top:18px;">
           <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path fill="#4285F4" d="M23.5 12.3c0-.9-.1-1.5-.3-2.2H12v4.3h6.5c-.1 1.1-.8 2.7-2.4 3.8l3.7 2.9c2.3-2.1 3.7-5.2 3.7-9z"/><path fill="#34A853" d="M12 24c3.2 0 5.9-1.1 7.9-2.9l-3.7-2.9c-1 .7-2.4 1.2-4.2 1.2-3.2 0-5.9-2.1-6.8-5l-3.9 3C3.3 21.3 7.3 24 12 24z"/><path fill="#FBBC05" d="M5.2 14.4c-.2-.7-.4-1.5-.4-2.4s.1-1.7.4-2.4l-3.9-3C.5 8.2 0 10 0 12s.5 3.8 1.3 5.4l3.9-3z"/><path fill="#EA4335" d="M12 4.7c1.8 0 3 .8 3.7 1.4l3.3-3.2C17.9 1.1 15.2 0 12 0 7.3 0 3.3 2.7 1.3 6.6l3.9 3c.9-2.8 3.6-4.9 6.8-4.9z"/></svg>
-          Masuk dengan Google — gratis trial 10× cek
+          Masuk dengan Google — gratis trial 1000× cek, 7 hari
         </a>
         <div class="divider"><span>atau pakai API key</span></div>
         <form id="loginForm">
@@ -499,6 +499,7 @@
           <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="rv_live_…" required />
           <button class="primary" type="submit" id="loginBtn">Masuk</button>
           <div class="error" id="loginError"></div>
+          <button type="button" id="authRetryBtn" class="hidden">Coba lagi dengan Google</button>
         </form>
         <p class="fineprint">API key hanya dipakai untuk membuat sesi 12 jam dan tidak disimpan di peramban maupun server. Jangan bagikan key Anda kepada siapa pun.</p>
       </div>
@@ -532,6 +533,7 @@
         <div class="app-container">
           <div id="site-banner-announcement" class="site-banner" hidden></div>
           <div id="site-banner-maintenance" class="site-banner maintenance" hidden></div>
+          <div id="portalError" class="site-banner maintenance hidden" role="alert"></div>
 
           <!-- PAGE: RINGKASAN -->
           <section id="page-ringkasan" class="page-section active stack">
@@ -965,7 +967,16 @@
 
       async function api(path, options) {
         const res = await fetch(path, { credentials: 'same-origin', ...(options || {}) });
-        if (res.status === 401) { showLogin(); throw new Error('Sesi berakhir. Silakan masuk lagi.'); }
+        if (res.status === 401) {
+          // KECIL-2: kick karena sesi kedaluwarsa WAJIB menjelaskan diri —
+          // pesan ini diisi di sini (pusat) sehingga penangkap di init
+          // maupun auto-refresh yang menelan exception tidak bisa
+          // membuangnya diam-diam. Logout normal tidak lewat api(),
+          // jadi tidak pernah memunculkan pesan ini.
+          showLogin();
+          $('loginError').textContent = 'Sesi berakhir. Silakan masuk lagi.';
+          throw new Error('Sesi berakhir. Silakan masuk lagi.');
+        }
         return res;
       }
 
@@ -975,6 +986,8 @@
         $('logoutBtn').classList.add('hidden');
         $('sidebar').classList.add('hidden');
         $('menuBtn').classList.add('hidden');
+        const retryBtn = $('authRetryBtn');
+        if (retryBtn) retryBtn.classList.add('hidden');
         closeSidebarDrawer();
       }
       function showApp(prefix) {
@@ -984,6 +997,53 @@
         $('sidePrefix').textContent = prefix;
         $('sidebar').classList.remove('hidden');
         $('menuBtn').classList.remove('hidden');
+      }
+
+      /* KECIL-1: banner error portal. Ditulis SEBELUM loader melempar,
+         sehingga penangkap yang menelan exception (init, auto-refresh
+         5 detik) tidak bisa menyembunyikannya. Banner bertahan sampai
+         loadAll() berikutnya sukses penuh (kondisi pulih). */
+      function showPortalError(message) {
+        const el = $('portalError');
+        if (!el) return;
+        el.textContent = message;
+        el.classList.remove('hidden');
+      }
+      function hidePortalError() {
+        const el = $('portalError');
+        if (el) el.classList.add('hidden');
+      }
+      /* KECIL-1: penegak !res.ok untuk loader portal. 401 sudah
+         ditangani api() (kick + pesan sesi berakhir) sebelum sampai
+         sini. 403 = akun dinonaktifkan -> showLogin() + pesan jelas.
+         503 dan status lain = tetap di portal + banner, tanpa usir. */
+      async function throwIfPortalError(res) {
+        if (res.ok) return res;
+        const data = await res.json().catch(() => ({}));
+        const serverMessage = typeof data.message === 'string' && data.message ? data.message : null;
+        if (res.status === 403) {
+          const message = 'Akun Anda dinonaktifkan. Silakan hubungi dukungan bila ini keliru.';
+          showLogin();
+          $('loginError').textContent = message;
+          throw new Error(message);
+        }
+        const message = res.status === 503
+          ? 'Layanan tidak tersedia saat ini — data belum diperbarui. Silakan coba lagi nanti.'
+          : (serverMessage || 'Gagal memuat data portal.');
+        showPortalError(message);
+        throw new Error(message);
+      }
+
+      /* BESAR-2 (sisi portal): gating tombol Google member, mengikuti
+         pola admin (app.js updateSessionUI menyembunyikan tombol bila
+         google_login_configured false). Field `google_member_login_configured`
+         ada di /v1/member/session (SessionResponse, kedua cabang) —
+         gating hanya menyembunyikan bila field itu false eksplisit;
+         bila field absen (backend lama), tombol tetap tampil. */
+      function applyGoogleLoginGating(sessionData) {
+        const btn = $('googleBtn');
+        if (!btn) return;
+        btn.classList.toggle('hidden', sessionData && sessionData.google_member_login_configured === false);
       }
 
       /* AREA 6: banner publik dari GET /v1/status (tanpa login).
@@ -1090,10 +1150,12 @@
       async function loadAll() {
         loadSiteBanners();
         await Promise.all([loadOverview(), loadUsage(), loadHistory()]);
+        hidePortalError();
       }
 
       async function loadOverview() {
         const res = await api('/v1/member/overview');
+        await throwIfPortalError(res);
         const d = await res.json();
         $('statQuota').textContent = fmtNum(d.remaining_quota);
         if (typeof d.invalid_free_used_today === 'number') {
@@ -1196,6 +1258,7 @@
 
       async function loadUsage() {
         const res = await api('/v1/member/usage');
+        await throwIfPortalError(res);
         const d = await res.json();
         const max = Math.max(1, ...d.days.map(x => x.total));
         const total14 = d.days.reduce((sum, x) => sum + x.total, 0);
@@ -1249,6 +1312,7 @@
         if (product) params.set('product', product);
         if (outcome) params.set('outcome', outcome);
         const res = await api('/v1/member/history?' + params.toString());
+        await throwIfPortalError(res);
         const d = await res.json();
         state.total = d.total;
         if (d.stats) {
@@ -1541,9 +1605,9 @@
 
       // Anti-farming (27 Okt 2026): trial ditahan karena IP signup
       // sudah mencapai batas 5 grant per 24 jam. Param dibaca
-      // SEBELUM handleReveal menghapus query URL (replaceState ke
-      // pathname) — dan penghapusannya di sini hanya membuang param
-      // trial, supaya token reveal tetap bisa dibaca sesudahnya.
+      // SEBELUM handleReveal menghapus query URL — dan penghapusannya
+      // di sini hanya membuang param trial, supaya flag revealed
+      // tetap bisa dibaca sesudahnya.
       function handleTrialHeld() {
         const params = new URLSearchParams(location.search);
         if (params.get('trial') !== 'held') return;
@@ -1555,19 +1619,28 @@
       $('trialHeldClose').addEventListener('click', () => $('trialHeldCard').classList.add('hidden'));
 
       async function handleReveal() {
+        // KECIL-4: tidak ada lagi token di URL. Backend mengubah
+        // callback menjadi redirect /member?revealed=1 + cookie
+        // HttpOnly sekali pakai; portal menukarnya lewat POST TANPA
+        // body — cookie terkirim otomatis (same-origin). Nilai token
+        // tidak pernah dibaca dari URL di sini; param legacy
+        // dibuang tanpa dibaca nilainya bila masih tersisa.
         const params = new URLSearchParams(location.search);
-        const token = params.get('reveal');
-        if (!token) return;
-        history.replaceState({}, '', location.pathname);
+        const hadRevealed = params.get('revealed') === '1';
+        params.delete('revealed');
+        params.delete('reveal');
+        const rest = params.toString();
+        if (location.search.slice(1) !== rest) {
+          history.replaceState({}, '', rest ? `${location.pathname}?${rest}` : location.pathname);
+        }
+        if (!hadRevealed) return;
         try {
-          // K33 (Fase 3): token dikirim di body POST, BUKAN query URL —
-          // query URL tersimpan di log akses/proxy sebelum replaceState.
-          const res = await fetch('/v1/member/reveal-key', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) });
+          const res = await fetch('/v1/member/reveal-key', { method: 'POST', credentials: 'same-origin' });
           if (!res.ok) return;
           const d = await res.json();
           $('revealKey').textContent = d.api_key;
           $('revealCard').classList.remove('hidden');
-        } catch { /* tautan reveal kedaluwarsa — abaikan */ }
+        } catch { /* penukaran reveal gagal — abaikan */ }
       }
       $('revealCopy').addEventListener('click', async () => {
         try { await navigator.clipboard.writeText($('revealKey').textContent); $('revealCopy').textContent = 'Tersalin ✓'; } catch { /* salin manual */ }
@@ -1616,12 +1689,47 @@
         } catch (_) { /* clipboard tidak tersedia */ }
       });
 
+      /* BESAR-2 (sisi portal): pesan ramah untuk callback OAuth gagal.
+         Kontrak antar-worker — jangan diubah sepihak. Kode tak dikenal
+         jatuh ke pesan generik yang sama dengan failed; tidak ada
+         detail internal dari parameter yang pernah ditampilkan. */
+      const AUTH_ERROR_MESSAGES = {
+        denied: 'Akun/akses ditolak. Silakan pilih akun lain.',
+        expired: 'Sesi login kedaluwarsa. Silakan coba lagi.',
+        unavailable: 'Layanan login tidak tersedia. Coba lagi nanti.',
+        failed: 'Login gagal. Silakan coba lagi.',
+      };
+      function authErrorMessage(code) {
+        return AUTH_ERROR_MESSAGES[code] || AUTH_ERROR_MESSAGES.failed;
+      }
+      function handleAuthError() {
+        const params = new URLSearchParams(location.search);
+        const code = params.get('auth');
+        if (!code) return;
+        params.delete('auth');
+        const rest = params.toString();
+        history.replaceState({}, '', rest ? `${location.pathname}?${rest}` : location.pathname);
+        $('loginError').textContent = authErrorMessage(code);
+        const retryBtn = $('authRetryBtn');
+        if (retryBtn) retryBtn.classList.remove('hidden');
+      }
+      $('authRetryBtn').addEventListener('click', () => { location.href = '/v1/auth/google/member/start'; });
+
       (async () => {
         try {
           const res = await fetch('/v1/member/session', { credentials: 'same-origin' });
           const d = await res.json();
-          if (d.authenticated) { showApp(d.prefix); await loadAll(); handleTrialHeld(); await handleReveal(); sbLoadOptions(); loadBuy(); }
-          else showLogin();
+          applyGoogleLoginGating(d);
+          if (d.authenticated) {
+            showApp(d.prefix);
+            // KECIL-1: gagal loadAll (mis. 503) TIDAK boleh jatuh ke
+            // catch luar yang memanggil showLogin() — banner portal
+            // harus tetap terlihat di portal. Kick 401/403 sudah
+            // memanggil showLogin() sendiri dari api()/loader.
+            try { await loadAll(); } catch (_) { /* banner/loginError sudah diisi */ }
+            handleTrialHeld(); await handleReveal(); sbLoadOptions(); loadBuy();
+          }
+          else { showLogin(); handleAuthError(); }
         } catch { showLogin(); }
       })();
 

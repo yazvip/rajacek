@@ -379,6 +379,14 @@ fn host_only_clear_header(state: &AppState) -> HeaderValue {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// Audit login 2026-10-27 KECIL-3: collapse every API-key
+/// authentication failure on the member login endpoint into one
+/// generic message. The HTTP status and error code are preserved
+/// (the caller decides separately whether to unify those too).
+fn generic_member_login_error(error: AppError) -> AppError {
+    AppError::new(error.status, error.code, "API key tidak valid.")
+}
+
 #[derive(Serialize)]
 pub struct LoginResponse {
     authenticated: bool,
@@ -415,11 +423,21 @@ pub async fn login(
                 .filter(|value| !value.is_empty())
         })
         .ok_or_else(|| AppError::unauthorized("API key tidak ditemukan"))?;
+    // Audit login 2026-10-27 KECIL-3: the store distinguishes key
+    // statuses in its messages (unknown / wrong secret / revoked /
+    // expired), and the old handler forwarded those messages verbatim,
+    // letting anyone probe a key prefix's status. Only this login
+    // handler maps them to one generic message; store.rs is untouched
+    // so endpoints that need the distinction (e.g. an already-logged-in
+    // member's own key view) keep it. Status + code are preserved
+    // exactly as before — see the report note that status/code still
+    // differ by case (401 vs 403), which this change deliberately does
+    // not unify without a separate decision.
     let context = match state.store.authenticate_api_key(raw_key).await {
         Ok(context) => context,
         Err(error) => {
             record_login_failure(&ip);
-            return Err(error);
+            return Err(generic_member_login_error(error));
         }
     };
     clear_login_failures(&ip);
@@ -468,19 +486,27 @@ pub struct SessionResponse {
     authenticated: bool,
     prefix: Option<String>,
     member: Option<MemberProfileView>,
+    /// Audit login 2026-10-27 BESAR-2 (member side): mirrors the
+    /// admin session's `google_login_configured` so the portal can
+    /// gate the Google button the same way. Present on both branches
+    /// — the portal needs it before login, not only inside a session.
+    google_member_login_configured: bool,
 }
 
 pub async fn session(State(state): State<AppState>, headers: HeaderMap) -> Json<SessionResponse> {
+    let google_member_login_configured = state.config.google_member_login_is_configured();
     match resolve_session(&state, &headers).await {
         Ok(session) => Json(SessionResponse {
             authenticated: true,
             prefix: Some(session.prefix),
             member: session.member.as_ref().map(MemberProfileView::from),
+            google_member_login_configured,
         }),
         Err(_) => Json(SessionResponse {
             authenticated: false,
             prefix: None,
             member: None,
+            google_member_login_configured,
         }),
     }
 }
@@ -929,7 +955,7 @@ pub async fn google_start(
     // throttle a flood could evict legitimate in-flight states from the
     // 1000-entry cap. The cap + 10-minute TTL are unchanged.
     let ip = effective_client_ip(&headers, address.ip()).to_string();
-    if !crate::auth::oauth_start_allowed(&ip) {
+    if !crate::auth::oauth_start_allowed(&ip, OAuthPurpose::Member) {
         return Err(AppError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
@@ -950,13 +976,35 @@ pub async fn google_start(
     Ok(redirect.into_response())
 }
 
+/// Audit login 2026-10-27 BESAR-2: every callback failure — config,
+/// consent, state, Google, database — redirects to /member with a
+/// safe `auth` code (see auth::oauth_failure_redirect) instead of
+/// rendering raw JSON in a top-level browser navigation. The detailed
+/// reason stays server-side (logs/audit); the URL carries only the
+/// code. Success still returns the session redirect unchanged.
 pub async fn google_callback(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(query): Query<GoogleCallbackQuery>,
 ) -> Result<Response, AppError> {
+    let consent_denied = query.error.as_deref() == Some("access_denied");
+    match google_callback_inner(state, addr, headers, query).await {
+        Ok(response) => Ok(response),
+        Err(error) => Ok(crate::auth::oauth_failure_redirect(
+            "/member",
+            &error,
+            consent_denied,
+        )),
+    }
+}
 
+async fn google_callback_inner(
+    state: AppState,
+    addr: SocketAddr,
+    headers: HeaderMap,
+    query: GoogleCallbackQuery,
+) -> Result<Response, AppError> {
     if !state.config.google_member_login_is_configured() {
         return Err(AppError::service_unavailable(
             "Login Google untuk member belum dikonfigurasi",
@@ -1155,22 +1203,35 @@ pub async fn google_callback(
         .map(|(summary, _)| summary.prefix)
         .unwrap_or_default();
     let token = issue_member_session(&state, &member.id.to_string(), "google", &bound_prefix)?;
-    let target = match &reveal_token {
-        Some(token) => format!("/member?reveal={token}"),
-        None => "/member".to_owned(),
-    };
-    // Notice sekali tampil untuk trial yang ditahan (portal
-    // menghapus param ini setelah dibaca; lihat member.html).
-    let target = if trial_held {
-        if target.contains('?') {
-            format!("{target}&trial=held")
-        } else {
-            format!("{target}?trial=held")
-        }
+    // Audit login 2026-10-27 KECIL-4: the one-time reveal token NEVER
+    // travels in the URL anymore (it used to be logged in the nginx
+    // access log and browser history until replaceState ran). The
+    // portal only sees the flag `revealed=1` and redeems the token
+    // from the HttpOnly cookie below, without ever learning its value.
+    // `trial=held` keeps its existing flag behaviour alongside it.
+    let mut params: Vec<&str> = Vec::new();
+    if reveal_token.is_some() {
+        params.push("revealed=1");
+    }
+    if trial_held {
+        params.push("trial=held");
+    }
+    let target = if params.is_empty() {
+        "/member".to_owned()
     } else {
-        target
+        format!("/member?{}", params.join("&"))
     };
     let mut response = axum::response::Redirect::to(&target).into_response();
+    if let Some(reveal_token) = &reveal_token {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&reveal_cookie_value(
+                reveal_token,
+                state.config.dashboard_cookie_secure(),
+            ))
+            .expect("cookie reveal selalu valid"),
+        );
+    }
     response.headers_mut().append(
         header::SET_COOKIE,
         session_cookie_header(&state, &token, MEMBER_SESSION_TTL_SECONDS),
@@ -1197,6 +1258,30 @@ pub async fn google_callback(
 // ---------------------------------------------------------------------------
 
 const KEY_REVEAL_TTL: Duration = Duration::from_secs(600);
+
+/// Audit login 2026-10-27 KECIL-4: the one-time reveal token rides in
+/// this HttpOnly cookie instead of the redirect URL. Same shape as the
+/// session cookies (Domain=.rajacek.com so it survives the apex→www
+/// hop, HttpOnly so page JS never sees the value, SameSite=Lax,
+/// Secure in production). Single-use + owner-bound + 600s TTL are
+/// unchanged — they live in the server-side reveal table, not in the
+/// cookie; the cookie is only the transport.
+pub const MEMBER_REVEAL_COOKIE: &str = "rv_member_reveal";
+
+fn reveal_cookie_value(token: &str, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{MEMBER_REVEAL_COOKIE}={token}; Domain=.rajacek.com; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}",
+        KEY_REVEAL_TTL.as_secs()
+    )
+}
+
+fn reveal_cookie_clear_value(secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "{MEMBER_REVEAL_COOKIE}=; Domain=.rajacek.com; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{secure}"
+    )
+}
 
 /// One-time reveal token -> (plaintext, expiry, owning member, key prefix).
 /// The owner binding (audit 2026-10-25, F7) means a leaked token cannot be
@@ -1232,13 +1317,18 @@ fn stash_key_reveal(
     token
 }
 
-/// Body POST /v1/member/reveal-key (K33, Fase 3): token satu-kali
-/// dikirim di body JSON, BUKAN query URL — query URL tersimpan di log
-/// akses/proxy sebelum `replaceState` sempat menghapusnya dari address
-/// bar. Struct query lama dihapus bersama rute GET-nya.
+/// Body POST /v1/member/reveal-key (K33, Fase 3; audit login
+/// 2026-10-27 KECIL-4): the one-time token is OPTIONAL here now. The
+/// current portal sends no token at all — it redeems from the
+/// `rv_member_reveal` HttpOnly cookie set by the callback — while the
+/// legacy body path (a portal that still carries the token from the
+/// old `?reveal=` URL) keeps working when a token is supplied. The
+/// token is never written to a URL, a log line, or a JSON response
+/// other than the redeemed key itself.
 #[derive(Deserialize)]
 pub struct RevealBody {
-    token: String,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1361,45 +1451,86 @@ async fn record_one_time_reveal_activity(state: &AppState, session: &MemberSessi
     .await;
 }
 
+/// Redeem one reveal token from the server-side table. Pure table
+/// logic, shared by the body and cookie paths: a valid member session
+/// is required, the token is single-use, and it is bound to the member
+/// + key it was minted for — a leaked token cannot be redeemed by
+/// another member's session, and a mismatch does NOT consume the token,
+/// so probing cannot burn the owner's reveal.
+fn redeem_reveal_token(
+    token: &str,
+    member_id: Option<uuid::Uuid>,
+    prefix: &str,
+) -> Result<Option<String>, AppError> {
+    let mut table = reveal_table()
+        .lock()
+        .map_err(|_| AppError::internal("Tabel reveal tidak dapat diakses"))?;
+    table.retain(|_, (_, expires, _, _)| *expires > Instant::now());
+    let owned = table.get(token).is_some_and(|(_, _, owner_member, owner_prefix)| {
+        member_id.is_some_and(|id| id == *owner_member) && prefix == *owner_prefix
+    });
+    if !owned {
+        return Ok(None);
+    }
+    Ok(table
+        .remove(token)
+        .map(|(plaintext, _, _, _)| plaintext))
+}
+
 pub async fn reveal_key(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(body): Json<RevealBody>,
-) -> Result<Json<RevealResponse>, AppError> {
-
-    // A valid member session is required, the token is single-use, and it
-    // is bound to the member + key it was minted for: a leaked token cannot
-    // be redeemed by another member's session (a mismatch does NOT consume
-    // the token, so probing cannot burn the owner's reveal).
+    body: Option<Json<RevealBody>>,
+) -> Result<Response, AppError> {
+    // KECIL-4: body token wins when supplied (legacy compat); otherwise
+    // the token comes from the HttpOnly cookie set by the callback, so
+    // the portal never handles the value. An empty body is accepted —
+    // `Option<Json>` yields None for a missing body — because the
+    // cookie path needs no JSON at all. A missing token on both paths
+    // is the same generic 404 as an invalid one: no oracle.
     let session = resolve_session(&state, &headers).await?;
-    let plaintext = {
-        let mut table = reveal_table()
-            .lock()
-            .map_err(|_| AppError::internal("Tabel reveal tidak dapat diakses"))?;
-        table.retain(|_, (_, expires, _, _)| *expires > Instant::now());
-        let owned = table.get(&body.token).is_some_and(|(_, _, owner_member, owner_prefix)| {
-            session.member.as_ref().is_some_and(|member| member.id == *owner_member)
-                && session.prefix == *owner_prefix
-        });
-        if !owned {
-            return Err(AppError::not_found(
-                "Tautan tampilkan kunci tidak valid atau sudah dipakai",
-            ));
-        }
-        table
-            .remove(&body.token)
-            .map(|(plaintext, _, _, _)| plaintext)
-            .ok_or_else(|| {
-                AppError::not_found("Tautan tampilkan kunci tidak valid atau sudah dipakai")
-            })?
+    let body_token = body
+        .and_then(|Json(body)| body.token)
+        .map(|token| token.trim().to_owned())
+        .filter(|token| !token.is_empty());
+    let (token, via_cookie) = match body_token {
+        Some(token) => (token, false),
+        None => match cookie_value(&headers, MEMBER_REVEAL_COOKIE) {
+            Some(value) if !value.trim().is_empty() => (value.trim().to_owned(), true),
+            _ => {
+                return Err(AppError::not_found(
+                    "Tautan tampilkan kunci tidak valid atau sudah dipakai",
+                ))
+            }
+        },
     };
+    let plaintext = redeem_reveal_token(
+        &token,
+        session.member.as_ref().map(|member| member.id),
+        &session.prefix,
+    )?
+    .ok_or_else(|| {
+        AppError::not_found("Tautan tampilkan kunci tidak valid atau sudah dipakai")
+    })?;
     // B17: a successful one-time reveal leaves a persistent audit row
     // (prefix only, never the plaintext), through the same
     // record_admin_activity path as the self-reveal. Failed redemptions
     // return above and are not recorded.
     record_one_time_reveal_activity(&state, &session).await;
-    Ok(Json(RevealResponse { api_key: plaintext }))
-
+    let mut response = Json(RevealResponse { api_key: plaintext }).into_response();
+    if via_cookie {
+        // The server-side token is already consumed (single-use), but
+        // clearing the cookie as well leaves no stale token in the
+        // browser for a later, unrelated session to trip over.
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&reveal_cookie_clear_value(
+                state.config.dashboard_cookie_secure(),
+            ))
+            .expect("cookie clear reveal selalu valid"),
+        );
+    }
+    Ok(response)
 }
 
 // ---------------------------------------------------------------------------
@@ -2358,3 +2489,117 @@ mod resolve_session_and_reveal_audit_tests {
     }
 }
 
+
+#[cfg(test)]
+mod audit_login_2026_10_27_tests {
+    use super::*;
+
+    // ---- KECIL-3: pesan login API-key generik, status dipertahankan ----
+
+    #[test]
+    fn login_failures_all_collapse_to_one_generic_message() {
+        // Every distinct store message (format / unknown / revoked /
+        // expired / wrong secret) must surface identically here.
+        let cases = [
+            AppError::unauthorized("Format API key tidak valid"),
+            AppError::unauthorized("API key tidak dikenali"),
+            AppError::forbidden("API key telah dinonaktifkan atau dicabut"),
+            AppError::forbidden("Masa aktif API key telah berakhir. Silakan perpanjang paket Anda."),
+            AppError::unauthorized("API key tidak valid"),
+        ];
+        for error in cases {
+            let status = error.status;
+            let mapped = generic_member_login_error(error);
+            assert_eq!(mapped.message, "API key tidak valid.");
+            assert_eq!(mapped.status, status, "status dipertahankan apa adanya");
+        }
+    }
+
+    // ---- BESAR-2 (member): nama field status di /v1/member/session ----
+
+    #[test]
+    fn session_response_carries_google_member_login_configured() {
+        let response = SessionResponse {
+            authenticated: false,
+            prefix: None,
+            member: None,
+            google_member_login_configured: true,
+        };
+        let value = serde_json::to_value(&response).expect("serialisasi sesi");
+        assert_eq!(value["google_member_login_configured"], true);
+        assert_eq!(value["authenticated"], false);
+    }
+
+    // ---- KECIL-4: reveal via cookie + kompatibilitas body ----
+
+    #[test]
+    fn reveal_body_token_is_optional_for_cookie_path() {
+        let with_token: RevealBody =
+            serde_json::from_str(r#"{"token":"abc123"}"#).expect("body lama");
+        assert_eq!(with_token.token.as_deref(), Some("abc123"));
+        let empty: RevealBody = serde_json::from_str("{}").expect("body kosong");
+        assert_eq!(empty.token, None);
+        let null_token: RevealBody =
+            serde_json::from_str(r#"{"token":null}"#).expect("token null");
+        assert_eq!(null_token.token, None);
+    }
+
+    #[test]
+    fn redeem_is_single_use_and_owner_bound() {
+        let owner = uuid::Uuid::now_v7();
+        let other = uuid::Uuid::now_v7();
+        let prefix = "rv_live_ab12";
+        let token = stash_key_reveal("kunci-plaintext-tes", owner, prefix.to_owned());
+        // Probing with the wrong member must NOT burn the token.
+        assert_eq!(
+            redeem_reveal_token(&token, Some(other), prefix)
+                .expect("redeem salah pemilik"),
+            None
+        );
+        assert_eq!(
+            redeem_reveal_token(&token, Some(owner), "prefix-lain")
+                .expect("redeem prefix salah"),
+            None
+        );
+        // The owner redeems exactly once.
+        assert_eq!(
+            redeem_reveal_token(&token, Some(owner), prefix)
+                .expect("redeem pemilik"),
+            Some("kunci-plaintext-tes".to_owned())
+        );
+        assert_eq!(
+            redeem_reveal_token(&token, Some(owner), prefix)
+                .expect("redeem kedua"),
+            None
+        );
+    }
+
+    #[test]
+    fn reveal_cookie_value_is_httponly_bounded_and_clearable() {
+        let set = reveal_cookie_value("token-rahasia-tes", true);
+        assert!(set.starts_with("rv_member_reveal=token-rahasia-tes;"));
+        assert!(set.contains("Domain=.rajacek.com"));
+        assert!(set.contains("HttpOnly"));
+        assert!(set.contains("SameSite=Lax"));
+        assert!(set.contains("Max-Age=600"));
+        assert!(set.contains("; Secure"));
+        // No token value ever appears in a URL-shaped string here: the
+        // cookie is the only transport, and the clear drops it.
+        let clear = reveal_cookie_clear_value(true);
+        assert!(clear.contains("rv_member_reveal=;"));
+        assert!(clear.contains("Max-Age=0"));
+        assert!(!clear.contains("token-rahasia-tes"));
+
+        // The browser sends the cookie back on the reveal endpoint.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str("rajacek_member_session=sesi; rv_member_reveal=token-rahasia-tes")
+                .expect("cookie tes"),
+        );
+        assert_eq!(
+            cookie_value(&headers, MEMBER_REVEAL_COOKIE),
+            Some("token-rahasia-tes")
+        );
+    }
+}

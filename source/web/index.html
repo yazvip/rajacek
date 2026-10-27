@@ -355,10 +355,11 @@
       <button class="modal-close" data-close-modal type="button" aria-label="Tutup">×</button>
       <div class="modal-brand"><span class="brand-mark"><svg viewBox="0 0 34 34" fill="none"><path d="M8.5 11.2c0-2.27 1.84-4.1 4.1-4.1h8.8c2.26 0 4.1 1.83 4.1 4.1v11.6c0 2.27-1.84 4.1-4.1 4.1h-8.8a4.1 4.1 0 0 1-4.1-4.1V11.2Z" fill="currentColor" opacity=".92"/><path d="M12.2 17h9.6M17 12.2v9.6" stroke="#071225" stroke-width="2.5" stroke-linecap="round"/></svg></span><span>raja<span>cek</span></span></div>
       <span class="section-kicker">Akses administrator</span><h2 id="auth-title">Masuk ke pusat kendali.</h2><p>Gunakan Google untuk akses produksi. Akun dummy dan token lokal hanya tersedia pada lingkungan pengembangan.</p>
+      <p id="auth-callback-message" role="alert" hidden></p><a class="button button-primary button-full" id="auth-retry-button" href="/v1/auth/google/start" hidden>Coba lagi</a>
       <a class="button button-google" id="google-login-button" href="/v1/auth/google/start"><span class="google-g">G</span>Lanjutkan dengan Google</a>
       <div class="auth-divider"><span>atau</span></div>
       <form id="local-login-form" class="development-login" hidden><label for="local-email">Akun dummy pengembangan</label><input id="local-email" type="email" autocomplete="username" placeholder="Email lokal" /><div class="input-with-action"><input id="local-password" type="password" autocomplete="current-password" placeholder="Password lokal" /><button class="icon-button" id="toggle-local-password" type="button" aria-label="Tampilkan password">◉</button></div><button class="button button-primary button-full" type="submit">Masuk dengan akun lokal</button></form>
-      <form id="development-token-form" class="development-login"><label for="development-token">Token administrator pengembangan</label><div class="input-with-action"><input id="development-token" type="password" autocomplete="off" placeholder="Masukkan DEVELOPMENT_ADMIN_TOKEN" /><button class="icon-button" id="toggle-token-visibility" type="button" aria-label="Tampilkan token">◉</button></div><button class="button button-secondary button-full" type="submit">Masuk ke mode pengembangan</button></form>
+      <form id="development-token-form" class="development-login" hidden><label for="development-token">Token administrator pengembangan</label><div class="input-with-action"><input id="development-token" type="password" autocomplete="off" placeholder="Masukkan DEVELOPMENT_ADMIN_TOKEN" /><button class="icon-button" id="toggle-token-visibility" type="button" aria-label="Tampilkan token">◉</button></div><button class="button button-secondary button-full" type="submit">Masuk ke mode pengembangan</button></form>
       <p class="auth-footnote">Akses dicatat untuk keamanan. Jangan pernah membagikan kunci atau token Anda.</p>
     </section>
 
@@ -404,6 +405,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261026-27" defer></script>
+    <script src="/app.js?v=20261026-28" defer></script>
   </body>
 </html>

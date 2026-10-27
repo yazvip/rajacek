@@ -242,18 +242,89 @@
     }, 4800);
   }
 
+  // Audit login 2026-10-27, BESAR-4: 401 dan 403 DIPISAH. Hanya 401
+  // (sesi habis/tak valid) yang membuang sesi dan membuka login.
+  // 403 (sesi sah tapi peran kurang) TETAP di shell: sesi tidak
+  // dihapus, tidak ada updateSessionUI/showLoginOnly, hanya toast
+  // generik — pesan server tidak dipakai agar detail peran tidak
+  // bocor ke toast dan pesannya deterministik.
   function handleApiError(error) {
     if (error instanceof ApiError) {
-      if (error.status === 401 || error.status === 403) {
+      if (error.status === 401) {
         state.session = null;
         updateSessionUI();
         showLoginOnly();
+      } else if (error.status === 403) {
+        showToast("Anda tidak memiliki akses untuk aksi ini.", "error");
+        return;
       }
       showToast(error.message, "error");
       return;
     }
     console.error(error);
     showToast("Terjadi kesalahan tak terduga.", "error");
+  }
+
+  // Audit login 2026-10-27, BESAR-2 (sisi panel): pemetaan kode
+  // ?auth= dari redirect callback gagal (kontrak antar-worker —
+  // jangan diubah sepihak). Kode tak dikenal -> pesan generik yang
+  // sama dengan failed. Tidak ada detail internal dari parameter
+  // yang pernah ditampilkan; nilai parameter hanya dipakai sebagai
+  // kunci pemetaan ini.
+  function authCallbackMessage(code) {
+    switch (code) {
+      case "denied":
+        return "Akses ditolak: akun ini bukan admin. Silakan pilih akun lain.";
+      case "expired":
+        return "Sesi login kedaluwarsa. Silakan coba lagi.";
+      case "unavailable":
+        return "Layanan login tidak tersedia. Coba lagi nanti.";
+      case "failed":
+        return "Login gagal. Silakan coba lagi.";
+      default:
+        return "Login gagal. Silakan coba lagi.";
+    }
+  }
+
+  // Baca ?auth=<kode> bila ada, bersihkan dari URL via replaceState
+  // (parameter tidak boleh menetap di URL/histori), kembalikan pesan
+  // ramah atau null bila tidak ada parameter. Dipanggil sekali di
+  // awal initialize, sebelum pemeriksaan sesi.
+  function consumeAuthCallbackParam() {
+    let code = null;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("auth")) {
+        code = url.searchParams.get("auth");
+        url.searchParams.delete("auth");
+        window.history.replaceState(null, "", url.toString());
+      }
+    } catch {
+      return null;
+    }
+    if (code === null || code === "") return null;
+    return authCallbackMessage(code);
+  }
+
+  // Tampilkan pesan callback di auth-modal (bila elemennya ada).
+  // Aman dipanggil kapan pun: bila modal tertutup (sesi sah), pesan
+  // tidak terlihat; showAdmin() membersihkannya lagi.
+  function showAuthCallbackMessage(message) {
+    if (!message) return;
+    const element = $("#auth-callback-message");
+    if (element) {
+      element.textContent = message;
+      element.hidden = false;
+    }
+    const retry = $("#auth-retry-button");
+    if (retry) retry.hidden = false;
+  }
+
+  function clearAuthCallbackMessage() {
+    const element = $("#auth-callback-message");
+    if (element) element.hidden = true;
+    const retry = $("#auth-retry-button");
+    if (retry) retry.hidden = true;
   }
 
   function openModal(id) {
@@ -280,6 +351,7 @@
   function showAdmin() {
     document.body.classList.remove("auth-required");
     document.body.classList.add("auth-ok");
+    clearAuthCallbackMessage();
     closeModal("auth-modal");
   }
 
@@ -367,8 +439,10 @@
     // tanpa catch. Satu endpoint yang gagal (non-auth) tidak boleh
     // menjatuhkan admin ke layar login: data yang berhasil tetap
     // dirender, kegagalan ditandai toast + catatan di view. Hanya
-    // kegagalan sesi (401/403) yang dilempar ke initialize — di sana
-    // showLoginOnly memang benar.
+    // kegagalan sesi 401 yang dilempar ke initialize — di sana
+    // showLoginOnly memang benar. 403 (BESAR-4, 2026-10-27) BUKAN
+    // kegagalan sesi: ia jatuh ke jalur muat-sebagian di bawah,
+    // shell tetap tampil, sesi tidak dibuang.
     const settled = await Promise.all([
       api("/v1/admin/overview"),
       api("/v1/admin/products"),
@@ -383,7 +457,7 @@
       (value) => ({ ok: true, value }),
       (error) => ({ ok: false, error }),
     )));
-    const authFailure = settled.find((entry) => !entry.ok && entry.error instanceof ApiError && (entry.error.status === 401 || entry.error.status === 403));
+    const authFailure = settled.find((entry) => !entry.ok && entry.error instanceof ApiError && entry.error.status === 401);
     if (authFailure) throw authFailure.error;
     const values = settled.map((entry) => (entry.ok ? entry.value : undefined));
     if (values[0] !== undefined) state.overview = values[0];
@@ -2672,29 +2746,48 @@
 
   async function initialize() {
     setupEventListeners();
+    // BESAR-2 (sisi panel): konsumsi ?auth= di awal — URL dibersihkan
+    // di sini juga bila sesi ternyata sah; pesan hanya ditampilkan
+    // bila akhirnya modal login yang tampil (lihat bawah).
+    const authCallbackText = consumeAuthCallbackParam();
     // K28: bedakan kegagalan SESI dari kegagalan DATA. loadDashboard
     // kini menelan kegagalan data sendiri (toast + shell + catatan),
-    // jadi yang sampai ke catch ini hanya: sesi tak valid (401/403 →
+    // jadi yang sampai ke catch ini hanya: sesi tak valid (401 →
     // login), atau pemeriksaan sesi sendiri yang gagal sebelum shell
     // sempat tampil (tetap login — shell tak boleh tampil tanpa sesi
     // terverifikasi). Kegagalan data SETELAH sesi terverifikasi tidak
-    // pernah memanggil showLoginOnly lagi.
+    // pernah memanggil showLoginOnly lagi. 403 (BESAR-4): sesi sah
+    // yang ditolak perannya — tetap di shell bila shell sudah tampil;
+    // cabang pra-verifikasi di bawah hanya layar awal (shell belum
+    // pernah tampil, dan endpoint sesi sendiri mengembalikan 200,
+    // bukan 403 — jadi cabang itu defensif, bukan tendangan sesi).
     let sessionVerified = false;
     try {
       const session = await refreshSession();
       // The gate must check the role, not just authentication (audit
       // 2026-10-25, A3): a member JWT in the same cookie jar must not
       // reveal the admin shell, even though the server still 401s data.
+      // Ini gerbang payload sesi (authenticated/role), BUKAN respons
+      // HTTP 403 — showLoginOnly di sini bukan tendangan 403.
       if (!session.authenticated || session.role !== "admin") {
         showLoginOnly();
+        showAuthCallbackMessage(authCallbackText);
         return;
       }
       showAdmin();
       sessionVerified = true;
       await loadDashboard();
     } catch (error) {
-      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
+      if (error instanceof ApiError && error.status === 401) {
         showLoginOnly();
+        showAuthCallbackMessage(authCallbackText);
+        return;
+      }
+      if (error instanceof ApiError && error.status === 403) {
+        showToast("Anda tidak memiliki akses untuk aksi ini.", "error");
+        if (sessionVerified) return;
+        showLoginOnly();
+        showAuthCallbackMessage(authCallbackText);
         return;
       }
       if (sessionVerified) {
@@ -2704,6 +2797,7 @@
       }
       showToast("Gagal memeriksa sesi. Silakan login.", "error");
       showLoginOnly();
+      showAuthCallbackMessage(authCallbackText);
     }
   }
 
@@ -3176,6 +3270,23 @@
         state.session = session;
         updateSessionUI();
         if (session.role !== "admin") {
+          // KECIL-6 (audit login 2026-10-27): login lokal role member
+          // baru saja men-set cookie sesi — jangan biarkan tertinggal
+          // di browser panel. Panggil logout (server membersihkan
+          // cookie sesi, termasuk varian-variannya) SEBELUM toast,
+          // lalu kembali ke tampilan login. Kegagalan logout
+          // diabaikan di sini: state lokal tetap dibersihkan dan
+          // gerbang sesi admin menolak role member, jadi shell tidak
+          // pernah tampil; cookie HttpOnly tidak bisa dihapus dari
+          // JS bila request logout itu sendiri gagal jaringan.
+          try {
+            await api("/v1/auth/logout", { method: "POST" });
+          } catch (_) {
+            /* best-effort: lihat komentar di atas */
+          }
+          state.session = null;
+          updateSessionUI();
+          showLoginOnly();
           showToast("Login member berhasil. Akun member tidak dapat mengakses dashboard administrator.", "error");
           return;
         }

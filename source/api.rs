@@ -1400,7 +1400,7 @@ async fn google_login_start(
     // Light per-IP throttle (audit flow K18), mirroring the member
     // start endpoint; cap + TTL in the state store are unchanged.
     let ip = effective_client_ip(&headers, address.ip()).to_string();
-    if !auth::oauth_start_allowed(&ip) {
+    if !auth::oauth_start_allowed(&ip, auth::OAuthPurpose::Admin) {
         return Err(AppError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
@@ -1423,6 +1423,12 @@ async fn google_login_callback(
     // email on success (the callback now returns it alongside the
     // redirect). On failure the email is not reliably known, so the
     // actor is "unknown" rather than a guess.
+    // Audit login 2026-10-27 BESAR-2: a callback is a top-level
+    // browser navigation, so a failure must redirect to /admin with a
+    // safe `auth` code (see auth::oauth_failure_redirect) instead of
+    // rendering raw JSON. The audit record above keeps the detailed
+    // reason server-side; the URL carries only the safe code.
+    let consent_denied = query.error.as_deref() == Some("access_denied");
     match auth::google_login_callback(
         state.config.clone(),
         state.oauth_states.clone(),
@@ -1450,7 +1456,7 @@ async fn google_login_callback(
                 "Percobaan login Google admin gagal (akun ditolak, state tidak valid, atau Google menolak kode).".to_owned(),
             )
             .await;
-            Err(error)
+            Ok(auth::oauth_failure_redirect("/admin", &error, consent_denied))
         }
     }
 }
