@@ -297,6 +297,9 @@ pub fn build_router(state: AppState) -> Router {
     let router = Router::new()
         .merge(api)
         .route("/member", get(member_page))
+        .route("/blog", get(crate::blog::blog_list))
+        .route("/blog/", get(crate::blog::blog_list))
+        .route("/blog/:slug", get(crate::blog::blog_article))
         .route_service("/admin", ServeFile::new("web/index.html"))
         .fallback(fallback_handler)
         .layer(
@@ -672,7 +675,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn not_found_page() -> Response {
+pub(crate) fn not_found_page() -> Response {
     let html = r#"<!doctype html>
 <html lang="id">
   <head>

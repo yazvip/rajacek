@@ -9,6 +9,7 @@ pub mod analytics;
 pub mod api;
 pub mod auth;
 pub mod bank_codes;
+pub mod blog;
 pub mod config;
 pub mod database;
 pub mod error;
