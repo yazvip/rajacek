@@ -274,9 +274,39 @@
       .side-contact { display:flex; flex-direction:column; gap:2px; padding-top:4px; font-size:11px; }
       .side-contact a { color:var(--brand-700); font-weight:600; text-decoration:none; }
       .side-contact a:hover { text-decoration:underline; }
-      .buy-waiting { display:flex; gap:16px; align-items:flex-start; border:1px solid var(--line); border-radius:16px; padding:20px; margin-top:20px; background:#fff; }
-      .buy-waiting img { width:180px; height:180px; border-radius:8px; background:#fff; flex:none; }
       .buy-countdown { font-weight:800; font-size:20px; font-family:'JetBrains Mono',monospace; color:var(--brand-800); }
+      /* ---------- Invoice pembayaran (QRIS menunggu) ---------- */
+      .inv-card { border:1px solid var(--line); border-radius:16px; padding:20px; margin-top:20px; background:#fff; box-shadow:0 1px 2px rgba(15,23,42,.05); }
+      .inv-head { display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding-bottom:14px; border-bottom:2px solid var(--ink); }
+      .inv-brand { font-weight:800; font-size:18px; letter-spacing:-.02em; }
+      .inv-doc { display:block; font-size:10px; font-weight:800; letter-spacing:.14em; color:var(--muted); margin-top:2px; }
+      .inv-grid { display:grid; gap:20px; margin-top:16px; min-width:0; }
+      .inv-grid > * { min-width:0; }
+      @media (min-width:860px) { .inv-grid { grid-template-columns:1.15fr .85fr; gap:28px; } }
+      .inv-meta > div, .inv-items > div { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; padding:9px 0; border-bottom:1px solid var(--line-soft); }
+      .inv-meta > div:last-child, .inv-items > div:last-child { border-bottom:none; }
+      .inv-meta dt, .inv-items dt { color:var(--muted); font-size:12px; flex:none; }
+      .inv-meta dd, .inv-items dd { margin:0; font-weight:700; font-size:13px; text-align:right; overflow-wrap:anywhere; }
+      .inv-buyer-email { display:block; font-weight:600; color:var(--muted); font-size:12px; margin-top:2px; }
+      .inv-promo { color:var(--brand-700); }
+      .inv-total { display:flex; justify-content:space-between; align-items:center; gap:8px 16px; flex-wrap:wrap; margin-top:14px; padding:12px 14px; background:#f8fafc; border:1px solid var(--line-soft); border-radius:10px; }
+      .inv-total span { color:var(--muted); font-size:13px; }
+      .inv-total strong { font-family:'JetBrains Mono',monospace; font-weight:800; font-size:22px; color:var(--brand-800); white-space:nowrap; }
+      .inv-pay { text-align:center; }
+      .inv-qr-box { background:#fff; border:1px solid var(--line); border-radius:14px; padding:16px; }
+      .inv-qr-box img { width:min(200px, 100%); height:auto; aspect-ratio:1/1; border-radius:8px; background:#fff; display:block; margin:0 auto; }
+      .inv-dl { display:inline-flex; align-items:center; justify-content:center; gap:8px; min-height:44px; margin-top:12px; padding:10px 16px; border:1px solid var(--line); border-radius:12px; background:#fff; color:var(--ink); font-weight:700; font-size:13px; }
+      .inv-dl:hover { background:#f8fafc; text-decoration:none; }
+      .inv-dl svg { width:16px; height:16px; }
+      .inv-countdown { margin-top:14px; font-size:13px; }
+      .inv-pay .buy-actions { justify-content:center; margin-top:14px; }
+      .inv-pay .buy-actions button { flex:1; }
+      .inv-pay .buy-note { text-align:center; }
+      @media (max-width:640px) {
+        .inv-card { padding:16px; }
+        .inv-pay .buy-actions { flex-direction:column; }
+        .inv-pay .buy-actions button { width:100%; }
+      }
       .buy-actions { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
       .buy-note { font-size:13px; color:var(--muted); margin-top:8px; }
       .buy-modal-actions { flex-direction:column; margin-top:16px; }
@@ -361,7 +391,6 @@
       @media (max-width:640px) {
         .bar-col:nth-child(even) .bar-date { visibility:hidden; }
         .bar-total { font-size:9px; }
-        .buy-waiting { flex-direction:column; }
         .identity .id-name span.plan-badge { display:none; }
         /* Header HP: tinggi 64px tetap + judul 2 baris = meluber menimpa
            konten (bug responsif 2026-10-25). Biarkan header membungkus
@@ -723,18 +752,41 @@
               </div>
             </div>
             <div id="buyCard" class="hidden">
-              <div id="buyWaiting" class="buy-waiting hidden" style="margin-top:0;">
-                <img id="buyQr" alt="QRIS untuk pembayaran paket" />
-                <div>
-                  <div class="buy-name" id="buyWaitingPkg">–</div>
-                  <div class="buy-price" style="font-size:18px;" id="buyWaitingAmount">–</div>
-                  <p class="sub" id="buyWaitingInfo"></p>
-                  <div style="margin-top:8px;">Berlaku: <span class="buy-countdown" id="buyCountdown">–</span></div>
-                  <div class="buy-actions">
-                    <button type="button" class="primary" id="buyCheckBtn">Saya sudah bayar</button>
-                    <button type="button" id="buyCancelBtn">Batalkan</button>
+              <div id="buyWaiting" class="inv-card hidden" style="margin-top:0;">
+                <div class="inv-head">
+                  <div class="inv-brand">Rajacek<span class="inv-doc">Invoice &middot; Pembayaran Paket</span></div>
+                  <span class="ord-status st-waiting">Menunggu Pembayaran</span>
+                </div>
+                <div class="inv-grid">
+                  <div>
+                    <dl class="inv-meta">
+                      <div><dt>No. Invoice</dt><dd class="mono" id="invNo">–</dd></div>
+                      <div><dt>Tanggal</dt><dd id="invDate">–</dd></div>
+                      <div><dt>Metode</dt><dd>QRIS</dd></div>
+                      <div><dt>Pembeli</dt><dd><span id="invBuyerName">–</span><span class="inv-buyer-email" id="invBuyerEmail">–</span></dd></div>
+                    </dl>
+                    <dl class="inv-items">
+                      <div><dt>Paket</dt><dd id="buyWaitingPkg">–</dd></div>
+                      <div><dt>Kuota</dt><dd id="invItemHits">–</dd></div>
+                      <div><dt>Rate limit</dt><dd id="invItemRate">–</dd></div>
+                      <div><dt>Masa aktif</dt><dd id="invItemDays">–</dd></div>
+                      <div id="invPromoRow" class="hidden"><dt>Promo</dt><dd class="inv-promo" id="invPromoText">–</dd></div>
+                      <div id="invOrigRow" class="hidden"><dt>Harga normal</dt><dd style="text-decoration:line-through;color:var(--muted);" id="invOrigPrice">–</dd></div>
+                    </dl>
+                    <div class="inv-total"><span>Total Tagihan</span><strong id="buyWaitingAmount">–</strong></div>
                   </div>
-                  <p class="buy-note" id="buyOrderStatus"></p>
+                  <div class="inv-pay">
+                    <div class="inv-qr-box">
+                      <img id="buyQr" alt="Kode QRIS untuk pembayaran paket" />
+                    </div>
+                    <a id="buyQrDownload" class="inv-dl" href="#" download aria-label="Unduh kode QRIS"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>Unduh QRIS</a>
+                    <div class="inv-countdown">Berlaku: <span class="buy-countdown" id="buyCountdown">–</span></div>
+                    <div class="buy-actions">
+                      <button type="button" class="primary" id="buyCheckBtn">Saya sudah bayar</button>
+                      <button type="button" id="buyCancelBtn">Batalkan</button>
+                    </div>
+                    <p class="buy-note" id="buyOrderStatus"></p>
+                  </div>
                 </div>
               </div>
               <div id="buyPackages" class="buy-grid"></div>
@@ -1629,10 +1681,35 @@
         buyCountdownExpired = false;
         buyCurrentOrderId = order.id;
         $('buyWaiting').classList.remove('hidden');
+        // Invoice: No. Invoice = derivasi display-only dari id order
+        // (INV- + 8 karakter hex pertama, huruf besar); id penuh tetap
+        // dipakai untuk semua panggilan API. Promo tidak tersimpan di
+        // order — diderivasi dari selisih harga normal vs yang dibayar.
+        const invShort = order.id.replace(/-/g, '').slice(0, 8);
+        $('invNo').textContent = 'INV-' + invShort.toUpperCase();
+        $('invDate').textContent = fmtDate(order.created_at);
+        $('invBuyerName').textContent = $('memberName').textContent || '–';
+        $('invBuyerEmail').textContent = $('memberEmail').textContent || '–';
         $('buyWaitingPkg').textContent = order.package_name;
+        $('invItemHits').textContent = '+' + fmtNum(order.quota_hits) + ' hit';
+        $('invItemRate').textContent = fmtNum(order.rate_limit_per_minute) + '/menit';
+        $('invItemDays').textContent = 'Aktif ' + fmtNum(order.valid_days) + ' hari setelah lunas';
+        const invDisc = order.price_idr - order.amount_idr;
+        if (invDisc > 0 && order.price_idr > 0) {
+          const invPct = Math.round((1 - order.amount_idr / order.price_idr) * 100);
+          $('invPromoText').textContent = 'PROMO −' + invPct + '% · hemat Rp ' + fmtNum(invDisc);
+          $('invPromoRow').classList.remove('hidden');
+          $('invOrigPrice').textContent = 'Rp ' + fmtNum(order.price_idr);
+          $('invOrigRow').classList.remove('hidden');
+        } else {
+          $('invPromoRow').classList.add('hidden');
+          $('invOrigRow').classList.add('hidden');
+        }
         $('buyWaitingAmount').textContent = 'Rp ' + fmtNum(order.amount_idr);
-        $('buyWaitingInfo').textContent = `+${fmtNum(order.quota_hits)} hit · rate ${fmtNum(order.rate_limit_per_minute)}/menit · aktif ${fmtNum(order.valid_days)} hari setelah lunas.`;
         $('buyQr').src = `/v1/member/orders/${order.id}/qr`;
+        const invDl = $('buyQrDownload');
+        invDl.href = `/v1/member/orders/${order.id}/qr`;
+        invDl.download = 'qris-' + invShort + '.png';
         $('buyOrderStatus').textContent = 'Pindai QR dengan aplikasi e-wallet / m-banking Anda, lalu tekan "Saya sudah bayar".';
         let left = order.remaining_seconds;
         $('buyCountdown').textContent = buyFmtCountdown(left);
@@ -1888,6 +1965,29 @@
           buyPendingPackageId = null;
           buyClosePreview();
         }
+      });
+      // Unduh QRIS: anchor sudah membawa href + download (same-origin,
+      // jadi atribut download dihormati). Enhancement: coba fetch→blob
+      // dulu agar unduhan jalan andal di browser HP; bila fetch gagal,
+      // biarkan perilaku native anchor (unduh / buka gambar).
+      $('buyQrDownload').addEventListener('click', async (event) => {
+        const anchor = $('buyQrDownload');
+        const url = anchor.getAttribute('href');
+        if (!url || url === '#') { event.preventDefault(); return; }
+        try {
+          const res = await fetch(url, { credentials: 'same-origin' });
+          if (!res.ok) throw new Error('QR tidak tersedia');
+          const blob = await res.blob();
+          const objUrl = URL.createObjectURL(blob);
+          const tmp = document.createElement('a');
+          tmp.href = objUrl;
+          tmp.download = anchor.download || 'qris.png';
+          document.body.appendChild(tmp);
+          tmp.click();
+          tmp.remove();
+          setTimeout(() => URL.revokeObjectURL(objUrl), 5000);
+          event.preventDefault();
+        } catch (_) { /* fallback: perilaku native anchor */ }
       });
       $('buyCheckBtn').addEventListener('click', async () => {
         if (!buyCurrentOrderId) return;
