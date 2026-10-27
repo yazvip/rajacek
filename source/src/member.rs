@@ -1666,6 +1666,12 @@ pub struct PurchasePreviewResponse {
     /// belum punya id sehingga tidak dimasukkan di sini — expiry-nya
     /// ada di new_bucket_expires_at.
     buckets: Vec<crate::models::QuotaBucketView>,
+    /// Trial aktif yang masih bersisa (info kondisional di modal beli):
+    /// None bila tidak ada trial aktif bersisa. Berbasis bucket trial
+    /// (order None + package None + expiry = expiry grant), BUKAN
+    /// plan_kind — grant mengubah plan_kind jadi 'package' padahal
+    /// bucket trial masih ada dan masih dipakai dulu.
+    trial_active: Option<crate::models::ActiveTrialInfo>,
 }
 
 /// Efek pembelian SEBELUM bayar (murni komputasi, tanpa memanggil
@@ -1718,11 +1724,22 @@ pub async fn purchase_preview(
     // bucket saat ini + bucket baru (bukan dari current_expires_at —
     // agregat lama bisa berasal dari bucket habis yang tidak lagi
     // bersisa, sehingga min() dengannya akan salah).
-    let (buckets, new_expires_at) = match &current_key {
+    let (buckets, new_expires_at, trial_active) = match &current_key {
         Some(summary) => {
             let views = state.store.key_buckets(&summary.prefix).await;
-            let mut raw = state.store.key_bucket_list(&summary.prefix).await;
-            raw.push(crate::models::new_purchase_bucket(
+            let raw = state.store.key_bucket_list(&summary.prefix).await;
+            // Info trial dihitung dari bucket SAAT INI (sebelum bucket
+            // pembelian ditambahkan) + baris trial_grants member ini.
+            let grant_expiry = state
+                .store
+                .trial_expiry_by_member()
+                .await
+                .get(&member_id)
+                .copied();
+            let trial_active =
+                crate::models::active_trial_bucket(grant_expiry, &raw, now);
+            let mut raw_with_new = raw;
+            raw_with_new.push(crate::models::new_purchase_bucket(
                 summary.id,
                 Some(member_id),
                 None,
@@ -1731,13 +1748,17 @@ pub async fn purchase_preview(
                 settings.valid_days,
                 now,
             ));
-            let (_, _, expiry) = crate::models::bucket_aggregate(&raw, now);
+            let (_, _, expiry) = crate::models::bucket_aggregate(&raw_with_new, now);
             // Setelah grant selalu ada bucket baru bersisa, jadi agregat
             // tidak pernah jatuh ke fallback kosong — tapi pertahankan
             // fallback defensif ke expiry bucket baru.
-            (views, expiry.unwrap_or(new_bucket_expires_at))
+            (
+                views,
+                expiry.unwrap_or(new_bucket_expires_at),
+                trial_active,
+            )
         }
-        None => (Vec::new(), new_bucket_expires_at),
+        None => (Vec::new(), new_bucket_expires_at, None),
     };
     Ok(Json(PurchasePreviewResponse {
         package_id: package.id.to_string(),
@@ -1756,6 +1777,7 @@ pub async fn purchase_preview(
         new_rate_limit_per_minute,
         new_bucket_expires_at,
         buckets,
+        trial_active,
     }))
 }
 

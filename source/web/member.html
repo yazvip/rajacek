@@ -892,6 +892,7 @@
           <div id="buyConfBucketRow" class="hidden"><dt>Masa aktif paket baru</dt><dd id="buyConfBucketExpiry">–</dd></div>
         </dl>
         <p class="buy-confirm-note">Langkah ini belum menagih apa pun. Kuota baru hanya bertambah setelah pembayaran Anda terverifikasi. Paket baru ini punya masa aktif sendiri; pemakaian menghabiskan paket yang paling cepat kedaluwarsa dulu.</p>
+        <p id="buyPreviewTrial" class="hidden buy-confirm-note"></p>
         <div class="buy-actions buy-modal-actions">
           <button type="button" class="primary" id="buyConfirmBtn">Lanjutkan &amp; Buat QR</button>
           <button type="button" id="buyPreviewCancelBtn">Batal</button>
@@ -1838,6 +1839,14 @@
           $('buyConfExpiry').textContent = fmtDate(d.new_expires_at);
           if (d.new_bucket_expires_at) { $('buyConfBucketExpiry').textContent = fmtDate(d.new_bucket_expires_at); $('buyConfBucketRow').classList.remove('hidden'); }
           else $('buyConfBucketRow').classList.add('hidden');
+          // Info trial-dulu (27 Okt 2026): hanya bila preview menyatakan
+          // ada trial aktif bersisa. Syarat tampil dihitung server dari
+          // bucket trial (bukan plan_kind) — member yang sudah pernah
+          // beli tapi trial-nya masih bersisa tetap melihat info ini.
+          if (d.trial_active) {
+            $('buyPreviewTrial').textContent = `Kuota trial Anda (${fmtNum(d.trial_active.remaining_hits)} hit, aktif s/d ${fmtDate(d.trial_active.expires_at)}) dipakai dulu sebelum kuota paket baru — membeli paket tidak menghilangkannya. Masa aktif yang tampil tetap di tanggal trial sampai kuota trial habis, lalu berpindah ke tanggal paket.`;
+            $('buyPreviewTrial').classList.remove('hidden');
+          } else $('buyPreviewTrial').classList.add('hidden');
           buyOpenPreview();
         } catch (e) {
           $('buyMsg').textContent = e.message || 'Pratinjau gagal.';

@@ -1046,6 +1046,50 @@ pub fn bucket_is_active(bucket: &QuotaBucket, now: DateTime<Utc>) -> bool {
     bucket.expires_at.map_or(true, |expiry| expiry > now)
 }
 
+/// Trial aktif yang masih bersisa, untuk info kondisional "trial dipakai
+/// dulu" di modal konfirmasi beli portal member (27 Okt 2026).
+/// Sengaja BUKAN dari plan_kind: grant paket mengubah plan_kind jadi
+/// 'package' padahal bucket trial masih ada dan masih dipakai dulu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ActiveTrialInfo {
+    pub remaining_hits: u64,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Cari bucket trial aktif yang masih bersisa.
+///
+/// Penanda bucket trial (pasti, bukan heuristik "expiry terdekat"):
+/// baris trial_grants member ini masih berlaku (expiry di masa depan)
+/// DAN ada bucket dengan order_id None + package_id None + expires_at
+/// PERSIS sama dengan expiry grant — bucket trial dibuat dari instant
+/// `expires` yang sama dengan baris grant di callback signup, sementara
+/// bucket assign manual (order None, package None) expiry-nya =
+/// assign + valid_days, dan bucket paket QRIS selalu ber-order_id.
+/// Bila grant aktif tapi bucketnya sudah tidak ada (assign-replace
+/// menghapus semua bucket) atau tidak tercatat (kasus transient K15:
+/// kunci terbit tapi baris grant gagal), hasilnya None — info
+/// disembunyikan (fail-closed), bukan ditebak.
+pub fn active_trial_bucket(
+    grant_expiry: Option<DateTime<Utc>>,
+    buckets: &[QuotaBucket],
+    now: DateTime<Utc>,
+) -> Option<ActiveTrialInfo> {
+    let expiry = grant_expiry.filter(|expiry| *expiry > now)?;
+    buckets
+        .iter()
+        .find(|bucket| {
+            bucket.order_id.is_none()
+                && bucket.package_id.is_none()
+                && bucket.expires_at == Some(expiry)
+                && bucket_is_active(bucket, now)
+                && bucket.remaining_hits > 0
+        })
+        .map(|bucket| ActiveTrialInfo {
+            remaining_hits: bucket.remaining_hits,
+            expires_at: expiry,
+        })
+}
+
 /// Urutan FIFO: expiry paling awal dulu; bucket tanpa expiry TERAKHIR;
 /// seri dipecah created_at lalu id agar urutannya deterministik.
 fn fifo_key(bucket: &QuotaBucket) -> (bool, DateTime<Utc>, DateTime<Utc>, Uuid) {
@@ -1387,6 +1431,78 @@ mod tests {
             expires_at,
             created_at,
         }
+    }
+
+    #[test]
+    fn active_trial_bucket_cases() {
+        // Info "trial dipakai dulu" di modal beli (27 Okt 2026): syarat
+        // tampil berbasis bucket trial, BUKAN plan_kind.
+        let now = dt("2026-10-27T00:00:00Z");
+        let trial_expiry = dt("2026-11-01T00:00:00Z");
+        let past_expiry = dt("2026-10-20T00:00:00Z");
+        let pkg_expiry = dt("2026-11-26T00:00:00Z");
+        let trial = bucket(1000, 400, Some(trial_expiry), now);
+        // 1. Trial aktif bersisa -> tampil.
+        assert_eq!(
+            active_trial_bucket(Some(trial_expiry), &[trial.clone()], now),
+            Some(ActiveTrialInfo {
+                remaining_hits: 400,
+                expires_at: trial_expiry
+            })
+        );
+        // 2. Trial habis (grant lewat) -> sembunyi.
+        let expired = bucket(1000, 400, Some(past_expiry), now);
+        assert_eq!(
+            active_trial_bucket(Some(past_expiry), &[expired], now),
+            None
+        );
+        // 3. Tanpa trial (tanpa baris grant) -> sembunyi.
+        assert_eq!(
+            active_trial_bucket(None, &[trial.clone()], now),
+            None
+        );
+        // 4. Trial sisa 0 -> sembunyi.
+        let drained = bucket(1000, 0, Some(trial_expiry), now);
+        assert_eq!(
+            active_trial_bucket(Some(trial_expiry), &[drained], now),
+            None
+        );
+        // 5. Trial bersisa + sudah pernah beli paket -> tetap tampil
+        // (bucket paket ber-order_id tidak mengaburkan bucket trial).
+        let mut package = bucket(5000, 5000, Some(pkg_expiry), now);
+        package.order_id = Some(Uuid::now_v7());
+        package.package_id = Some(Uuid::now_v7());
+        assert_eq!(
+            active_trial_bucket(Some(trial_expiry), &[trial.clone(), package], now),
+            Some(ActiveTrialInfo {
+                remaining_hits: 400,
+                expires_at: trial_expiry
+            })
+        );
+        // 6. Grant aktif tapi bucket trial sudah dihapus (assign-replace)
+        // -> sembunyi (fail-closed, bukan ditebak).
+        let mut only_package = bucket(5000, 5000, Some(pkg_expiry), now);
+        only_package.order_id = Some(Uuid::now_v7());
+        assert_eq!(
+            active_trial_bucket(Some(trial_expiry), &[only_package], now),
+            None
+        );
+        // 7. Bucket manual (order None, package None) dengan expiry lain
+        // tidak dikira trial — yang cocok hanya expiry = expiry grant.
+        let manual = bucket(200, 200, Some(pkg_expiry), now);
+        assert_eq!(
+            active_trial_bucket(Some(trial_expiry), &[manual, trial.clone()], now),
+            Some(ActiveTrialInfo {
+                remaining_hits: 400,
+                expires_at: trial_expiry
+            })
+        );
+        // 8. Tepat di instant expiry -> sembunyi (strictly future).
+        let at_expiry = bucket(1000, 400, Some(now), now);
+        assert_eq!(
+            active_trial_bucket(Some(now), &[at_expiry], now),
+            None
+        );
     }
 
     #[test]
