@@ -81,6 +81,15 @@ struct BlogEntry {
     date: String,
     /// Indonesian display date, e.g. `27 Oktober 2026`.
     date_display: String,
+    /// Cover image URL from the article's `og:image` (absolute when the
+    /// article declares one); None when the article has no cover.
+    image: Option<String>,
+    /// Cover alt text from `og:image:alt`; falls back to the title.
+    image_alt: String,
+    /// Estimated reading time in minutes, from the article body's word
+    /// count; None when the body cannot be found (the card then omits
+    /// the reading time rather than showing a wrong number).
+    reading_minutes: Option<u64>,
 }
 
 /// Newest first; ties break on slug ascending so the order is stable.
@@ -186,6 +195,73 @@ fn format_date_id(date: &str) -> String {
     format!("{} {} {}", day, MONTHS[month - 1], year)
 }
 
+/// Strip markup to plain text: tags are removed and `<script>`/`<style>`
+/// block contents are skipped entirely (they are code, not prose).
+/// Tag names are matched case-insensitively; only `<script`/`<style>` with
+/// a name boundary count as block openers.
+fn strip_markup_text(html: &str) -> String {
+    let lower = html.to_lowercase();
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &lower[i..];
+        let is_block = |tag: &str| -> bool {
+            rest.starts_with(tag)
+                && rest[tag.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c.is_whitespace() || c == '>')
+        };
+        if is_block("<script") || is_block("<style") {
+            let close = if is_block("<script") {
+                "</script>"
+            } else {
+                "</style>"
+            };
+            match rest.find(close) {
+                Some(off) => i += off + close.len(),
+                None => break,
+            }
+        } else if bytes[i] == b'<' {
+            match html[i..].find('>') {
+                Some(off) => i += off + 1,
+                None => break,
+            }
+        } else {
+            let end = html[i..].find('<').map(|o| i + o).unwrap_or(bytes.len());
+            out.push_str(&html[i..end]);
+            out.push(' ');
+            i = end;
+        }
+    }
+    out
+}
+
+/// Estimated reading time at 200 words/minute, rounded up, minimum 1.
+/// Counts only the `<article>` body (site header/footer boilerplate and
+/// head scripts are not prose). None when there is no article body or
+/// it contains no words — the caller omits the reading time then.
+fn reading_minutes_from_html(html: &str) -> Option<u64> {
+    let start = html.find("<article")?;
+    let content_start = html[start..].find('>')? + start + 1;
+    let content_end = html[content_start..].find("</article>")? + content_start;
+    let text = strip_markup_text(&html[content_start..content_end]);
+    let words = text.split_whitespace().count();
+    if words == 0 {
+        return None;
+    }
+    Some(((words + 199) / 200) as u64)
+}
+
+/// Card image source: site-absolute `og:image` URLs become same-origin
+/// paths; anything else is used as-is.
+fn card_image_src(og_image: &str) -> &str {
+    og_image
+        .strip_prefix("https://www.rajacek.com")
+        .unwrap_or(og_image)
+}
+
 /// JSON-escape for embedding a string in a JSON-LD script block.
 fn json_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -203,8 +279,9 @@ fn json_escape(input: &str) -> String {
     out
 }
 
-/// JSON-LD for the list page: a Blog with its posts. Pure (unit-testable),
-/// so the emitted script is always valid JSON.
+/// JSON-LD for the list page: a Blog with its posts plus a BreadcrumbList
+/// (Beranda → Blog). Pure (unit-testable), so the emitted script is
+/// always valid JSON.
 fn blog_list_json_ld(entries: &[BlogEntry]) -> String {
     let mut posts = String::new();
     for (i, entry) in entries.iter().enumerate() {
@@ -219,8 +296,43 @@ fn blog_list_json_ld(entries: &[BlogEntry]) -> String {
         ));
     }
     format!(
-        "<script type=\"application/ld+json\">{{\"@context\":\"https://schema.org\",\"@type\":\"Blog\",\"name\":\"Blog Rajacek\",\"url\":\"https://www.rajacek.com/blog/\",\"description\":\"Artikel dari Rajacek tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya.\",\"inLanguage\":\"id-ID\",\"blogPost\":[{}]}}</script>",
+        "<script type=\"application/ld+json\">{{\"@context\":\"https://schema.org\",\"@graph\":[{{\"@type\":\"Blog\",\"name\":\"Blog Rajacek\",\"url\":\"https://www.rajacek.com/blog/\",\"description\":\"Artikel dari Rajacek tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya.\",\"inLanguage\":\"id-ID\",\"blogPost\":[{}]}},{{\"@type\":\"BreadcrumbList\",\"itemListElement\":[{{\"@type\":\"ListItem\",\"position\":1,\"name\":\"Beranda\",\"item\":\"https://www.rajacek.com/\"}},{{\"@type\":\"ListItem\",\"position\":2,\"name\":\"Blog\",\"item\":\"https://www.rajacek.com/blog/\"}}]}}]}}</script>",
         posts
+    )
+}
+
+/// One premium card for a list entry. `featured` renders the newest
+/// article large (eager image); the rest render as standard grid cards
+/// (lazy images). Images keep a uniform 1200/630 aspect ratio with
+/// object-fit cover so covers crop instead of distorting.
+fn render_blog_card(entry: &BlogEntry, featured: bool) -> String {
+    let img = match &entry.image {
+        Some(src) => format!(
+            "<img class=\"blog-card-img\" src=\"{}\" width=\"1200\" height=\"630\" loading=\"{}\" decoding=\"async\" alt=\"{}\" />",
+            escape_html(card_image_src(src)),
+            if featured { "eager" } else { "lazy" },
+            escape_html(&entry.image_alt),
+        ),
+        None => String::new(),
+    };
+    let minutes = match entry.reading_minutes {
+        Some(m) => format!(" · {} menit baca", m),
+        None => String::new(),
+    };
+    let featured_class = if featured {
+        " blog-card--featured"
+    } else {
+        ""
+    };
+    format!(
+        r##"<article class="blog-card{featured_class}">{img}<div class="blog-card-body"><p class="blog-meta">{date}{minutes}</p><h2><a href="/blog/{slug}.html">{title}</a></h2><p class="blog-card-desc">{description}</p><p><a class="blog-readmore" href="/blog/{slug}.html">Baca selengkapnya <span aria-hidden="true">→</span></a></p></div></article>"##,
+        featured_class = featured_class,
+        img = img,
+        date = escape_html(&entry.date_display),
+        minutes = minutes,
+        slug = entry.slug,
+        title = escape_html(&entry.title),
+        description = escape_html(&entry.description),
     )
 }
 
@@ -256,12 +368,18 @@ async fn read_blog_entries() -> Vec<BlogEntry> {
         if !valid_date(&date) {
             continue;
         }
+        let image = extract_meta_content(&text, "property", "og:image");
+        let image_alt = extract_meta_content(&text, "property", "og:image:alt")
+            .unwrap_or_else(|| title.clone());
         entries.push(BlogEntry {
             slug: stem.to_string(),
             title,
             description,
             date_display: format_date_id(&date),
             date,
+            image,
+            image_alt,
+            reading_minutes: reading_minutes_from_html(&text),
         });
     }
     sort_blog_entries(&mut entries);
@@ -278,14 +396,16 @@ pub async fn blog_list(uri: Uri) -> Response {
     if entries.is_empty() {
         items.push_str("<p class=\"blog-empty\">Belum ada artikel.</p>");
     } else {
-        for entry in &entries {
-            items.push_str(&format!(
-                "<article class=\"blog-card\"><p class=\"blog-date\">{}</p><h2><a href=\"/blog/{}.html\">{}</a></h2><p>{}</p></article>",
-                escape_html(&entry.date_display),
-                entry.slug,
-                escape_html(&entry.title),
-                escape_html(&entry.description),
-            ));
+        // Newest first (entries are already sorted): the first entry is
+        // the wide featured card, the rest form the standard grid.
+        let (featured, rest) = entries.split_first().unwrap();
+        items.push_str(&render_blog_card(featured, true));
+        if !rest.is_empty() {
+            items.push_str("<div class=\"blog-grid\">");
+            for entry in rest {
+                items.push_str(&render_blog_card(entry, false));
+            }
+            items.push_str("</div>");
         }
     }
     let html = format!(
@@ -317,17 +437,28 @@ pub async fn blog_list(uri: Uri) -> Response {
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/landing.css?v=20261025-5" />
     <style>
-      .blog-list {{ width:min(760px,calc(100% - 40px)); margin:auto; padding:48px 0 72px; }}
+      .blog-list {{ width:min(1180px,calc(100% - 40px)); margin:auto; padding:48px 0 72px; }}
       .blog-list h1 {{ color:var(--navy); font-size:clamp(31px,4vw,46px); line-height:1.12; letter-spacing:-2px; margin-bottom:12px; }}
       .blog-list .lede {{ color:var(--muted); font-size:16px; margin-bottom:36px; }}
-      .blog-card {{ padding:24px 0; border-top:1px solid var(--line); }}
-      .blog-card:last-child {{ border-bottom:1px solid var(--line); }}
-      .blog-date {{ color:var(--muted); font-size:13px; margin:0 0 6px; }}
+      .blog-card {{ min-width:0; overflow:hidden; border:1px solid var(--line); border-radius:var(--radius); background:var(--white); transition:transform .2s,box-shadow .2s; }}
+      .blog-card:hover {{ transform:translateY(-4px); box-shadow:0 22px 42px #152d4d14; }}
+      .blog-card-img {{ display:block; width:100%; height:auto; aspect-ratio:1200 / 630; object-fit:cover; }}
+      .blog-card-body {{ padding:22px 24px 24px; }}
+      .blog-meta {{ color:var(--muted); font-size:13px; margin:0 0 8px; }}
       .blog-card h2 {{ font-size:21px; letter-spacing:-.5px; margin:0 0 8px; }}
       .blog-card h2 a:hover {{ color:var(--blue); }}
-      .blog-card p:last-child {{ color:var(--muted); font-size:15px; margin:0; }}
+      .blog-card h2 a:focus-visible, .blog-readmore:focus-visible {{ outline:2px solid var(--blue); outline-offset:2px; }}
+      .blog-card-desc {{ color:var(--muted); font-size:15px; margin:0 0 14px; }}
+      .blog-readmore {{ color:var(--blue); font-size:14px; font-weight:800; }}
+      .blog-card--featured {{ margin-bottom:28px; }}
       .blog-empty {{ color:var(--muted); }}
-      @media (max-width:480px) {{ .blog-list {{ width:calc(100% - 28px); padding:36px 0 56px; }} }}
+      @media (min-width:860px) {{
+        .blog-card--featured {{ display:grid; grid-template-columns:1.05fr .95fr; align-items:stretch; }}
+        .blog-card--featured .blog-card-img {{ height:100%; }}
+        .blog-card--featured .blog-card-body {{ align-self:center; padding:28px 30px; }}
+        .blog-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; }}
+      }}
+      @media (max-width:480px) {{ .blog-list {{ width:calc(100% - 28px); padding:36px 0 56px; }} .blog-card-body {{ padding:18px; }} }}
     </style>
   </head>
   <body>
@@ -339,6 +470,7 @@ pub async fn blog_list(uri: Uri) -> Response {
     </header>
     <main id="content">
       <div class="blog-list">
+        <p class="eyebrow">Blog</p>
         <h1>Blog Rajacek</h1>
         <p class="lede">Artikel tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya.</p>
         {items}
@@ -443,6 +575,9 @@ mod tests {
                 description: "d".to_string(),
                 date: "2026-10-27".to_string(),
                 date_display: "27 Oktober 2026".to_string(),
+                image: None,
+                image_alt: "PLN".to_string(),
+                reading_minutes: None,
             },
             BlogEntry {
                 slug: "validasi-nomor-rekening".to_string(),
@@ -450,6 +585,9 @@ mod tests {
                 description: "d".to_string(),
                 date: "2026-10-27".to_string(),
                 date_display: "27 Oktober 2026".to_string(),
+                image: None,
+                image_alt: "Rekening".to_string(),
+                reading_minutes: None,
             },
             BlogEntry {
                 slug: "lama".to_string(),
@@ -457,6 +595,9 @@ mod tests {
                 description: "d".to_string(),
                 date: "2026-10-20".to_string(),
                 date_display: "20 Oktober 2026".to_string(),
+                image: None,
+                image_alt: "Lama".to_string(),
+                reading_minutes: None,
             },
         ];
         sort_blog_entries(&mut entries);
@@ -496,6 +637,9 @@ mod tests {
             description: "d".to_string(),
             date: "2026-10-27".to_string(),
             date_display: "27 Oktober 2026".to_string(),
+            image: None,
+            image_alt: "PLN".to_string(),
+            reading_minutes: None,
         }];
         let script = blog_list_json_ld(&entries);
         let json = script
@@ -503,10 +647,53 @@ mod tests {
             .trim_end_matches("</script>");
         let value: serde_json::Value =
             serde_json::from_str(json).expect("valid JSON-LD");
-        assert_eq!(value["@type"], "Blog");
+        let graph = value["@graph"].as_array().expect("@graph array");
+        let blog = graph
+            .iter()
+            .find(|v| v["@type"] == "Blog")
+            .expect("Blog node");
         assert_eq!(
-            value["blogPost"][0]["url"],
+            blog["blogPost"][0]["url"],
             "https://www.rajacek.com/blog/validasi-pln.html"
+        );
+        let crumbs = graph
+            .iter()
+            .find(|v| v["@type"] == "BreadcrumbList")
+            .expect("BreadcrumbList node");
+        assert_eq!(crumbs["itemListElement"][1]["name"], "Blog");
+    }
+
+    #[test]
+    fn reading_minutes_counts_article_body_only() {
+        // 200 words exactly → 1 minute; header/footer/script prose excluded.
+        let mut body = String::from("<html><head><script>var a = \"one two three\";</script></head><body><header>Navi gasi</header><article><p>");
+        body.push_str(&"kata ".repeat(200));
+        body.push_str("</p></article><footer>Kaki halaman</footer></body></html>");
+        assert_eq!(reading_minutes_from_html(&body), Some(1));
+        let mut body2 = String::from("<article><p>");
+        body2.push_str(&"kata ".repeat(201));
+        body2.push_str("</p></article>");
+        assert_eq!(reading_minutes_from_html(&body2), Some(2));
+        // No article body, or an empty one: omit rather than guess.
+        assert_eq!(reading_minutes_from_html("<html><p>teks</p></html>"), None);
+        assert_eq!(
+            reading_minutes_from_html("<article></article>"),
+            None
+        );
+        // Script/style blocks inside the article do not count as prose.
+        let scripted = "<article><script>alpha beta gamma</script><p>satu dua</p><style>.x{color:red}</style></article>";
+        assert_eq!(reading_minutes_from_html(scripted), Some(1));
+    }
+
+    #[test]
+    fn card_image_src_keeps_site_paths_relative() {
+        assert_eq!(
+            card_image_src("https://www.rajacek.com/blog/images/x.jpg"),
+            "/blog/images/x.jpg"
+        );
+        assert_eq!(
+            card_image_src("https://example.com/x.jpg"),
+            "https://example.com/x.jpg"
         );
     }
 
