@@ -3168,6 +3168,10 @@ struct AdminMemberView {
     expires_at: Option<chrono::DateTime<Utc>>,
     rate_limit_per_minute: Option<u32>,
     package_id: Option<Uuid>,
+    /// Plan efektif tab Trial/Umum (27 Okt 2026): derivasi saat dibaca
+    /// dari trial_grants.expires_at (store::effective_plan_kind) — nilai
+    /// tersimpan `plan_kind` di bawah (flatten) TIDAK diubah.
+    plan_effective: String,
 }
 
 #[derive(Deserialize)]
@@ -3187,6 +3191,11 @@ async fn list_members(
 ) -> Result<Json<Vec<AdminMemberView>>, AppError> {
     require_admin_role(&state, &headers, Role::Viewer).await?;
     let filters = parse_admin_list_filters(query.q, query.status, query.from, query.to)?;
+    // Tab Trial/Umum: satu query peta expiry trial + `now` Rust (UTC)
+    // untuk seluruh daftar — JANGAN MySQL NOW() (jam VPS UTC+8,
+    // expires_at tersimpan UTC; pelajaran antifarm).
+    let trial_expiry = state.store.trial_expiry_by_member().await;
+    let now = chrono::Utc::now();
     let mut views = Vec::new();
     for member in state
         .store
@@ -3197,7 +3206,13 @@ async fn list_members(
     {
         let key = state.store.member_key(member.id).await;
         let member_code = member.member_code.clone();
+        let plan_effective = crate::store::effective_plan_kind(
+            &member.plan_kind,
+            trial_expiry.get(&member.id).copied(),
+            now,
+        );
         views.push(AdminMemberView {
+            plan_effective,
             member_code,
             key_prefix: key.as_ref().map(|(summary, _)| summary.prefix.clone()),
             key_status: key.as_ref().map(|(summary, _)| summary.status.clone()),
@@ -3344,6 +3359,9 @@ async fn assign_member_package(
         expires_at: summary.expires_at,
         rate_limit_per_minute: Some(summary.rate_limit_per_minute),
         package_id: summary.package_id,
+        // Assign selalu menulis nilai non-trial (paket/manual), jadi
+        // plan efektif = nilai baru itu sendiri (bukan derivasi trial).
+        plan_effective: plan_kind.to_owned(),
         member: crate::models::MemberAccount {
             plan_kind: plan_kind.to_owned(),
             ..member
@@ -3656,6 +3674,10 @@ struct MemberDetailMemberView {
     name: Option<String>,
     picture_url: Option<String>,
     plan_kind: String,
+    /// Plan efektif tab Trial/Umum (lihat AdminMemberView). From
+    /// mengisi nilai tersimpan sebagai default; handler detail
+    /// menimpanya dengan derivasi dari trial_grants.
+    plan_effective: String,
     status: String,
     created_at: chrono::DateTime<Utc>,
     last_login_at: Option<chrono::DateTime<Utc>>,
@@ -3671,6 +3693,7 @@ impl From<&crate::models::MemberAccount> for MemberDetailMemberView {
             name: member.name.clone(),
             picture_url: member.picture_url.clone(),
             plan_kind: member.plan_kind.clone(),
+            plan_effective: member.plan_kind.clone(),
             status: member.status.clone(),
             created_at: member.created_at,
             last_login_at: member.last_login_at,
@@ -3796,6 +3819,18 @@ async fn get_member_detail(
     if !role.satisfies(Role::Manager) {
         member_view.google_sub = None;
     }
+    // Tab Trial/Umum: samakan plan detail ke plan efektif (derivasi
+    // saat dibaca, sama seperti daftar — nilai tersimpan tak diubah).
+    member_view.plan_effective = crate::store::effective_plan_kind(
+        &member.plan_kind,
+        state
+            .store
+            .trial_expiry_by_member()
+            .await
+            .get(&member.id)
+            .copied(),
+        chrono::Utc::now(),
+    );
     Ok(Json(MemberDetailResponse {
         member: member_view,
         keys,
@@ -5243,12 +5278,17 @@ fn order_csv_row(order: &crate::qris::AdminOrderView) -> Vec<String> {
 }
 
 /// Baris CSV member. Tidak memuat prefix kunci maupun data kunci apa pun.
-fn member_csv_row(member: &crate::models::MemberAccount) -> Vec<String> {
+/// Kolom "plan" CSV memakai plan EFEKTIF tab Trial/Umum (derivasi saat
+/// dibaca), bukan nilai tersimpan — konsisten dengan daftar panel.
+fn member_csv_row(
+    member: &crate::models::MemberAccount,
+    plan_effective: &str,
+) -> Vec<String> {
     vec![
         member.id.to_string(),
         member.email.clone(),
         member.status.clone(),
-        member.plan_kind.clone(),
+        plan_effective.to_owned(),
         member.created_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     ]
 }
@@ -5367,6 +5407,9 @@ struct AdminExportQuery {
     // Khusus usage: produk + prefix (sama seperti list riwayat).
     product: Option<String>,
     api_key_prefix: Option<String>,
+    // Khusus export member: tab Trial/Umum ("all"/"trial"/"umum";
+    // absen = all). Nilai lain -> 400.
+    tab: Option<String>,
 }
 
 // AUTHZ-ROLE: Viewer
@@ -5437,6 +5480,18 @@ async fn export_admin_csv(
             // tabel lalu truncate). +1 baris agar penanda truncated
             // tetap akurat, meniru cabang orders/usage; baris ekstra
             // dibuang oleh truncate di bawah, bukan dikirim.
+            // Tab Trial/Umum ikut memfilter export (konsisten dengan
+            // daftar panel): nilai tab tak dikenal -> 400 sebelum DB.
+            let member_tab = match query.tab.as_deref().map(str::trim) {
+                None | Some("") | Some("all") => None,
+                Some("trial") => Some("trial"),
+                Some("umum") => Some("umum"),
+                Some(other) => {
+                    return Err(AppError::bad_request(format!(
+                        "Tab member tidak dikenal: {other}"
+                    )));
+                }
+            };
             let mut members = state
                 .store
                 .list_members_for_export(
@@ -5447,13 +5502,28 @@ async fn export_admin_csv(
                     EXPORT_MAX_ROWS as i64 + 1,
                 )
                 .await;
-            let truncated = members.len() > EXPORT_MAX_ROWS;
-            members.truncate(EXPORT_MAX_ROWS);
-            let count = members.len();
-            let document = csv_document(
-                &["id", "email", "status", "plan", "dibuat"],
-                members.iter().map(member_csv_row).collect(),
-            );
+            // Plan efektif per member (derivasi saat dibaca, sama
+            // seperti daftar); kolom "plan" CSV memakai plan efektif.
+            let trial_expiry = state.store.trial_expiry_by_member().await;
+            let now = chrono::Utc::now();
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            for member in members.drain(..) {
+                let plan_effective = crate::store::effective_plan_kind(
+                    &member.plan_kind,
+                    trial_expiry.get(&member.id).copied(),
+                    now,
+                );
+                if let Some(tab) = member_tab {
+                    if plan_effective != tab {
+                        continue;
+                    }
+                }
+                rows.push(member_csv_row(&member, &plan_effective));
+            }
+            let truncated = rows.len() > EXPORT_MAX_ROWS;
+            rows.truncate(EXPORT_MAX_ROWS);
+            let count = rows.len();
+            let document = csv_document(&["id", "email", "status", "plan", "dibuat"], rows);
             (document, count, truncated, String::new())
         }
         "usage" => {
@@ -7500,7 +7570,7 @@ mod admin_export_tests {
     #[test]
     fn member_csv_row_has_exactly_the_specified_columns() {
         let member = member_fixture("a@contoh.id", Some("Ani"), "active", 20);
-        let row = member_csv_row(&member);
+        let row = member_csv_row(&member, "trial");
         assert_eq!(row.len(), 5);
         assert_eq!(row[1], "a@contoh.id");
         assert_eq!(row[2], "active");
@@ -7508,6 +7578,16 @@ mod admin_export_tests {
         assert!(row[4].starts_with("2026-10-20T10:00:00"));
         // Tidak ada prefix kunci / data kunci di baris member.
         assert!(!row.iter().any(|field| field.contains("rv_live")));
+    }
+
+    #[test]
+    fn member_csv_row_uses_effective_plan_not_stored_plan() {
+        // Fixture bertipe trial, tapi plan efektifnya sudah "umum"
+        // (trial habis) — CSV harus menulis "umum", bukan "trial".
+        let member = member_fixture("b@contoh.id", Some("Budi"), "active", 20);
+        assert_eq!(member.plan_kind, "trial");
+        let row = member_csv_row(&member, "umum");
+        assert_eq!(row[3], "umum");
     }
 
     #[test]

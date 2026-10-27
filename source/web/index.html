@@ -9,7 +9,7 @@
     />
     <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
-    <link rel="stylesheet" href="/styles.css?v=20261026-20" />
+    <link rel="stylesheet" href="/styles.css?v=20261026-21" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -273,6 +273,7 @@
             <div class="page-heading heading-row"><div><div class="eyebrow">Akun pelanggan</div><h1 id="members-heading">Member</h1><p>Kelola paket, kunci API, kuota, masa aktif, rate limit, dan status akun.</p></div><button class="button button-secondary" id="refresh-members" type="button">Muat ulang</button></div>
             <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Daftar member</span><h2>Semua member</h2></div><span class="count-chip" id="members-count">Memuat...</span></div>
             <form id="members-filter" class="form-grid"><label>Cari (email/nama/id)<input id="members-q" type="text" placeholder="mis. ani@contoh.id" autocomplete="off" /></label><label>Filter status<select id="members-status-filter"><option value="">Semua status</option><option value="active">Aktif</option><option value="disabled">Nonaktif</option></select></label><label>Dari<input id="members-from" type="date" /></label><label>Sampai<input id="members-to" type="date" /></label><div class="form-actions full-width"><button class="button button-primary" type="submit">Terapkan filter</button><button class="button button-secondary" id="export-members" type="button">Export CSV member</button></div></form>
+            <div class="member-tabs" role="tablist" aria-label="Kelompok member"><button type="button" class="member-tab is-active" role="tab" aria-selected="true" data-member-tab="all">Semua</button><button type="button" class="member-tab" role="tab" aria-selected="false" data-member-tab="trial">Trial</button><button type="button" class="member-tab" role="tab" aria-selected="false" data-member-tab="umum">Umum</button></div><p class="tester-audit-note">Trial = trial masih aktif. Umum = bukan trial aktif (sudah beli paket, plan manual, trial habis, atau trial ditahan). Trial yang habis pindah otomatis ke Umum saat daftar dimuat.</p>
             <div class="table-scroll"><table><thead><tr><th>Member</th><th>Kode member</th><th>Plan</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Login terakhir</th><th></th></tr></thead><tbody id="members-table"></tbody></table></div>
             <p id="members-empty" class="tester-audit-note" hidden>Belum ada member Google. Member muncul di sini setelah pendaftaran pertama lewat tombol Google di portal member.</p></article>
 
@@ -403,6 +404,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261026-25" defer></script>
+    <script src="/app.js?v=20261026-26" defer></script>
   </body>
 </html>

@@ -3690,6 +3690,33 @@ pub struct TrialMonitorStats {
     pub alert: bool,
 }
 
+/// Effective plan for the admin member list (tab Trial/Umum, 27 Okt
+/// 2026). Computed at READ time from `trial_grants.expires_at` — never
+/// a stored flip, never a background job — so an expired trial reads
+/// as "umum" the moment it is read. `plan_kind` itself is display-only
+/// (K35) and is never rewritten by this derivation. Trial is active
+/// only while expires_at is strictly in the future: at the exact expiry
+/// instant (or one second past it) the member is already "umum".
+/// Non-trial stored values (package/manual/anything else) pass through
+/// unchanged whatever the trial rows say; a stored 'trial' with NO
+/// grant row (e.g. an IP-limit-held account, which never received a
+/// trial) reads as "umum", not "trial".
+pub fn effective_plan_kind(
+    stored_plan_kind: &str,
+    trial_expires_at: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> String {
+    if stored_plan_kind == "trial"
+        && trial_expires_at.map_or(false, |expires_at| expires_at > now)
+    {
+        "trial".to_owned()
+    } else if stored_plan_kind == "trial" {
+        "umum".to_owned()
+    } else {
+        stored_plan_kind.to_owned()
+    }
+}
+
 pub fn aggregate_trial_monitor(
     rows: &[TrialMonitorRow],
     total_grants: u64,
@@ -4060,6 +4087,28 @@ impl AdminStore {
             .fetch_all(&pool)
             .await
             .unwrap_or_default()
+    }
+
+    /// Trial-grant expiry per member (member_id -> expires_at) for the
+    /// effective-plan derivation (tab Trial/Umum, 27 Okt 2026). No pool
+    /// -> empty (trial members then read as "umum", the same fail-closed
+    /// shape as the monitor's no-pool zeros). Rows with an unparsable
+    /// member_id are skipped, never fatal.
+    pub async fn trial_expiry_by_member(&self) -> HashMap<Uuid, chrono::DateTime<Utc>> {
+        let Some(pool) = self.pool() else {
+            return HashMap::new();
+        };
+        sqlx::query_as::<_, (String, chrono::DateTime<Utc>)>(
+            "SELECT member_id, expires_at FROM trial_grants",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(member_id, expires_at)| {
+            Uuid::parse_str(&member_id).ok().map(|id| (id, expires_at))
+        })
+        .collect()
     }
 
     /// Build the request context for a key the caller has ALREADY
@@ -6642,6 +6691,42 @@ mod trial_antifarm_tests {
         assert!(TRIAL_IP_COUNT_SQL.contains("signup_ip"));
         assert!(TRIAL_IP_COUNT_SQL.contains("granted_at"));
         assert!(TRIAL_MONITOR_ROWS_SQL.contains("signup_ip"));
+    }
+
+    #[test]
+    fn effective_plan_kind_boundary_cases() {
+        // Tab Trial/Umum (27 Okt 2026): derivasi saat dibaca dari
+        // trial_grants.expires_at, tanpa mengubah nilai tersimpan.
+        let now = Utc.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).unwrap();
+        let future = now + Duration::days(3);
+        let past = now - Duration::days(1);
+        let second_past = now - Duration::seconds(1);
+        // (1) Trial aktif -> Trial.
+        assert_eq!(
+            effective_plan_kind("trial", Some(future), now),
+            "trial"
+        );
+        // (2) Trial habis -> Umum.
+        assert_eq!(effective_plan_kind("trial", Some(past), now), "umum");
+        // (3) Stored 'trial' tanpa baris trial_grants (akun
+        // trial-ditahan batas IP) -> Umum, bukan Trial.
+        assert_eq!(effective_plan_kind("trial", None, now), "umum");
+        // (4) Paket/manual -> lolos apa adanya, apa pun status trial.
+        assert_eq!(
+            effective_plan_kind("package", Some(future), now),
+            "package"
+        );
+        assert_eq!(
+            effective_plan_kind("manual", Some(past), now),
+            "manual"
+        );
+        // (5) Tepat lewat sedetik dari expiry -> Umum.
+        assert_eq!(
+            effective_plan_kind("trial", Some(second_past), now),
+            "umum"
+        );
+        // Tepat di instant expiry (tidak strictly di masa depan) -> Umum.
+        assert_eq!(effective_plan_kind("trial", Some(now), now), "umum");
     }
 
     #[test]

@@ -1862,6 +1862,12 @@ td.empty-state { display: table-cell; }
 .analytics-tab { padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; }
 .analytics-tab:hover { color: var(--brand-700); }
 .analytics-tab.is-active { color: var(--brand-700); border-bottom-color: var(--brand); }
+/* Tab Trial/Umum di tampilan Member (27 Okt 2026): pola yang sama
+   dengan tab analitik, nama kelas sendiri agar tidak terikat. */
+.member-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 20px; border-bottom: 1px solid var(--line); }
+.member-tab { padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; }
+.member-tab:hover { color: var(--brand-700); }
+.member-tab.is-active { color: var(--brand-700); border-bottom-color: var(--brand); }
 .analytics-tabpanel[hidden] { display: none; }
 .analytics-tabpanel > :first-child { margin-top: 20px; }
 

@@ -14,6 +14,10 @@
     history: { items: [], total: 0, limit: 25, offset: 0, source: null, loaded: false },
     members: [],
     membersLoaded: false,
+    // Tab Trial/Umum (27 Okt 2026): filter tampilan di atas daftar
+    // yang sudah dimuat (kombinasi dengan filter q/status/tanggal
+    // server). Default: Semua.
+    membersTab: "all",
     orders: [],
     ordersPage: { limit: 100, offset: 0 },
     adminActivity: { items: [], total: 0, limit: 50, offset: 0, action: "", actor: "", from: "", to: "", loaded: false },
@@ -1149,13 +1153,21 @@
   }
 
   function renderMembers() {
-    const planLabel = { trial: "Trial", package: "Paket", manual: "Manual" };
-    $("#members-count").textContent = `${formatNumber(state.members.length)} member`;
-    $("#members-empty").hidden = state.members.length > 0;
-    $("#members-table").innerHTML = state.members.map((member) => `<tr>
+    // Plan efektif dari server (plan_effective); fallback ke nilai
+    // tersimpan bila respons lama tanpa field itu.
+    const effectivePlan = (member) => member.plan_effective || member.plan_kind;
+    const planLabel = { trial: "Trial", package: "Paket", manual: "Manual", umum: "Umum" };
+    const visible = state.members.filter((member) => {
+      if (state.membersTab === "trial") return effectivePlan(member) === "trial";
+      if (state.membersTab === "umum") return effectivePlan(member) !== "trial";
+      return true;
+    });
+    $("#members-count").textContent = `${formatNumber(visible.length)} member`;
+    $("#members-empty").hidden = visible.length > 0;
+    $("#members-table").innerHTML = visible.map((member) => `<tr>
       <td data-label="Member"><strong>${escapeHtml(member.name || member.email)}</strong><br /><span class="tester-audit-note">${escapeHtml(member.email)}</span><br /><code>${escapeHtml(member.key_prefix || "—")}</code></td>
       <td data-label="Kode member"><strong>${escapeHtml(member.member_code || "—")}</strong></td>
-      <td data-label="Plan">${escapeHtml(planLabel[member.plan_kind] || member.plan_kind)}</td>
+      <td data-label="Plan">${escapeHtml(planLabel[effectivePlan(member)] || effectivePlan(member))}</td>
       <td data-label="Status"><span class="status-badge ${member.status === "active" ? "valid" : "invalid"}">${member.status === "active" ? "Aktif" : "Nonaktif"}</span>${member.key_status === "revoked" ? `<br /><span class="status-badge invalid">kunci dicabut</span>` : ""}</td>
       <td data-label="Kuota">${member.quota_remaining == null ? "—" : `${formatNumber(member.quota_remaining)} / ${formatNumber(member.quota_total)}`}</td>
       <td data-label="Aktif s/d">${member.expires_at ? escapeHtml(formatDate(member.expires_at)) : "—"}</td>
@@ -1233,6 +1245,8 @@
     if (status) params.set("status", status);
     if (from) params.set("from", from);
     if (to) params.set("to", to);
+    // Export mengikuti tab yang aktif (server memfilter plan efektif).
+    if (state.membersTab && state.membersTab !== "all") params.set("tab", state.membersTab);
     return params;
   }
 
@@ -1831,8 +1845,9 @@
     if (!member) return;
     state.managedMemberId = memberId;
     $("#member-manage-title").textContent = member.name || member.email;
-    const planLabel = { trial: "Trial", package: "Paket", manual: "Manual" };
-    $("#member-manage-sub").textContent = `${member.email} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[member.plan_kind] || member.plan_kind}`;
+    const planLabel = { trial: "Trial", package: "Paket", manual: "Manual", umum: "Umum" };
+    const planEffective = member.plan_effective || member.plan_kind;
+    $("#member-manage-sub").textContent = `${member.email} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[planEffective] || planEffective}`;
     $("#member-manage-panel").hidden = false;
     // Formulir selalu mulai bersih agar nilai member sebelumnya tidak
     // terbawa ke member yang baru dibuka.
@@ -1883,9 +1898,10 @@
     const detail = state.memberDetail;
     if (!detail) return;
     const member = detail.member;
-    const planLabel = { trial: "Trial", package: "Paket", manual: "Manual" };
+    const planLabel = { trial: "Trial", package: "Paket", manual: "Manual", umum: "Umum" };
+    const planEffective = member.plan_effective || member.plan_kind;
     $("#member-detail-title").textContent = member.name || member.email;
-    $("#member-detail-sub").textContent = `${member.email} · Kode member: ${member.member_code || "—"} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[member.plan_kind] || member.plan_kind} · Daftar ${formatDate(member.created_at)} · Login terakhir ${member.last_login_at ? formatDate(member.last_login_at) : "—"}`;
+    $("#member-detail-sub").textContent = `${member.email} · Kode member: ${member.member_code || "—"} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[planEffective] || planEffective} · Daftar ${formatDate(member.created_at)} · Login terakhir ${member.last_login_at ? formatDate(member.last_login_at) : "—"}`;
     $("#member-detail-panel").hidden = false;
     const statusLabel = { active: "Aktif", disabled: "Nonaktif", revoked: "Dicabut" };
     $("#member-detail-keys").innerHTML = detail.keys.length ? detail.keys.map((key) => `<tr>
@@ -2708,6 +2724,20 @@
       loadHistory().catch(handleApiError);
     });
     $("#refresh-members")?.addEventListener("click", () => loadMembers().catch(handleApiError));
+    // Tab Trial/Umum: hanya filter tampilan (tanpa muat ulang dari
+    // server); kombinasi dengan filter q/status/tanggal yang sudah
+    // diterapkan saat loadMembers.
+    $$(".member-tab").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.membersTab = button.dataset.memberTab || "all";
+        $$(".member-tab").forEach((other) => {
+          const active = other === button;
+          other.classList.toggle("is-active", active);
+          other.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        renderMembers();
+      });
+    });
     $("#refresh-orders")?.addEventListener("click", () => loadOrders().catch(handleApiError));
     $("#refresh-admins")?.addEventListener("click", () => loadAdminAccounts().catch(handleApiError));
     $("#admins-add-form")?.addEventListener("submit", async (event) => {
