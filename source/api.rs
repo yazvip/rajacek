@@ -643,7 +643,24 @@ async fn serve_static_file(method: &Method, raw_path: &str) -> Option<Response> 
     } else {
         Body::from(bytes)
     };
-    Some((StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response())
+    let mut response =
+        (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response();
+    // Blog images are replaced by uploading a new file (not edited in
+    // place), so a moderate public cache is safe and keeps repeat article
+    // views off the origin. Scope is strictly blog images: HTML and every
+    // other asset keep whatever headers they already had.
+    let is_blog_image = relative.starts_with("blog/images/")
+        && matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("png") | Some("jpg") | Some("jpeg") | Some("svg") | Some("webp")
+        );
+    if is_blog_image {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=86400"),
+        );
+    }
+    Some(response)
 }
 
 fn percent_decode(input: &str) -> String {

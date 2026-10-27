@@ -12,6 +12,7 @@
 
 use axum::{
     extract::Path,
+    http::{header, StatusCode, Uri},
     response::{Html, IntoResponse, Response},
 };
 
@@ -32,6 +33,34 @@ pub fn normalize_blog_slug(raw: &str) -> Option<String> {
         return None;
     }
     Some(stripped.to_string())
+}
+
+/// Canonical redirect for the bare list path: `/blog` → `/blog/`.
+/// Anything else (including `/blog/` itself) is served, not redirected.
+pub fn list_redirect_target(path: &str) -> Option<&'static str> {
+    if path == "/blog" {
+        Some("/blog/")
+    } else {
+        None
+    }
+}
+
+/// Canonical redirect for a bare article slug: `/blog/<slug>` →
+/// `/blog/<slug>.html`. None when the slug already carries the suffix
+/// (serve it) or is invalid (404 it — never redirect garbage).
+pub fn article_redirect_target(raw: &str) -> Option<String> {
+    if raw.ends_with(".html") {
+        return None;
+    }
+    normalize_blog_slug(raw).map(|slug| format!("/blog/{slug}.html"))
+}
+
+fn permanent_redirect(location: &str) -> Response {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, location.to_string())],
+    )
+        .into_response()
 }
 
 fn blog_path(slug: &str) -> std::path::PathBuf {
@@ -157,6 +186,44 @@ fn format_date_id(date: &str) -> String {
     format!("{} {} {}", day, MONTHS[month - 1], year)
 }
 
+/// JSON-escape for embedding a string in a JSON-LD script block.
+fn json_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// JSON-LD for the list page: a Blog with its posts. Pure (unit-testable),
+/// so the emitted script is always valid JSON.
+fn blog_list_json_ld(entries: &[BlogEntry]) -> String {
+    let mut posts = String::new();
+    for (i, entry) in entries.iter().enumerate() {
+        if i > 0 {
+            posts.push(',');
+        }
+        posts.push_str(&format!(
+            "{{\"@type\":\"BlogPosting\",\"headline\":\"{}\",\"url\":\"https://www.rajacek.com/blog/{}.html\",\"datePublished\":\"{}\"}}",
+            json_escape(&entry.title),
+            entry.slug,
+            entry.date
+        ));
+    }
+    format!(
+        "<script type=\"application/ld+json\">{{\"@context\":\"https://schema.org\",\"@type\":\"Blog\",\"name\":\"Blog Rajacek\",\"url\":\"https://www.rajacek.com/blog/\",\"description\":\"Artikel dari Rajacek tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya.\",\"inLanguage\":\"id-ID\",\"blogPost\":[{}]}}</script>",
+        posts
+    )
+}
+
 async fn read_blog_entries() -> Vec<BlogEntry> {
     let mut entries = Vec::new();
     let mut dir = match tokio::fs::read_dir("web/blog").await {
@@ -201,8 +268,11 @@ async fn read_blog_entries() -> Vec<BlogEntry> {
     entries
 }
 
-/// `GET /blog` and `GET /blog/`: article list, newest first.
-pub async fn blog_list() -> Response {
+/// `GET /blog` (301 → `/blog/`) and `GET /blog/`: article list, newest first.
+pub async fn blog_list(uri: Uri) -> Response {
+    if let Some(target) = list_redirect_target(uri.path()) {
+        return permanent_redirect(target);
+    }
     let entries = read_blog_entries().await;
     let mut items = String::new();
     if entries.is_empty() {
@@ -224,7 +294,7 @@ pub async fn blog_list() -> Response {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Blog Rajacek — Artikel Validasi Rekening, E-Wallet, WhatsApp &amp; PLN</title>
+    <title>Blog Rajacek — Validasi Rekening, E-Wallet, WhatsApp &amp; PLN</title>
     <meta name="description" content="Artikel dari Rajacek tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya." />
     <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1" />
     <meta name="author" content="PT DATA BRIDGE NUSANTARA" />
@@ -233,14 +303,15 @@ pub async fn blog_list() -> Response {
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Rajacek" />
     <meta property="og:locale" content="id_ID" />
-    <meta property="og:title" content="Blog Rajacek — Artikel Validasi Rekening, E-Wallet, WhatsApp &amp; PLN" />
+    <meta property="og:title" content="Blog Rajacek — Validasi Rekening, E-Wallet, WhatsApp &amp; PLN" />
     <meta property="og:description" content="Artikel dari Rajacek tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya." />
     <meta property="og:url" content="https://www.rajacek.com/blog/" />
     <meta property="og:image" content="https://www.rajacek.com/og-cover.png" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Blog Rajacek — Artikel Validasi Rekening, E-Wallet, WhatsApp &amp; PLN" />
+    <meta name="twitter:title" content="Blog Rajacek — Validasi Rekening, E-Wallet, WhatsApp &amp; PLN" />
     <meta name="twitter:description" content="Artikel dari Rajacek tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya." />
     <meta name="twitter:image" content="https://www.rajacek.com/og-cover.png" />
+    {json_ld}
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
@@ -276,14 +347,19 @@ pub async fn blog_list() -> Response {
     <footer><a class="brand" href="/" aria-label="Rajacek, beranda"><img class="brand-mark-img" src="/logo-mark.png" alt="" aria-hidden="true"><span>aja<span>cek</span></span></a><p>© 2026 Rajacek · PT DATA BRIDGE NUSANTARA — Infrastruktur validasi untuk Indonesia.<br><span class="foot-contact">Hubungi kami: <a href="mailto:apivalidasi@gmail.com">apivalidasi@gmail.com</a> · <a href="https://t.me/xyz_yaz" target="_blank" rel="noopener">Telegram @xyz_yaz</a></span></p></footer>
   </body>
 </html>"##,
-        items = items
+        items = items,
+        json_ld = blog_list_json_ld(&entries),
     );
     Html(html).into_response()
 }
 
-/// `GET /blog/:slug`: one article file, served as-is. Unknown or invalid
-/// slugs get the branded 404 page (never a file outside `web/blog/`).
+/// `GET /blog/:slug`: bare slugs 301 → `/blog/<slug>.html`; suffixed
+/// slugs serve the article file as-is. Unknown or invalid slugs get the
+/// branded 404 page (never a file outside `web/blog/`).
 pub async fn blog_article(Path(raw): Path<String>) -> Response {
+    if let Some(target) = article_redirect_target(&raw) {
+        return permanent_redirect(&target);
+    }
     let Some(slug) = normalize_blog_slug(&raw) else {
         return not_found_page();
     };
@@ -394,5 +470,49 @@ mod tests {
             escape_html("<a href=\"x\">&'"),
             "&lt;a href=&quot;x&quot;&gt;&amp;&#39;"
         );
+    }
+
+    #[test]
+    fn canonical_redirect_targets() {
+        assert_eq!(list_redirect_target("/blog"), Some("/blog/"));
+        assert_eq!(list_redirect_target("/blog/"), None);
+        assert_eq!(list_redirect_target("/"), None);
+        assert_eq!(
+            article_redirect_target("validasi-pln").as_deref(),
+            Some("/blog/validasi-pln.html")
+        );
+        assert_eq!(article_redirect_target("validasi-pln.html"), None);
+        assert_eq!(article_redirect_target("Validasi-pln"), None);
+        assert_eq!(article_redirect_target("a/b"), None);
+        assert_eq!(article_redirect_target(".."), None);
+        assert_eq!(article_redirect_target(""), None);
+    }
+
+    #[test]
+    fn blog_list_json_ld_parses() {
+        let entries = vec![BlogEntry {
+            slug: "validasi-pln".to_string(),
+            title: "Validasi PLN Kini Tersedia di Rajacek".to_string(),
+            description: "d".to_string(),
+            date: "2026-10-27".to_string(),
+            date_display: "27 Oktober 2026".to_string(),
+        }];
+        let script = blog_list_json_ld(&entries);
+        let json = script
+            .trim_start_matches("<script type=\"application/ld+json\">")
+            .trim_end_matches("</script>");
+        let value: serde_json::Value =
+            serde_json::from_str(json).expect("valid JSON-LD");
+        assert_eq!(value["@type"], "Blog");
+        assert_eq!(
+            value["blogPost"][0]["url"],
+            "https://www.rajacek.com/blog/validasi-pln.html"
+        );
+    }
+
+    #[test]
+    fn json_escape_covers_quotes_and_controls() {
+        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(json_escape("a\nb"), "a\\nb");
     }
 }
