@@ -2087,6 +2087,7 @@ mod member_history_no_raw_fields_tests {
             target_raw: Some("1234567890".to_owned()),
             account_name: Some("Andrias Se****an Su****o".to_owned()),
             provider_endpoint_name: Some("Endpoint Uji".to_owned()),
+            provider_hint_display: Some("014 · BCA".to_owned()),
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,
@@ -2112,6 +2113,10 @@ mod member_history_no_raw_fields_tests {
         assert!(!serialized.contains("member_code"));
         assert!(!serialized.contains("provider_endpoint_name"));
         assert!(!serialized.contains("Endpoint Uji"));
+        // Batas yang sama untuk hint (migration 0035): tampilan kode
+        // bank adalah admin-only, tidak boleh bocor ke member.
+        assert!(!serialized.contains("provider_hint_display"));
+        assert!(!serialized.contains("014 · BCA"));
         assert!(!serialized.contains("1234567890"));
         assert!(!serialized.contains("Andrias Se****an Su****o"));
         assert!(!serialized.contains("RC000001"));

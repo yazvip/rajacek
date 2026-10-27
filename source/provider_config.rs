@@ -762,12 +762,16 @@ impl ProviderConfigStore {
         // menggandakan baris; baris lama (provider_endpoint_id NULL)
         // tetap tampil dengan nama NULL. Hanya NAMA yang diambil —
         // tidak pernah URL/host/kredensial endpoint.
+        // Hint provider (migration 0035) diambil mentah dari kolom
+        // provider_hint lalu di-resolve ke tampilan katalog publik di
+        // mapping di bawah (provider_hint_display); baris lama
+        // (provider_hint NULL) tetap tampil dengan tampilan NULL.
         // Kolom filter apply_filters tetap tak-ambigu: hanya
         // validation_requests yang punya product_code/outcome/
         // api_key_prefix/request_id/target_masked/occurred_at.
         let mut rows_builder = apply_filters(
             sqlx::QueryBuilder::new(
-                "SELECT vr.request_id, vr.api_key_prefix, vr.product_code, vr.outcome, vr.target_masked, vr.target_raw, vr.account_name, vr.provider_reference, vr.provider_latency_ms, vr.rajacek_processing_ms, vr.total_latency_ms, vr.attempts, vr.occurred_at, vr.channel, m.member_code, te.name FROM validation_requests vr LEFT JOIN admin_api_keys k ON k.prefix = vr.api_key_prefix LEFT JOIN members m ON m.id = k.member_id LEFT JOIN third_party_endpoints te ON te.id = vr.provider_endpoint_id WHERE 1 = 1",
+                "SELECT vr.request_id, vr.api_key_prefix, vr.product_code, vr.outcome, vr.target_masked, vr.target_raw, vr.account_name, vr.provider_reference, vr.provider_latency_ms, vr.rajacek_processing_ms, vr.total_latency_ms, vr.attempts, vr.occurred_at, vr.channel, m.member_code, te.name AS provider_endpoint_name, vr.provider_hint FROM validation_requests vr LEFT JOIN admin_api_keys k ON k.prefix = vr.api_key_prefix LEFT JOIN members m ON m.id = k.member_id LEFT JOIN third_party_endpoints te ON te.id = vr.provider_endpoint_id WHERE 1 = 1",
             ),
             filters,
         );
@@ -775,78 +779,73 @@ impl ProviderConfigStore {
         rows_builder.push_bind(i64::from(limit));
         rows_builder.push(" OFFSET ");
         rows_builder.push_bind(i64::from(offset));
-        let rows: Vec<(
-            String,
-            String,
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            u64,
-            Option<u64>,
-            Option<u64>,
-            Option<u32>,
-            chrono::NaiveDateTime,
-            String,
-            Option<String>,
-            Option<String>,
-        )> = match rows_builder.build_query_as().fetch_all(pool).await {
-            Ok(rows) => rows,
-            Err(error) => {
-                tracing::warn!(error = ?error, "Kueri riwayat validasi gagal");
-                return None;
-            }
-        };
+        // Baris riwayat sebagai struct bernama (bukan tuple): sqlx hanya
+        // mengimplementasikan FromRow untuk tuple sampai 16 kolom, dan
+        // kolom provider_hint (migration 0035) adalah kolom ke-17.
+        // Derive FromRow mencocokkan kolom berdasarkan NAMA, jadi
+        // te.name diberi alias provider_endpoint_name; kolom vr.*
+        // dan m.member_code sudah bernama sama dengan field-nya.
+        #[derive(sqlx::FromRow)]
+        struct HistoryRow {
+            request_id: String,
+            api_key_prefix: String,
+            product_code: String,
+            outcome: String,
+            target_masked: String,
+            target_raw: Option<String>,
+            account_name: Option<String>,
+            provider_reference: Option<String>,
+            provider_latency_ms: u64,
+            rajacek_processing_ms: Option<u64>,
+            total_latency_ms: Option<u64>,
+            attempts: Option<u32>,
+            occurred_at: chrono::NaiveDateTime,
+            channel: String,
+            member_code: Option<String>,
+            provider_endpoint_name: Option<String>,
+            provider_hint: Option<String>,
+        }
+        let rows: Vec<HistoryRow> =
+            match rows_builder.build_query_as().fetch_all(pool).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(error = ?error, "Kueri riwayat validasi gagal");
+                    return None;
+                }
+            };
         let items = rows
             .into_iter()
-            .filter_map(
-                |(
-                    request_id,
-                    api_key_prefix,
-                    product_code,
-                    outcome,
-                    target_masked,
-                    target_raw,
-                    account_name,
-                    provider_reference,
-                    provider_latency_ms,
-                    rajacek_processing_ms,
-                    total_latency_ms,
-                    attempts,
-                    occurred_at,
-                    channel,
-                    member_code,
-                    provider_endpoint_name,
-                )| {
-                    let Some(product) = parse_product(product_code.as_str()) else {
-                        return None;
-                    };
+            .filter_map(|row| {
+                let Some(product) = parse_product(row.product_code.as_str()) else {
+                    return None;
+                };
 
-                    Some(crate::models::ValidationHistoryItem {
-                        request_id,
-                        api_key_prefix,
-                        member_code,
+                Some(crate::models::ValidationHistoryItem {
+                    request_id: row.request_id,
+                    api_key_prefix: row.api_key_prefix,
+                    member_code: row.member_code,
+                    product,
+                    outcome: row.outcome,
+                    target_masked: row.target_masked,
+                    target_raw: row.target_raw,
+                    account_name: row.account_name,
+                    provider_endpoint_name: row.provider_endpoint_name,
+                    provider_hint_display: crate::models::provider_hint_display(
                         product,
-                        outcome,
-                        target_masked,
-                        target_raw,
-                        account_name,
-                        provider_endpoint_name,
-                        provider_reference,
-                        provider_latency_ms,
-                        rajacek_processing_ms,
-                        total_latency_ms,
-                        attempts,
-                        occurred_at: chrono::DateTime::from_naive_utc_and_offset(
-                            occurred_at,
-                            chrono::Utc,
-                        ),
-                        channel,
-                    })
-                },
-            )
+                        row.provider_hint.as_deref(),
+                    ),
+                    provider_reference: row.provider_reference,
+                    provider_latency_ms: row.provider_latency_ms,
+                    rajacek_processing_ms: row.rajacek_processing_ms,
+                    total_latency_ms: row.total_latency_ms,
+                    attempts: row.attempts,
+                    occurred_at: chrono::DateTime::from_naive_utc_and_offset(
+                        row.occurred_at,
+                        chrono::Utc,
+                    ),
+                    channel: row.channel,
+                })
+            })
             .collect();
         // Rolling-window hit counts with the same filters, for the admin
         // recap (average hits per second / per minute). occurred_at is UTC.

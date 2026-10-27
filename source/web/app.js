@@ -201,6 +201,19 @@
     }[product] || product;
   }
 
+  // Baris kode bank / e-wallet di Detail riwayat (migration 0035):
+  // hanya untuk produk bank_account ("Kode bank") dan ewallet
+  // ("E-wallet"); produk lain tidak menampilkan baris ini. Hint null
+  // (baris lama pra-fitur) -> "tidak tercatat (data lama)", sama
+  // seperti Sumber data. Tampilan sudah di-resolve server ("014 · BCA",
+  // "dana · DANA"); panel tidak pernah menerima kode upstream.
+  function historyHintRow(item) {
+    if (item.product !== "bank_account" && item.product !== "ewallet") return "";
+    const label = item.product === "bank_account" ? "Kode bank" : "E-wallet";
+    const value = item.provider_hint_display ? item.provider_hint_display : "tidak tercatat (data lama)";
+    return testerRow(label, value);
+  }
+
   function statusBadge(status) {
     const label = {
       active: "Aktif",
@@ -1110,6 +1123,7 @@
       testerRow("Waktu", occurred.full)
       + testerRow("Member", `${item.member_code || "—"} (${item.api_key_prefix})`)
       + testerRow("Produk", productLabel(item.product))
+      + historyHintRow(item)
       + testerRow("Target", target)
       + testerRow("Nama", accountName)
       + testerRow("Hasil", outcomeLabel[item.outcome] || item.outcome)

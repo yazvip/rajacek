@@ -1877,6 +1877,10 @@ pub(crate) async fn execute_validation(
         target_raw: Some(request.target.clone()),
         account_name: history_account_name,
         provider_endpoint_id: outcome.provider_endpoint_id,
+        // Hint yang diinput member (migration 0035): kode bank publik /
+        // slug e-wallet publik; None untuk PLN/WhatsApp. Mengalir lewat
+        // event yang sama ke worker -> kolom provider_hint.
+        provider_hint: request.provider_hint.clone(),
         provider_reference: outcome.result.and_then(|result| result.reference),
         provider_latency_ms: outcome.provider_latency_ms,
         rajacek_processing_ms,
@@ -1900,6 +1904,13 @@ pub(crate) async fn execute_validation(
         target_raw: usage_event.target_raw.clone(),
         account_name: usage_event.account_name.clone(),
         provider_endpoint_name: history_endpoint_name,
+        // Tampilan hint di-resolve di sini (jalur memori); jalur
+        // database me-resolve dari kolom provider_hint di
+        // validation_history_from_db. Pola sama dengan endpoint di atas.
+        provider_hint_display: crate::models::provider_hint_display(
+            request.product,
+            request.provider_hint.as_deref(),
+        ),
         provider_reference: usage_event.provider_reference.clone(),
         provider_latency_ms: usage_event.provider_latency_ms,
         rajacek_processing_ms: Some(usage_event.rajacek_processing_ms),
@@ -7519,6 +7530,7 @@ mod admin_export_tests {
             target_raw: None,
             account_name: None,
             provider_endpoint_name: None,
+            provider_hint_display: None,
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,

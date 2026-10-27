@@ -269,6 +269,13 @@ pub struct UsageEvent {
     /// supaya event yang diantre binary lama tetap ter-parse (None).
     #[serde(default)]
     pub provider_endpoint_id: Option<Uuid>,
+    /// Kode bank publik 3 digit (bank_account) atau slug e-wallet
+    /// publik (ewallet) yang diinput member (migration 0035), ditulis
+    /// ke `validation_requests.provider_hint` oleh worker. Defaulted
+    /// supaya event yang diantre binary lama tetap ter-parse (None);
+    /// None juga untuk produk tanpa hint (PLN, WhatsApp).
+    #[serde(default)]
+    pub provider_hint: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     /// Internal processing time and end-to-end total for this check, plus how
@@ -284,6 +291,34 @@ pub struct UsageEvent {
     /// sandbox). Defaults to "api" for events queued before this field.
     #[serde(default = "default_channel")]
     pub channel: String,
+}
+
+/// Resolve a stored provider hint to its admin display string
+/// (migration 0035). Bank: public code + public catalog name
+/// ("014 · BCA"); the upstream tukangcek_code is never
+/// exposed here. E-wallet: slug + public display name ("dana · DANA").
+/// Unknown code/slug falls back to the raw hint; None stays None, and
+/// products without a hint (PLN, WhatsApp) always resolve to None, so
+/// the modal never renders a hint row for them.
+pub fn provider_hint_display(
+    product: ValidationProduct,
+    hint: Option<&str>,
+) -> Option<String> {
+    let hint = hint?;
+    Some(match product {
+        ValidationProduct::BankAccount => match crate::bank_codes::bank_name(hint) {
+            Some(name) => format!("{hint} · {name}"),
+            None => hint.to_owned(),
+        },
+        ValidationProduct::Ewallet => match crate::ewallet_codes::list()
+            .iter()
+            .find(|(slug, _)| *slug == hint)
+        {
+            Some((_, name)) => format!("{hint} · {name}"),
+            None => hint.to_owned(),
+        },
+        _ => return None,
+    })
 }
 
 /// One recorded member validation, as shown in the admin history view. Mirrors
@@ -332,6 +367,19 @@ pub struct ValidationHistoryItem {
     /// as `target_raw` / `account_name` above.
     #[serde(skip_serializing)]
     pub provider_endpoint_name: Option<String>,
+    /// Tampilan hint provider yang sudah di-resolve saat baca
+    /// (migration 0035): "014 · BCA" untuk bank,
+    /// "dana · DANA" untuk e-wallet. Admin history only, sama seperti
+    /// provider_endpoint_name di atas: jalur memori di-resolve saat
+    /// validasi, jalur database di-resolve dari kolom provider_hint
+    /// di validation_history_from_db. None untuk baris lama pra-fitur
+    /// dan produk tanpa hint (PLN, WhatsApp). Never serialized from
+    /// this struct: the member history endpoint returns this struct
+    /// verbatim — the admin endpoint converts to
+    /// [`AdminValidationHistoryItem`] instead, same pattern as
+    /// `provider_endpoint_name` above.
+    #[serde(skip_serializing)]
+    pub provider_hint_display: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     /// Latency breakdown for the admin history view; None for rows recorded
@@ -364,6 +412,10 @@ pub struct AdminValidationHistoryItem {
     /// Nama endpoint sumber jawaban (migration 0033), admin only. Hanya
     /// NAMA yang dikirim — tidak pernah URL, host, kunci, atau kredensial.
     pub provider_endpoint_name: Option<String>,
+    /// Tampilan hint provider yang sudah di-resolve (migration 0035),
+    /// admin only. Hanya kode publik + nama katalog — tidak pernah
+    /// kode upstream.
+    pub provider_hint_display: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     pub rajacek_processing_ms: Option<u64>,
@@ -385,6 +437,7 @@ impl From<&ValidationHistoryItem> for AdminValidationHistoryItem {
             target_raw: item.target_raw.clone(),
             account_name: item.account_name.clone(),
             provider_endpoint_name: item.provider_endpoint_name.clone(),
+            provider_hint_display: item.provider_hint_display.clone(),
             provider_reference: item.provider_reference.clone(),
             provider_latency_ms: item.provider_latency_ms,
             rajacek_processing_ms: item.rajacek_processing_ms,
@@ -1799,6 +1852,7 @@ mod history_filter_tests {
             target_raw: None,
             account_name: None,
             provider_endpoint_name: None,
+            provider_hint_display: None,
             provider_reference: None,
             provider_latency_ms: 0,
             rajacek_processing_ms: None,
@@ -1918,6 +1972,7 @@ mod admin_history_fields_tests {
             target_raw: Some("1234567890".to_owned()),
             account_name: Some("Andrias Se****an Su****o".to_owned()),
             provider_endpoint_name: None,
+            provider_hint_display: Some("014 · BCA".to_owned()),
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,
@@ -1972,6 +2027,10 @@ mod admin_history_fields_tests {
         assert!(!serialized.contains("1234567890"));
         assert!(!serialized.contains("Andrias Se****an Su****o"));
         assert!(!serialized.contains("RC000042"));
+        // Batas keras yang sama untuk hint (migration 0035): tampilan
+        // kode bank adalah admin-only, tidak boleh bocor ke member.
+        assert!(!serialized.contains("provider_hint_display"));
+        assert!(!serialized.contains("BCA"));
         assert!(serialized.contains("\"target_masked\":\"***7890\""));
     }
 
@@ -1983,6 +2042,63 @@ mod admin_history_fields_tests {
         assert!(serialized.contains("\"target_raw\":\"1234567890\""));
         assert!(serialized.contains("\"account_name\":\"Andrias Se****an Su****o\""));
         assert!(serialized.contains("\"target_masked\":\"***7890\""));
+        assert!(serialized.contains("\"provider_hint_display\":\"014 · BCA\""));
+    }
+
+    #[test]
+    fn provider_hint_display_resolves_bank_and_ewallet() {
+        // Bank: kode publik + nama katalog publik; kode upstream tidak
+        // pernah muncul di tampilan.
+        assert_eq!(
+            provider_hint_display(ValidationProduct::BankAccount, Some("014")).as_deref(),
+            Some("014 · BCA")
+        );
+        // E-wallet: slug + nama tampil dari daftar slug publik.
+        assert_eq!(
+            provider_hint_display(ValidationProduct::Ewallet, Some("dana")).as_deref(),
+            Some("dana · DANA")
+        );
+        assert_eq!(
+            provider_hint_display(ValidationProduct::Ewallet, Some("gopay_driver")).as_deref(),
+            Some("gopay_driver · GoPay Driver")
+        );
+        // Kode/slug tak dikenal: fallback ke hint mentah, bukan error.
+        assert_eq!(
+            provider_hint_display(ValidationProduct::BankAccount, Some("999")).as_deref(),
+            Some("999")
+        );
+        // None tetap None; produk tanpa hint tidak pernah punya tampilan.
+        assert_eq!(
+            provider_hint_display(ValidationProduct::BankAccount, None),
+            None
+        );
+        assert_eq!(
+            provider_hint_display(ValidationProduct::Pln, Some("123456789012")),
+            None
+        );
+        assert_eq!(
+            provider_hint_display(ValidationProduct::Whatsapp, Some("62812")),
+            None
+        );
+    }
+
+    #[test]
+    fn usage_event_provider_hint_roundtrips_and_defaults_to_none() {
+        // Event baru dengan provider_hint (migration 0035) ter-parse dan
+        // terserialisasi kembali dengan hint-nya.
+        let event: UsageEvent = serde_json::from_str(
+            r#"{"event_id":"0199a5a5-0000-7000-8000-000000000009","request_id":"R9","idempotency_key":null,"api_key_prefix":"rv_live_x","product":"bank_account","status":"valid","price_snapshot_id":null,"occurred_at":"2026-10-25T00:00:00Z","target_fingerprint":"f","target_masked":"***7890","provider_hint":"014","provider_reference":null,"provider_latency_ms":10,"channel":"api"}"#,
+        )
+        .expect("event dengan provider_hint harus ter-parse");
+        assert_eq!(event.provider_hint.as_deref(), Some("014"));
+        let serialized = serde_json::to_string(&event).expect("serialize");
+        assert!(serialized.contains("\"provider_hint\":\"014\""));
+        // Event lama tanpa provider_hint tetap ter-parse dengan None.
+        let old: UsageEvent = serde_json::from_str(
+            r#"{"event_id":"0199a5a5-0000-7000-8000-000000000001","request_id":"R1","idempotency_key":null,"api_key_prefix":"rv_live_x","product":"bank_account","status":"valid","price_snapshot_id":null,"occurred_at":"2026-10-25T00:00:00Z","target_fingerprint":"f","target_masked":"***","provider_reference":null,"provider_latency_ms":10,"channel":"api"}"#,
+        )
+        .expect("event lama tanpa provider_hint harus ter-parse");
+        assert_eq!(old.provider_hint, None);
     }
 
     #[test]

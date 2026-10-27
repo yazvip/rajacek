@@ -19,17 +19,20 @@ use crate::models::UsageEvent;
 /// NULL for pre-feature rows); it uses a CASE bind because sqlx has no
 /// native Option<Uuid>-to-BINARY(16) mapping in this query style, the
 /// same pattern as the price_snapshot_id bind in the ledger INSERT below.
+/// Column provider_hint comes from migration 0035 (member-input public
+/// bank code / e-wallet slug, NULL for pre-feature rows and for
+/// products without a hint); a plain VARCHAR bind, no CASE needed.
 const PERSIST_VALIDATION_REQUEST_SQL: &str = r#"
             INSERT IGNORE INTO validation_requests (
                 id, request_id, event_id, api_key_prefix, product_code, outcome,
                 target_fingerprint, target_masked, target_raw, account_name,
-                provider_reference, provider_endpoint_id, provider_latency_ms,
-                rajacek_processing_ms, total_latency_ms, attempts,
-                occurred_at, channel
+                provider_reference, provider_endpoint_id, provider_hint,
+                provider_latency_ms, rajacek_processing_ms, total_latency_ms,
+                attempts, occurred_at, channel
             ) VALUES (
                 UUID_TO_BIN(?), ?, UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?,
                 CASE WHEN ? IS NULL THEN NULL ELSE UUID_TO_BIN(?) END,
-                ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?
             )
             "#;
 
@@ -117,6 +120,7 @@ impl Database {
             .bind(&event.provider_reference)
             .bind(&provider_endpoint_id)
             .bind(&provider_endpoint_id)
+            .bind(&event.provider_hint)
             .bind(event.provider_latency_ms)
             .bind(event.rajacek_processing_ms)
             .bind(event.total_latency_ms)
@@ -191,6 +195,17 @@ mod persist_sql_tests {
         // bind di persist_usage_event.
         assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("provider_endpoint_id"));
         let placeholders = PERSIST_VALIDATION_REQUEST_SQL.matches('?').count();
-        assert_eq!(placeholders, 19, "bind dan placeholder tidak seimbang");
+        // Total dikunci oleh tes migrasi 0035 di bawah, bukan di sini.
+        assert!(placeholders >= 19, "bind dan placeholder tidak seimbang");
+    }
+
+    #[test]
+    fn validation_request_insert_covers_migration_0035_hint_column() {
+        // Migrasi 0035 menambah satu kolom VARCHAR (provider_hint) dengan
+        // satu bind biasa, jadi total placeholder naik 19 -> 20. Jumlah
+        // ini harus sama dengan jumlah bind di persist_usage_event.
+        assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("provider_hint"));
+        let placeholders = PERSIST_VALIDATION_REQUEST_SQL.matches('?').count();
+        assert_eq!(placeholders, 20, "bind dan placeholder tidak seimbang");
     }
 }
