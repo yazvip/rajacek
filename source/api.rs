@@ -95,6 +95,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/openapi/openapi.json", get(openapi_json_spec))
         .route("/openapi.json", get(openapi_json_spec))
         .route("/docs", get(public_docs))
+        .route("/kontak", get(public_kontak))
+        .route("/kontak.html", get(kontak_html_redirect))
         .route("/v1/banks", get(list_bank_codes))
         .route("/v1/admin/banks", get(list_bank_codes_admin))
         .route("/v1/auth/session", get(auth_session))
@@ -558,6 +560,42 @@ mod package_products_label_tests {
 
 async fn public_docs() -> Html<&'static str> {
     Html(include_str!("../web/docs.html"))
+}
+
+/// Halaman Kontak: statis dan tertanam di binary seperti landing dan docs,
+/// sehingga satu-satunya sumber kebenaran adalah tree repo yang ter-deploy
+/// (bukan file disk yang bisa drift). Isinya hanya kontak yang sudah
+/// dipublikasikan; tidak ada formulir karena tidak ada backend pengiriman.
+async fn public_kontak() -> Html<&'static str> {
+    Html(include_str!("../web/kontak.html"))
+}
+
+/// Dedup kanonis seperti blog: `/kontak.html` → 301 `/kontak`.
+/// Pola yang sama dengan `permanent_redirect` di blog.rs (301 + Location),
+/// bukan axum `Redirect::permanent` (308).
+async fn kontak_html_redirect() -> Response {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, "/kontak".to_string())],
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod kontak_redirect_tests {
+    use super::kontak_html_redirect;
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn kontak_html_redirect_is_permanent_to_kontak() {
+        let response = kontak_html_redirect().await.into_response();
+        assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/kontak"
+        );
+    }
 }
 
 /// Canonical host: browser-facing GET requests on the bare domain are
