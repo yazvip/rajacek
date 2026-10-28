@@ -4213,11 +4213,12 @@ async fn test_telegram_settings(
     require_admin_role(&state, &headers, Role::Manager).await?;
     let pool = telegram_pool(&state).await?;
     let cipher = telegram_cipher(&state);
+    let (title, text) = crate::telegram_settings::test_message();
     let outcome = crate::alerts::send_admin_message_once(
         &pool,
         Some(&cipher),
-        "Tes notifikasi Rajacek",
-        "Bot Telegram admin terhubung dan dapat mengirim pesan.",
+        &title,
+        &text,
     )
     .await;
     Ok(Json(match outcome {

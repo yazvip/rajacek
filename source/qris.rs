@@ -3077,7 +3077,7 @@ async fn grant_row(
     if matches!(result.1, VerifyOutcome::Granted) {
         if let Ok(Some(account)) = store.member_by_id(member_uuid).await {
             if let Some(code) = account.member_code.filter(|value| !value.is_empty()) {
-                let (title, detail) = crate::telegram_settings::purchase_message(
+                let (title, text) = crate::telegram_settings::purchase_message(
                     &code,
                     &order.package_name,
                     order.quota_hits,
@@ -3089,7 +3089,7 @@ async fn grant_row(
                     pool.clone(),
                     store.credential_cipher(),
                     title,
-                    detail,
+                    text,
                 );
             }
         }

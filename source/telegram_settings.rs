@@ -23,6 +23,11 @@
 //! - **Minimal.** Pesan hanya berisi kode member, nama paket, hit,
 //!   nominal, dan waktu. TIDAK PERNAH: nomor rekening/target mentah,
 //!   nama pemilik rekening, kunci API, token, atau data pelanggan lain.
+//! - **Format premium.** Parse mode HTML: header brand `👑 RAJACEK`,
+//!   pemisah, judul berikon tebal, satu ikon per baris detail.
+//!   Nilai luar (kode, email, nama paket) di-escape agar tidak merusak
+//!   markup. Kanal alert env lama tidak memakai parse mode HTML dan
+//!   formatnya tidak diubah.
 //! - **Anti-spam kedaluwarsa.** Satu pesan per bucket, sekali saja
 //!   (`expiry_notified_at`). Bucket trial (tanpa package_id maupun
 //!   order_id) dikecualikan dari notifikasi ini.
@@ -300,6 +305,37 @@ pub fn invoice_short(order_id: &str) -> String {
     format!("INV-{}", short.to_uppercase())
 }
 
+/// Escape nilai interpolasi untuk parse mode HTML Telegram (`&`, `<`,
+/// `>`). Nilai yang diketik admin (nama paket) dan email wajib lewat
+/// sini agar tidak merusak markup atau menyuntikkan tag. Nilai yang
+/// diformat server (rupiah, hit, waktu WIB, INV-pendek) hanya berisi
+/// angka/titik/tanda hubung sehingga tidak perlu di-escape.
+pub fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Teks lengkap satu pesan notifikasi admin (parse mode HTML): baris
+/// brand, pemisah, judul berikon tebal, lalu baris detail. Judul polos
+/// (tanpa markup) dipakai terpisah untuk log dan rekaman upaya panel.
+pub fn admin_message_text(icon: &str, title: &str, detail: &str) -> String {
+    format!(
+        "👑 <b>RAJACEK</b>\n{}\n{} <b>{}</b>\n{}",
+        "─".repeat(17),
+        icon,
+        title,
+        detail
+    )
+}
+
 /// Status trial untuk pesan member baru.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrialNote {
@@ -312,15 +348,19 @@ pub enum TrialNote {
     None,
 }
 
-/// (judul, detail) notifikasi member baru.
+/// (judul polos untuk log/panel, teks HTML lengkap) notifikasi member
+/// baru. Satu ikon per baris; nilai luar di-escape.
 pub fn new_member_message(
     member_code: &str,
     email: &str,
     trial: TrialNote,
     now: DateTime<Utc>,
 ) -> (String, String) {
+    let title = "Member Baru".to_owned();
     let mut detail = format!(
-        "Kode: {member_code}\nEmail: {email}\nWaktu: {}",
+        "🆔 Kode: {}\n📧 Email: {}\n🕐 Waktu: {}",
+        escape_html(member_code),
+        escape_html(email),
         format_wib_datetime(now)
     );
     match trial {
@@ -329,7 +369,9 @@ pub fn new_member_message(
             valid_days,
         } => {
             detail = format!(
-                "Kode: {member_code}\nEmail: {email}\nTrial: {} / {} hari\nWaktu: {}",
+                "🆔 Kode: {}\n📧 Email: {}\n🎁 Trial: {} / {} hari\n🕐 Waktu: {}",
+                escape_html(member_code),
+                escape_html(email),
                 format_hits(quota_hits),
                 valid_days,
                 format_wib_datetime(now)
@@ -337,16 +379,19 @@ pub fn new_member_message(
         }
         TrialNote::Held => {
             detail = format!(
-                "Kode: {member_code}\nEmail: {email}\nTrial: ditahan (batas IP)\nWaktu: {}",
+                "🆔 Kode: {}\n📧 Email: {}\n🎁 Trial: ditahan (batas IP)\n🕐 Waktu: {}",
+                escape_html(member_code),
+                escape_html(email),
                 format_wib_datetime(now)
             );
         }
         TrialNote::None => {}
     }
-    ("Member baru".to_owned(), detail)
+    (title.clone(), admin_message_text("🎉", &title, &detail))
 }
 
-/// (judul, detail) notifikasi pembelian paket (grant berhasil).
+/// (judul polos untuk log/panel, teks HTML lengkap) notifikasi
+/// pembelian paket (grant berhasil).
 pub fn purchase_message(
     member_code: &str,
     package_name: &str,
@@ -355,31 +400,51 @@ pub fn purchase_message(
     order_id: &str,
     now: DateTime<Utc>,
 ) -> (String, String) {
-    (
-        "Paket dibeli".to_owned(),
-        format!(
-            "Kode: {member_code}\nPaket: {package_name}\nKuota: {}\nNominal: {}\nInvoice: {}\nWaktu: {}",
-            format_hits(quota_hits),
-            format_rupiah(amount_idr),
-            invoice_short(order_id),
-            format_wib_datetime(now)
-        ),
-    )
+    let title = "Paket Dibeli".to_owned();
+    let detail = format!(
+        "🆔 Kode: {}\n📦 Paket: {}\n⚡ Kuota: {}\n💰 Nominal: {}\n🧾 Invoice: {}\n🕐 Waktu: {}",
+        escape_html(member_code),
+        escape_html(package_name),
+        format_hits(quota_hits),
+        format_rupiah(amount_idr),
+        invoice_short(order_id),
+        format_wib_datetime(now)
+    );
+    (title.clone(), admin_message_text("🛍️", &title, &detail))
 }
 
-/// (judul, detail) notifikasi paket hampir kedaluwarsa.
+/// (judul polos untuk log/panel, teks HTML lengkap) notifikasi paket
+/// hampir kedaluwarsa.
 pub fn expiry_message(
     member_code: &str,
     package_name: &str,
     remaining_hits: u64,
     expires_at: NaiveDateTime,
 ) -> (String, String) {
+    let title = "Paket Hampir Kedaluwarsa".to_owned();
+    let detail = format!(
+        "🆔 Kode: {}\n📦 Paket: {}\n⚡ Sisa: {}\n📅 Kedaluwarsa: {}",
+        escape_html(member_code),
+        escape_html(package_name),
+        format_hits(remaining_hits),
+        format_wib_naive(expires_at)
+    );
     (
-        "Paket hampir kedaluwarsa".to_owned(),
-        format!(
-            "Kode: {member_code}\nPaket: {package_name}\nSisa: {}\nKedaluwarsa: {}",
-            format_hits(remaining_hits),
-            format_wib_naive(expires_at)
+        title.clone(),
+        admin_message_text("⏰", &title, &detail),
+    )
+}
+
+/// (judul polos untuk log/panel, teks HTML lengkap) pesan tes dari
+/// panel admin.
+pub fn test_message() -> (String, String) {
+    let title = "Tes Notifikasi Rajacek".to_owned();
+    (
+        title.clone(),
+        admin_message_text(
+            "✅",
+            &title,
+            "Bot Telegram admin terhubung dan dapat mengirim pesan.",
         ),
     )
 }
@@ -523,14 +588,13 @@ pub async fn notify_expiring_buckets(
             continue;
         };
         let package_name = resolve_package_name(pool, &candidate).await;
-        let (title, detail) = expiry_message(
+        let (title, text) = expiry_message(
             &member_code,
             &package_name,
             candidate.remaining_hits,
             candidate.expires_at,
         );
-        let text = alerts::build_alert_text(&title, &detail);
-        match alerts::send_telegram_message(&base_url, &token, &chat_id, &text).await {
+        match alerts::send_telegram_message(&base_url, &token, &chat_id, &text, Some("HTML")).await {
             Ok(()) => {
                 let marked = sqlx::query(
                     "UPDATE quota_buckets SET expiry_notified_at = ? \
@@ -620,9 +684,38 @@ mod tests {
     }
 
     #[test]
+    fn admin_message_text_has_brand_header_divider_and_bold_title() {
+        let text = admin_message_text("🎉", "Member Baru", "🆔 Kode: RC000001");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "👑 <b>RAJACEK</b>");
+        assert_eq!(lines[1].chars().count(), 17);
+        assert!(lines[1].chars().all(|ch| ch == '─'));
+        assert_eq!(lines[2], "🎉 <b>Member Baru</b>");
+        assert_eq!(lines[3], "🆔 Kode: RC000001");
+    }
+
+    #[test]
+    fn escape_html_neutralizes_markup_in_values() {
+        assert_eq!(
+            escape_html("A&B <C> \"D\""),
+            "A&amp;B &lt;C&gt; \"D\""
+        );
+        let (_, text) = purchase_message(
+            "RC000001",
+            "Paket & <Promo>",
+            100,
+            1000,
+            "01a16156-4f29-7034-ab51-f5c699827826",
+            Utc.with_ymd_and_hms(2026, 10, 28, 3, 4, 0).unwrap(),
+        );
+        assert!(text.contains("📦 Paket: Paket &amp; &lt;Promo&gt;"));
+        assert!(!text.contains("Paket & <Promo>"));
+    }
+
+    #[test]
     fn new_member_message_covers_trial_variants() {
         let now = Utc.with_ymd_and_hms(2026, 10, 28, 3, 4, 0).unwrap();
-        let (title, detail) = new_member_message(
+        let (title, text) = new_member_message(
             "RC000001",
             "member@contoh.id",
             TrialNote::Granted {
@@ -631,23 +724,23 @@ mod tests {
             },
             now,
         );
-        assert_eq!(title, "Member baru");
-        assert!(detail.contains("Kode: RC000001"));
-        assert!(detail.contains("Email: member@contoh.id"));
-        assert!(detail.contains("Trial: 1.000 hit / 7 hari"));
-        assert!(detail.contains("28 Okt 2026, 10:04 WIB"));
+        assert_eq!(title, "Member Baru");
+        assert_eq!(
+            text,
+            "👑 <b>RAJACEK</b>\n─────────────────\n🎉 <b>Member Baru</b>\n🆔 Kode: RC000001\n📧 Email: member@contoh.id\n🎁 Trial: 1.000 hit / 7 hari\n🕐 Waktu: 28 Okt 2026, 10:04 WIB"
+        );
         let (_, held) =
             new_member_message("RC000002", "a@b.id", TrialNote::Held, now);
-        assert!(held.contains("Trial: ditahan (batas IP)"));
+        assert!(held.contains("🎁 Trial: ditahan (batas IP)"));
         let (_, none) =
             new_member_message("RC000003", "a@b.id", TrialNote::None, now);
-        assert!(!none.contains("Trial:"));
+        assert!(!none.contains("🎁 Trial:"));
     }
 
     #[test]
     fn purchase_message_is_minimal_and_exact() {
         let now = Utc.with_ymd_and_hms(2026, 10, 28, 3, 4, 0).unwrap();
-        let (title, detail) = purchase_message(
+        let (title, text) = purchase_message(
             "RC000001",
             "Starter",
             5000,
@@ -655,10 +748,10 @@ mod tests {
             "01a16156-4f29-7034-ab51-f5c699827826",
             now,
         );
-        assert_eq!(title, "Paket dibeli");
+        assert_eq!(title, "Paket Dibeli");
         assert_eq!(
-            detail,
-            "Kode: RC000001\nPaket: Starter\nKuota: 5.000 hit\nNominal: Rp150.000\nInvoice: INV-01A16156\nWaktu: 28 Okt 2026, 10:04 WIB"
+            text,
+            "👑 <b>RAJACEK</b>\n─────────────────\n🛍️ <b>Paket Dibeli</b>\n🆔 Kode: RC000001\n📦 Paket: Starter\n⚡ Kuota: 5.000 hit\n💰 Nominal: Rp150.000\n🧾 Invoice: INV-01A16156\n🕐 Waktu: 28 Okt 2026, 10:04 WIB"
         );
     }
 
@@ -666,11 +759,22 @@ mod tests {
     fn expiry_message_shows_wib_deadline() {
         let expires =
             NaiveDateTime::parse_from_str("2026-10-29 03:30:00", "%Y-%m-%d %H:%M:%S").unwrap();
-        let (title, detail) = expiry_message("RC000001", "Starter", 123, expires);
-        assert_eq!(title, "Paket hampir kedaluwarsa");
-        assert!(detail.contains("Kode: RC000001"));
-        assert!(detail.contains("Sisa: 123 hit"));
-        assert!(detail.contains("Kedaluwarsa: 29 Okt 2026, 10:30 WIB"));
+        let (title, text) = expiry_message("RC000001", "Starter", 123, expires);
+        assert_eq!(title, "Paket Hampir Kedaluwarsa");
+        assert_eq!(
+            text,
+            "👑 <b>RAJACEK</b>\n─────────────────\n⏰ <b>Paket Hampir Kedaluwarsa</b>\n🆔 Kode: RC000001\n📦 Paket: Starter\n⚡ Sisa: 123 hit\n📅 Kedaluwarsa: 29 Okt 2026, 10:30 WIB"
+        );
+    }
+
+    #[test]
+    fn test_message_uses_brand_header_and_checkmark_title() {
+        let (title, text) = test_message();
+        assert_eq!(title, "Tes Notifikasi Rajacek");
+        assert_eq!(
+            text,
+            "👑 <b>RAJACEK</b>\n─────────────────\n✅ <b>Tes Notifikasi Rajacek</b>\nBot Telegram admin terhubung dan dapat mengirim pesan."
+        );
     }
 
     #[test]

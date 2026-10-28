@@ -1268,7 +1268,7 @@ async fn google_callback_inner(
         if let Some(pool) = state.store.pool() {
             let code = member.member_code.clone().unwrap_or_default();
             if !code.is_empty() {
-                let (title, detail) = crate::telegram_settings::new_member_message(
+                let (title, text) = crate::telegram_settings::new_member_message(
                     &code,
                     &member.email,
                     trial_notify,
@@ -1278,7 +1278,7 @@ async fn google_callback_inner(
                     pool,
                     state.store.credential_cipher(),
                     title,
-                    detail,
+                    text,
                 );
             }
         }
