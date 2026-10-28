@@ -1079,6 +1079,12 @@ async fn google_callback_inner(
     // revoked case is detected here from the returned status.
     let mut reveal_token: Option<String> = None;
     let mut trial_held = false;
+    // Notifikasi Telegram (member baru): status trial untuk pesan —
+    // Granted bila kunci berkuota dipertahankan (klaim berhasil atau
+    // error transient pola K15), Held bila ditahan batas IP, None bila
+    // tanpa trial. Dikirim fire-and-forget di akhir handler, setelah
+    // sesi berhasil diterbitkan, agar tidak pernah menggagalkan login.
+    let mut trial_notify = crate::telegram_settings::TrialNote::None;
     {
         let _key_lock = state.store.member_key_lock(member.id);
         let _provision_guard = _key_lock.lock().await;
@@ -1122,6 +1128,10 @@ async fn google_callback_inner(
                 match outcome {
                     crate::store::TrialGrantOutcome::Claimed
                     | crate::store::TrialGrantOutcome::TransientError => {
+                        trial_notify = crate::telegram_settings::TrialNote::Granted {
+                            quota_hits: quota,
+                            valid_days: days,
+                        };
                         reveal_token = Some(stash_key_reveal(
                             &created.plaintext_key,
                             member.id,
@@ -1170,6 +1180,7 @@ async fn google_callback_inner(
                         )
                         .await;
                         trial_held = true;
+                        trial_notify = crate::telegram_settings::TrialNote::Held;
                         let empty = state
                             .store
                             .create_member_api_key(&member, 0, None, rate_limit)
@@ -1248,6 +1259,30 @@ async fn google_callback_inner(
     response
         .headers_mut()
         .append(header::SET_COOKIE, host_only_clear_header(&state));
+    // Notifikasi member baru (hanya pendaftaran baru, bukan login
+    // ulang): admin tidak membuat member lewat panel (create_member
+    // hanya dipanggil dari signup ini), jadi tidak ada pengecualian
+    // admin yang perlu dibedakan. Fire-and-forget: kegagalan kirim
+    // hanya jadi log, login sudah berhasil pada titik ini.
+    if is_new {
+        if let Some(pool) = state.store.pool() {
+            let code = member.member_code.clone().unwrap_or_default();
+            if !code.is_empty() {
+                let (title, detail) = crate::telegram_settings::new_member_message(
+                    &code,
+                    &member.email,
+                    trial_notify,
+                    chrono::Utc::now(),
+                );
+                crate::alerts::notify_admin(
+                    pool,
+                    state.store.credential_cipher(),
+                    title,
+                    detail,
+                );
+            }
+        }
+    }
     Ok(response)
 
 }

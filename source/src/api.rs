@@ -95,6 +95,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/openapi/openapi.json", get(openapi_json_spec))
         .route("/openapi.json", get(openapi_json_spec))
         .route("/docs", get(public_docs))
+        .route("/kontak", get(public_kontak))
+        .route("/kontak.html", get(kontak_html_redirect))
         .route("/v1/banks", get(list_bank_codes))
         .route("/v1/admin/banks", get(list_bank_codes_admin))
         .route("/v1/auth/session", get(auth_session))
@@ -230,6 +232,14 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/trial-settings",
             get(get_trial_settings).put(update_trial_settings),
         )
+        .route(
+            "/v1/admin/telegram-settings",
+            get(get_telegram_settings).put(update_telegram_settings),
+        )
+        .route(
+            "/v1/admin/telegram-settings/test",
+            post(test_telegram_settings),
+        )
         .route("/v1/member/packages", get(crate::member::purchase_packages))
         .route(
             "/v1/member/orders/preview",
@@ -297,6 +307,9 @@ pub fn build_router(state: AppState) -> Router {
     let router = Router::new()
         .merge(api)
         .route("/member", get(member_page))
+        .route("/blog", get(crate::blog::blog_list))
+        .route("/blog/", get(crate::blog::blog_list))
+        .route("/blog/:slug", get(crate::blog::blog_article))
         .route_service("/admin", ServeFile::new("web/index.html"))
         .fallback(fallback_handler)
         .layer(
@@ -557,6 +570,42 @@ async fn public_docs() -> Html<&'static str> {
     Html(include_str!("../web/docs.html"))
 }
 
+/// Halaman Kontak: statis dan tertanam di binary seperti landing dan docs,
+/// sehingga satu-satunya sumber kebenaran adalah tree repo yang ter-deploy
+/// (bukan file disk yang bisa drift). Isinya hanya kontak yang sudah
+/// dipublikasikan; tidak ada formulir karena tidak ada backend pengiriman.
+async fn public_kontak() -> Html<&'static str> {
+    Html(include_str!("../web/kontak.html"))
+}
+
+/// Dedup kanonis seperti blog: `/kontak.html` → 301 `/kontak`.
+/// Pola yang sama dengan `permanent_redirect` di blog.rs (301 + Location),
+/// bukan axum `Redirect::permanent` (308).
+async fn kontak_html_redirect() -> Response {
+    (
+        StatusCode::MOVED_PERMANENTLY,
+        [(header::LOCATION, "/kontak".to_string())],
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod kontak_redirect_tests {
+    use super::kontak_html_redirect;
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    #[tokio::test]
+    async fn kontak_html_redirect_is_permanent_to_kontak() {
+        let response = kontak_html_redirect().await.into_response();
+        assert_eq!(response.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/kontak"
+        );
+    }
+}
+
 /// Canonical host: browser-facing GET requests on the bare domain are
 /// redirected permanently to www. API and health paths are never redirected,
 /// so existing integrations on the bare domain keep working unchanged.
@@ -640,7 +689,24 @@ async fn serve_static_file(method: &Method, raw_path: &str) -> Option<Response> 
     } else {
         Body::from(bytes)
     };
-    Some((StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response())
+    let mut response =
+        (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response();
+    // Blog images are replaced by uploading a new file (not edited in
+    // place), so a moderate public cache is safe and keeps repeat article
+    // views off the origin. Scope is strictly blog images: HTML and every
+    // other asset keep whatever headers they already had.
+    let is_blog_image = relative.starts_with("blog/images/")
+        && matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("png") | Some("jpg") | Some("jpeg") | Some("svg") | Some("webp")
+        );
+    if is_blog_image {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=86400"),
+        );
+    }
+    Some(response)
 }
 
 fn percent_decode(input: &str) -> String {
@@ -672,7 +738,7 @@ fn hex_value(byte: u8) -> Option<u8> {
     }
 }
 
-fn not_found_page() -> Response {
+pub(crate) fn not_found_page() -> Response {
     let html = r#"<!doctype html>
 <html lang="id">
   <head>
@@ -1380,7 +1446,7 @@ async fn google_login_start(
     // Light per-IP throttle (audit flow K18), mirroring the member
     // start endpoint; cap + TTL in the state store are unchanged.
     let ip = effective_client_ip(&headers, address.ip()).to_string();
-    if !auth::oauth_start_allowed(&ip) {
+    if !auth::oauth_start_allowed(&ip, auth::OAuthPurpose::Admin) {
         return Err(AppError::new(
             StatusCode::TOO_MANY_REQUESTS,
             "rate_limited",
@@ -1403,6 +1469,12 @@ async fn google_login_callback(
     // email on success (the callback now returns it alongside the
     // redirect). On failure the email is not reliably known, so the
     // actor is "unknown" rather than a guess.
+    // Audit login 2026-10-27 BESAR-2: a callback is a top-level
+    // browser navigation, so a failure must redirect to /admin with a
+    // safe `auth` code (see auth::oauth_failure_redirect) instead of
+    // rendering raw JSON. The audit record above keeps the detailed
+    // reason server-side; the URL carries only the safe code.
+    let consent_denied = query.error.as_deref() == Some("access_denied");
     match auth::google_login_callback(
         state.config.clone(),
         state.oauth_states.clone(),
@@ -1430,7 +1502,7 @@ async fn google_login_callback(
                 "Percobaan login Google admin gagal (akun ditolak, state tidak valid, atau Google menolak kode).".to_owned(),
             )
             .await;
-            Err(error)
+            Ok(auth::oauth_failure_redirect("/admin", &error, consent_denied))
         }
     }
 }
@@ -1857,6 +1929,10 @@ pub(crate) async fn execute_validation(
         target_raw: Some(request.target.clone()),
         account_name: history_account_name,
         provider_endpoint_id: outcome.provider_endpoint_id,
+        // Hint yang diinput member (migration 0035): kode bank publik /
+        // slug e-wallet publik; None untuk PLN/WhatsApp. Mengalir lewat
+        // event yang sama ke worker -> kolom provider_hint.
+        provider_hint: request.provider_hint.clone(),
         provider_reference: outcome.result.and_then(|result| result.reference),
         provider_latency_ms: outcome.provider_latency_ms,
         rajacek_processing_ms,
@@ -1880,6 +1956,13 @@ pub(crate) async fn execute_validation(
         target_raw: usage_event.target_raw.clone(),
         account_name: usage_event.account_name.clone(),
         provider_endpoint_name: history_endpoint_name,
+        // Tampilan hint di-resolve di sini (jalur memori); jalur
+        // database me-resolve dari kolom provider_hint di
+        // validation_history_from_db. Pola sama dengan endpoint di atas.
+        provider_hint_display: crate::models::provider_hint_display(
+            request.product,
+            request.provider_hint.as_deref(),
+        ),
         provider_reference: usage_event.provider_reference.clone(),
         provider_latency_ms: usage_event.provider_latency_ms,
         rajacek_processing_ms: Some(usage_event.rajacek_processing_ms),
@@ -4056,6 +4139,101 @@ async fn update_trial_settings(
     )
     .await;
     Ok(Json(load_trial_settings(&state).await))
+}
+
+// ---------------------------------------------------------------------------
+// Notifikasi bot Telegram admin (member baru, beli paket, kedaluwarsa).
+// GET/PUT/test semuanya Manager: ini konfigurasi situs (bukan data
+// operasional) — preseden site-settings GET = Manager. Token tidak
+// pernah dikembalikan ke panel (hanya status + 4 akhir).
+// ---------------------------------------------------------------------------
+
+async fn telegram_pool(state: &AppState) -> Result<sqlx::MySqlPool, AppError> {
+    state.store.pool().ok_or_else(|| {
+        AppError::service_unavailable("Database tidak terpasang.")
+    })
+}
+
+fn telegram_cipher(state: &AppState) -> crate::provider_config::CredentialCipher {
+    crate::provider_config::CredentialCipher::new(
+        state.config.api_key_encryption_key.as_deref(),
+    )
+}
+
+async fn get_telegram_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::telegram_settings::TelegramSettingsView>, AppError> {
+    require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = telegram_pool(&state).await?;
+    let cipher = telegram_cipher(&state);
+    Ok(Json(
+        crate::telegram_settings::load_telegram_settings(&pool)
+            .await?
+            .view(&cipher),
+    ))
+}
+
+async fn update_telegram_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::telegram_settings::TelegramSettingsInput>,
+) -> Result<Json<crate::telegram_settings::TelegramSettingsView>, AppError> {
+    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = telegram_pool(&state).await?;
+    let cipher = telegram_cipher(&state);
+    let view = crate::telegram_settings::save_telegram_settings(&pool, input, &cipher).await?;
+    record_admin_activity(
+        &state,
+        &principal,
+        "Pengaturan Telegram diperbarui",
+        format!(
+            "Notifikasi Telegram: {}",
+            if view.configured {
+                "terkonfigurasi"
+            } else {
+                "belum lengkap"
+            }
+        ),
+    )
+    .await;
+    Ok(Json(view))
+}
+
+#[derive(serde::Serialize)]
+struct TelegramTestResult {
+    sent: bool,
+    message: &'static str,
+}
+
+async fn test_telegram_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TelegramTestResult>, AppError> {
+    require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = telegram_pool(&state).await?;
+    let cipher = telegram_cipher(&state);
+    let outcome = crate::alerts::send_admin_message_once(
+        &pool,
+        Some(&cipher),
+        "Tes notifikasi Rajacek",
+        "Bot Telegram admin terhubung dan dapat mengirim pesan.",
+    )
+    .await;
+    Ok(Json(match outcome {
+        crate::alerts::AdminNotifyOutcome::Sent => TelegramTestResult {
+            sent: true,
+            message: "Pesan tes terkirim.",
+        },
+        crate::alerts::AdminNotifyOutcome::NotConfigured => TelegramTestResult {
+            sent: false,
+            message: "Telegram belum dikonfigurasi — isi bot token dan chat ID.",
+        },
+        crate::alerts::AdminNotifyOutcome::Failed(_) => TelegramTestResult {
+            sent: false,
+            message: "Gagal mengirim pesan tes. Periksa token/chat ID dan log server.",
+        },
+    }))
 }
 
 async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<AdminPrincipal, AppError> {
@@ -7499,6 +7677,7 @@ mod admin_export_tests {
             target_raw: None,
             account_name: None,
             provider_endpoint_name: None,
+            provider_hint_display: None,
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,

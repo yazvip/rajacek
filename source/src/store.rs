@@ -596,6 +596,16 @@ impl AdminStore {
 
     /// Attach the API-key encryption cipher (from API_KEY_ENCRYPTION_KEY).
     /// Without it, new keys are stored hash-only and cannot be revealed.
+    /// Klon cipher kunci API untuk kredensial settings (dipakai
+    /// notifikasi Telegram): cipher yang sama dipasang saat startup
+    /// dari API_KEY_ENCRYPTION_KEY. None bila belum dipasang (mode
+    /// tanpa secret) — pemanggil lalu hanya mengandalkan fallback env.
+    pub(crate) fn credential_cipher(
+        &self,
+    ) -> Option<crate::provider_config::CredentialCipher> {
+        self.key_cipher()
+    }
+
     pub fn attach_key_cipher(&self, secret: Option<&str>) {
         *self.key_cipher.write().expect("key cipher lock") =
             secret.map(|value| crate::provider_config::CredentialCipher::new(Some(value)));

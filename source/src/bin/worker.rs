@@ -111,6 +111,43 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Notifikasi paket hampir kedaluwarsa (24 jam) — sekali saat
+    // startup, lalu tiap 6 jam. Anti-spam lewat kolom
+    // quota_buckets.expiry_notified_at: hanya bucket yang kirimnya
+    // berhasil yang ditandai; gagal kirim dicoba lagi tick berikutnya.
+    // Bucket trial (tanpa package_id maupun order_id) dikecualikan.
+    // Tick pertama langsung jalan agar bucket yang masuk jendela saat
+    // worker mati tetap diberitahu setelah restart.
+    let expiry_pool = database.pool().clone();
+    let expiry_key = config.api_key_encryption_key.clone();
+    tokio::spawn(async move {
+        loop {
+            match rajacek_api::telegram_settings::notify_expiring_buckets(
+                &expiry_pool,
+                expiry_key.as_deref(),
+            )
+            .await
+            {
+                Ok(sent) => {
+                    tracing::info!(
+                        sent,
+                        "Notifikasi paket hampir kedaluwarsa selesai (tick 6 jam)"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "Notifikasi paket hampir kedaluwarsa gagal; dicoba lagi pada tick berikutnya"
+                    );
+                }
+            }
+            sleep(Duration::from_secs(
+                rajacek_api::telegram_settings::EXPIRY_JOB_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    });
+
     // Penghitung percobaan persist B15: sengaja di luar loop sesi agar
     // tidak me-reset tiap sesi worker gagal dan dimulai ulang.
     let mut persist_attempts = PersistAttempts::new();

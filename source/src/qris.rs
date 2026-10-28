@@ -3065,10 +3065,36 @@ async fn grant_row(
     let row = get_order(pool, &order_uuid)
         .await?
         .unwrap_or_else(|| order.clone());
-    Ok(match outcome {
+    let result = match outcome {
         GrantOutcome::Granted { .. } => (row.member_view(), VerifyOutcome::Granted),
         GrantOutcome::AlreadyGranted => (row.member_view(), VerifyOutcome::AlreadyGranted),
-    })
+    };
+    // Notifikasi pembelian paket — HANYA pada grant pertama (Granted),
+    // bukan AlreadyGranted (sweep/resolve berulang tidak boleh spam).
+    // Fire-and-forget: grant sudah commit pada titik ini; kegagalan
+    // kirim hanya jadi log. Resolve admin yang lewat jalur ini juga
+    // ikut memberi notifikasi (konfirmasi atas aksinya sendiri).
+    if matches!(result.1, VerifyOutcome::Granted) {
+        if let Ok(Some(account)) = store.member_by_id(member_uuid).await {
+            if let Some(code) = account.member_code.filter(|value| !value.is_empty()) {
+                let (title, detail) = crate::telegram_settings::purchase_message(
+                    &code,
+                    &order.package_name,
+                    order.quota_hits,
+                    order.amount_idr,
+                    &order.id,
+                    chrono::Utc::now(),
+                );
+                crate::alerts::notify_admin(
+                    pool.clone(),
+                    store.credential_cipher(),
+                    title,
+                    detail,
+                );
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Apakah event webhook ini notifikasi pembayaran? Docs Cutiezy tidak

@@ -429,7 +429,7 @@
     if (view === "orders") loadOrders().catch(handleApiError);
     if (view === "analytics") loadAnalytics().catch(handleApiError);
     if (view === "providers") { loadProviderHealth().catch(handleApiError); loadStreamHealth().catch(handleApiError); loadTrialMonitor().catch(handleApiError); loadDlq().catch(handleApiError); }
-    if (view === "settings") { loadQrisSettings().catch(handleApiError); loadSiteSettings().catch(handleApiError); }
+    if (view === "settings") { loadQrisSettings().catch(handleApiError); loadSiteSettings().catch(handleApiError); loadTelegramSettings().catch(handleApiError); }
     window.scrollTo({ top: 0, behavior: "smooth" });
     document.body.classList.remove("menu-open");
   }
@@ -1924,6 +1924,26 @@
     $("#qris-status").textContent = parts.join(" · ");
   }
 
+  // Notifikasi bot Telegram admin: token tidak pernah ditampilkan
+  // (hanya status + 4 akhir); chat ID ditampilkan karena bukan
+  // kredensial dan admin perlu memverifikasi chat tujuannya.
+  async function loadTelegramSettings() {
+    const settings = await api("/v1/admin/telegram-settings").catch(() => null);
+    if (!settings) return;
+    $("#telegram-chat-id").value = settings.chat_id ?? "";
+    const parts = [];
+    if (settings.configured) {
+      parts.push("Terkonfigurasi");
+    } else if (settings.has_bot_token || settings.chat_id) {
+      parts.push("Belum lengkap (isi token + chat ID)");
+    } else {
+      parts.push("Belum dikonfigurasi — notifikasi dormant");
+    }
+    if (settings.has_bot_token) parts.push(`token tersimpan${settings.bot_token_tail ? ` (••••${settings.bot_token_tail})` : ""}`);
+    if (settings.chat_id) parts.push(`chat ID ${settings.chat_id}`);
+    $("#telegram-status").textContent = parts.join(" · ");
+  }
+
   const EYE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
   const EYE_OFF_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
   let memberKeyMasked = "—", memberKeyFull = null, memberKeyShown = false;
@@ -2905,6 +2925,36 @@
         $("#qris-webhook-secret").value = "";
         await loadQrisSettings();
         showToast("Pengaturan QRIS berhasil disimpan.", "success");
+      } catch (error) {
+        handleApiError(error);
+      }
+    });
+    $("#telegram-form")?.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      // Token kosong = pertahankan (kecuali checkbox hapus dicentang,
+      // yang mengirim string kosong = hapus). Chat ID selalu dikirim
+      // (kosong = hapus) karena field-nya menampilkan nilai saat ini.
+      const body = { chat_id: $("#telegram-chat-id").value.trim() };
+      if ($("#telegram-clear-token").checked) {
+        body.bot_token = "";
+      } else if ($("#telegram-bot-token").value.trim() !== "") {
+        body.bot_token = $("#telegram-bot-token").value.trim();
+      }
+      try {
+        await api("/v1/admin/telegram-settings", { method: "PUT", body: JSON.stringify(body) });
+        $("#telegram-bot-token").value = "";
+        $("#telegram-clear-token").checked = false;
+        await loadTelegramSettings();
+        showToast("Pengaturan Telegram berhasil disimpan.", "success");
+      } catch (error) {
+        handleApiError(error);
+      }
+    });
+    $("#telegram-test")?.addEventListener("click", async () => {
+      try {
+        const result = await api("/v1/admin/telegram-settings/test", { method: "POST", body: "{}" });
+        $("#telegram-status").textContent = result.message;
+        showToast(result.message, result.sent ? "success" : "error");
       } catch (error) {
         handleApiError(error);
       }

@@ -25,3 +25,4 @@ pub mod qris;
 pub mod rate_limit;
 pub mod session_revocation;
 pub mod store;
+pub mod telegram_settings;

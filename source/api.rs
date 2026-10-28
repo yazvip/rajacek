@@ -232,6 +232,14 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/trial-settings",
             get(get_trial_settings).put(update_trial_settings),
         )
+        .route(
+            "/v1/admin/telegram-settings",
+            get(get_telegram_settings).put(update_telegram_settings),
+        )
+        .route(
+            "/v1/admin/telegram-settings/test",
+            post(test_telegram_settings),
+        )
         .route("/v1/member/packages", get(crate::member::purchase_packages))
         .route(
             "/v1/member/orders/preview",
@@ -4131,6 +4139,101 @@ async fn update_trial_settings(
     )
     .await;
     Ok(Json(load_trial_settings(&state).await))
+}
+
+// ---------------------------------------------------------------------------
+// Notifikasi bot Telegram admin (member baru, beli paket, kedaluwarsa).
+// GET/PUT/test semuanya Manager: ini konfigurasi situs (bukan data
+// operasional) — preseden site-settings GET = Manager. Token tidak
+// pernah dikembalikan ke panel (hanya status + 4 akhir).
+// ---------------------------------------------------------------------------
+
+async fn telegram_pool(state: &AppState) -> Result<sqlx::MySqlPool, AppError> {
+    state.store.pool().ok_or_else(|| {
+        AppError::service_unavailable("Database tidak terpasang.")
+    })
+}
+
+fn telegram_cipher(state: &AppState) -> crate::provider_config::CredentialCipher {
+    crate::provider_config::CredentialCipher::new(
+        state.config.api_key_encryption_key.as_deref(),
+    )
+}
+
+async fn get_telegram_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::telegram_settings::TelegramSettingsView>, AppError> {
+    require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = telegram_pool(&state).await?;
+    let cipher = telegram_cipher(&state);
+    Ok(Json(
+        crate::telegram_settings::load_telegram_settings(&pool)
+            .await?
+            .view(&cipher),
+    ))
+}
+
+async fn update_telegram_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<crate::telegram_settings::TelegramSettingsInput>,
+) -> Result<Json<crate::telegram_settings::TelegramSettingsView>, AppError> {
+    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = telegram_pool(&state).await?;
+    let cipher = telegram_cipher(&state);
+    let view = crate::telegram_settings::save_telegram_settings(&pool, input, &cipher).await?;
+    record_admin_activity(
+        &state,
+        &principal,
+        "Pengaturan Telegram diperbarui",
+        format!(
+            "Notifikasi Telegram: {}",
+            if view.configured {
+                "terkonfigurasi"
+            } else {
+                "belum lengkap"
+            }
+        ),
+    )
+    .await;
+    Ok(Json(view))
+}
+
+#[derive(serde::Serialize)]
+struct TelegramTestResult {
+    sent: bool,
+    message: &'static str,
+}
+
+async fn test_telegram_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<TelegramTestResult>, AppError> {
+    require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = telegram_pool(&state).await?;
+    let cipher = telegram_cipher(&state);
+    let outcome = crate::alerts::send_admin_message_once(
+        &pool,
+        Some(&cipher),
+        "Tes notifikasi Rajacek",
+        "Bot Telegram admin terhubung dan dapat mengirim pesan.",
+    )
+    .await;
+    Ok(Json(match outcome {
+        crate::alerts::AdminNotifyOutcome::Sent => TelegramTestResult {
+            sent: true,
+            message: "Pesan tes terkirim.",
+        },
+        crate::alerts::AdminNotifyOutcome::NotConfigured => TelegramTestResult {
+            sent: false,
+            message: "Telegram belum dikonfigurasi — isi bot token dan chat ID.",
+        },
+        crate::alerts::AdminNotifyOutcome::Failed(_) => TelegramTestResult {
+            sent: false,
+            message: "Gagal mengirim pesan tes. Periksa token/chat ID dan log server.",
+        },
+    }))
 }
 
 async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<AdminPrincipal, AppError> {

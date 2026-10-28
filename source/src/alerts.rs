@@ -39,7 +39,7 @@ use crate::store::AdminStore;
 pub const TELEGRAM_SEND_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Host API Telegram default. Override via env hanya untuk tes/dev.
-fn telegram_base_url() -> String {
+pub(crate) fn telegram_base_url() -> String {
     std::env::var("TELEGRAM_API_BASE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -177,6 +177,67 @@ pub fn alert(title: &str, detail: &str) {
                 record_alert_attempt("failed", &title);
             }
         }
+    });
+}
+
+/// Hasil satu upaya kirim notifikasi admin (dipakai endpoint tes panel
+/// dan job kedaluwarsa yang menunggu hasil, bukan fire-and-forget).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminNotifyOutcome {
+    /// Pesan terkirim ke Bot API (HTTP 2xx).
+    Sent,
+    /// Tidak ada kredensial lengkap (panel kosong dan env kosong).
+    NotConfigured,
+    /// Kredensial ada tapi pengiriman gagal (pesan generik, tanpa secret).
+    Failed(String),
+}
+
+/// Satu upaya kirim notifikasi admin, menunggu hasil. Resolusi
+/// kredensial: pengaturan panel dulu, lalu env (lihat
+/// `telegram_settings::resolve_credentials`). Tidak pernah panic dan
+/// tidak pernah membocorkan token/chat ke log — hanya hasil upaya.
+pub(crate) async fn send_admin_message_once(
+    pool: &sqlx::MySqlPool,
+    cipher: Option<&crate::provider_config::CredentialCipher>,
+    title: &str,
+    detail: &str,
+) -> AdminNotifyOutcome {
+    let Some((token, chat_id)) =
+        crate::telegram_settings::resolve_credentials(pool, cipher).await
+    else {
+        tracing::warn!(
+            "Notifikasi admin dormant: bot token/chat ID Telegram belum dikonfigurasi"
+        );
+        return AdminNotifyOutcome::NotConfigured;
+    };
+    let base_url = telegram_base_url();
+    let text = build_alert_text(title, detail);
+    match send_telegram_message(&base_url, &token, &chat_id, &text).await {
+        Ok(()) => {
+            tracing::info!(title = %title, "Notifikasi admin Telegram terkirim");
+            record_alert_attempt("sent", title);
+            AdminNotifyOutcome::Sent
+        }
+        Err(error) => {
+            tracing::warn!(title = %title, error = %error, "Notifikasi admin Telegram gagal terkirim");
+            record_alert_attempt("failed", title);
+            AdminNotifyOutcome::Failed(error)
+        }
+    }
+}
+
+/// Notifikasi admin fire-and-forget untuk jalur request (signup, grant).
+/// KEMBALI SEGERA: pemuatan pengaturan + pengiriman berjalan di task
+/// latar; kegagalan hanya jadi log + rekaman upaya terakhir. Tidak
+/// pernah menggagalkan pemanggil.
+pub(crate) fn notify_admin(
+    pool: sqlx::MySqlPool,
+    cipher: Option<crate::provider_config::CredentialCipher>,
+    title: String,
+    detail: String,
+) {
+    tokio::spawn(async move {
+        let _ = send_admin_message_once(&pool, cipher.as_ref(), &title, &detail).await;
     });
 }
 
