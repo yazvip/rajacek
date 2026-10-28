@@ -72,16 +72,25 @@ pub fn build_alert_text(title: &str, detail: &str) -> String {
 /// Satu percobaan kirim ke Bot API. Mengembalikan Err pada transport
 /// gagal, timeout, atau status non-2xx. TIDAK PERNAH mencatat token,
 /// chat id, URL, atau isi body ke log — hanya status HTTP.
+///
+/// `parse_mode` hanya dikirim bila `Some`: kanal alert lama memanggil
+/// dengan `None` sehingga JSON-nya byte-identik dengan sebelumnya
+/// (teks polos lama tidak pernah terpapar aturan parse HTML). Hanya
+/// jalur notifikasi admin baru yang memakai `Some("HTML")`, dan teksnya
+/// sudah di-escape di pembangun pesan.
 pub(crate) async fn send_telegram_message(
     base_url: &str,
     token: &str,
     chat_id: &str,
     text: &str,
+    parse_mode: Option<&str>,
 ) -> Result<(), String> {
     #[derive(serde::Serialize)]
     struct Body<'a> {
         chat_id: &'a str,
         text: &'a str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parse_mode: Option<&'a str>,
     }
     let client = reqwest::Client::builder()
         .timeout(TELEGRAM_SEND_TIMEOUT)
@@ -98,6 +107,7 @@ pub(crate) async fn send_telegram_message(
         .json(&Body {
             chat_id,
             text,
+            parse_mode,
         })
         .send()
         .await
@@ -167,7 +177,7 @@ pub fn alert(title: &str, detail: &str) {
     let base_url = telegram_base_url();
     let text = build_alert_text(&title, &detail);
     tokio::spawn(async move {
-        match send_telegram_message(&base_url, &token, &chat_id, &text).await {
+        match send_telegram_message(&base_url, &token, &chat_id, &text, None).await {
             Ok(()) => {
                 tracing::info!(title = %title, "Alert Telegram terkirim");
                 record_alert_attempt("sent", &title);
@@ -196,11 +206,16 @@ pub enum AdminNotifyOutcome {
 /// kredensial: pengaturan panel dulu, lalu env (lihat
 /// `telegram_settings::resolve_credentials`). Tidak pernah panic dan
 /// tidak pernah membocorkan token/chat ke log — hanya hasil upaya.
+///
+/// `text` adalah teks HTML lengkap dari pembangun pesan
+/// (`telegram_settings`): sudah berisi header brand, judul tebal, dan
+/// nilai yang di-escape — dikirim apa adanya dengan parse mode HTML.
+/// `title` polos hanya untuk log dan rekaman upaya panel.
 pub(crate) async fn send_admin_message_once(
     pool: &sqlx::MySqlPool,
     cipher: Option<&crate::provider_config::CredentialCipher>,
     title: &str,
-    detail: &str,
+    text: &str,
 ) -> AdminNotifyOutcome {
     let Some((token, chat_id)) =
         crate::telegram_settings::resolve_credentials(pool, cipher).await
@@ -211,8 +226,7 @@ pub(crate) async fn send_admin_message_once(
         return AdminNotifyOutcome::NotConfigured;
     };
     let base_url = telegram_base_url();
-    let text = build_alert_text(title, detail);
-    match send_telegram_message(&base_url, &token, &chat_id, &text).await {
+    match send_telegram_message(&base_url, &token, &chat_id, text, Some("HTML")).await {
         Ok(()) => {
             tracing::info!(title = %title, "Notifikasi admin Telegram terkirim");
             record_alert_attempt("sent", title);
@@ -234,10 +248,10 @@ pub(crate) fn notify_admin(
     pool: sqlx::MySqlPool,
     cipher: Option<crate::provider_config::CredentialCipher>,
     title: String,
-    detail: String,
+    text: String,
 ) {
     tokio::spawn(async move {
-        let _ = send_admin_message_once(&pool, cipher.as_ref(), &title, &detail).await;
+        let _ = send_admin_message_once(&pool, cipher.as_ref(), &title, &text).await;
     });
 }
 
@@ -249,6 +263,13 @@ pub(crate) fn notify_admin(
 /// kegagalannya sendiri di dalam store.
 pub async fn alert_with_store(store: &AdminStore, title: &str, detail: &str) {
     alert(title, detail);
+    record_alert_activity(store, title, detail).await;
+}
+
+/// Jejak aktivitas + audit admin SAJA, tanpa pengiriman Telegram.
+/// Dipakai jalur B2 (needs_review) yang mengalihkan notifikasi ke kanal
+/// panel baru: satu sumber, tanpa duplikat dengan kanal env lama.
+pub async fn record_alert_activity(store: &AdminStore, title: &str, detail: &str) {
     store
         .persist_admin_audit("sistem-alert", title, detail, None, None)
         .await;
@@ -348,6 +369,7 @@ mod tests {
             "dummy-token",
             "123",
             "tes",
+            None,
         )
         .await;
         assert!(result.is_err());

@@ -1661,16 +1661,58 @@ pub struct OrphanQrView {
     pub updated_at: NaiveDateTime,
 }
 
+/// Notifikasi panel B2 untuk order yang BARU parkir needs_review.
+/// Menggantikan alert kanal env lama (`alert_with_store`) di jalur
+/// sweep/grant: satu sumber (kanal panel baru), tanpa duplikat.
+/// Jejak audit/aktivitas tetap ditulis dalam semua kondisi; kirim
+/// Telegram fire-and-forget (kegagalan hanya jadi log). Lookup kode
+/// member gagal → kirim dilewati, audit tetap tercatat. Dipanggil
+/// HANYA pada transisi baru (changed==true), bukan pengulangan.
+async fn notify_needs_review_panel(
+    store: &AdminStore,
+    pool: &MySqlPool,
+    order: &PackageOrderRow,
+    status_label: &str,
+    audit_title: &str,
+    audit_detail: &str,
+) {
+    crate::alerts::record_alert_activity(store, audit_title, audit_detail).await;
+    let Ok(member_uuid) = Uuid::parse_str(&order.member_id) else {
+        return;
+    };
+    let Some(member) = store.member_by_id(member_uuid).await.ok().flatten() else {
+        return;
+    };
+    let Some(code) = member.member_code.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    // updated_at baris yang baru dibaca = waktu transisi needs_review.
+    let (title, text) = crate::telegram_settings::stuck_order_message(
+        &code,
+        &order.id,
+        &order.package_name,
+        order.amount_idr,
+        status_label,
+        order.updated_at,
+    );
+    crate::alerts::notify_admin(pool.clone(), store.credential_cipher(), title, text);
+}
+
 /// Catat QR yatim yang gagal dibatalkan (K26, best-effort). Dulu yang
 /// tersisa hanya log error: bila member membayar QR itu, uang masuk
 /// tanpa baris order dan tidak ada jalur grant aplikasi sama sekali
 /// (hanya manual lewat dashboard Cutiezy). Kini barisnya tersimpan di
 /// `orphan_qr` sehingga admin bisa me-resolve-berbukti dari panel.
+///
+/// B3 (28 Okt 2026): bila pencatatan BERHASIL, kirim alert panel
+/// (fire-and-forget, tanpa token QR di pesan). Pencatatan gagal → hanya
+/// log seperti sebelumnya (tidak ada baris = tidak ada alert).
 pub async fn record_orphan_qr(
     pool: &MySqlPool,
     member_id: &Uuid,
     token: &str,
     amount_idr: u64,
+    cipher: Option<&crate::provider_config::CredentialCipher>,
 ) {
     let id = Uuid::now_v7().to_string();
     if let Err(error) = sqlx::query(
@@ -1685,6 +1727,23 @@ pub async fn record_orphan_qr(
     .await
     {
         tracing::warn!(?error, "QR yatim gagal dicatat ke orphan_qr (hanya log yang tersisa)");
+        return;
+    }
+    let member_code: Option<String> = sqlx::query_scalar(
+        "SELECT member_code FROM members WHERE id = ?",
+    )
+    .bind(member_id.to_string())
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if let Some(code) = member_code.filter(|value| !value.is_empty()) {
+        let (title, text) = crate::telegram_settings::orphan_qr_message(
+            &code,
+            amount_idr,
+            Utc::now().naive_utc(),
+        );
+        crate::alerts::notify_admin(pool.clone(), cipher.cloned(), title, text);
     }
 }
 
@@ -2267,7 +2326,7 @@ pub async fn create_member_order(
                     tracing::error!(?cancel_error, member_id = %member_id, token_ref = %token_log_ref(token), amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
                     // K26: simpan QR yatim agar bisa di-resolve-berbukti
                     // dari panel (bukan hanya log).
-                    record_orphan_qr(&pool, &member_id, token, effective).await;
+                    record_orphan_qr(&pool, &member_id, token, effective, store.credential_cipher().as_ref()).await;
                 }
             }
             return Err(error.to_app_error());
@@ -2342,7 +2401,7 @@ pub async fn create_member_order(
         // keburu keluar dari waiting), gagal aman dan user bisa retry.
         if let Err(cancel_error) = client.cancel(&api_key, &invoice.token).await {
             tracing::error!(?cancel_error, member_id = %member_id, token_ref = %token_log_ref(&invoice.token), amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
-            record_orphan_qr(&pool, &member_id, &invoice.token, effective).await;
+            record_orphan_qr(&pool, &member_id, &invoice.token, effective, store.credential_cipher().as_ref()).await;
         }
         if let Some(existing) = waiting_order_for_member(&pool, &member_id).await? {
             if existing.package_id == package.id.to_string() {
@@ -2363,7 +2422,7 @@ pub async fn create_member_order(
             // Loud: a paid orphan QR cannot be granted without an order row.
             tracing::error!(?cancel_error, member_id = %member_id, token_ref = %token_log_ref(&invoice.token), amount = effective, "Cancel QR yatim gagal — QR berbayar tanpa order");
             // K26: simpan QR yatim agar bisa di-resolve-berbukti dari panel.
-            record_orphan_qr(&pool, &member_id, &invoice.token, effective).await;
+            record_orphan_qr(&pool, &member_id, &invoice.token, effective, store.credential_cipher().as_ref()).await;
         }
         return Err(AppError::internal("Order tidak dapat dibuat. Coba lagi."));
     }
@@ -2489,6 +2548,22 @@ async fn verify_terminal_order(
                         _ => (row.member_view(), verdict_for_status(&row.status)),
                     });
                 }
+                // B2 (28 Okt 2026): re-check order terminal ini sebelumnya
+                // memarkir needs_review TANPA alert sama sekali — kini
+                // dialihkan ke kanal panel baru (satu sumber, tanpa
+                // duplikat kanal env lama).
+                notify_needs_review_panel(
+                    store,
+                    &pool,
+                    &row,
+                    "Perlu ditinjau (selisih nominal)",
+                    "Order perlu tinjauan",
+                    &format!(
+                        "Order {} parkir needs_review (re-check terminal): nominal bayar tidak sama dengan order.",
+                        row.id
+                    ),
+                )
+                .await;
                 return Ok((row.member_view(), VerifyOutcome::NeedsReview));
             }
             let marked = sqlx::query(
@@ -2654,10 +2729,14 @@ pub async fn verify_and_grant(
                         _ => (view(&row), verdict_for_status(&row.status)),
                     });
                 }
-                // AREA 3 trigger (a): order BARU parkir ke needs_review
-                // (transisi, bukan pengulangan) -> alert + jejak aktivitas.
-                crate::alerts::alert_with_store(
+                // B2 (28 Okt 2026): alert kanal env lama dialihkan ke
+                // kanal panel baru (satu sumber, tanpa duplikat).
+                // Jejak audit/aktivitas tetap ditulis di helper.
+                notify_needs_review_panel(
                     store,
+                    &pool,
+                    &row,
+                    "Perlu ditinjau (selisih nominal)",
                     "Order perlu tinjauan",
                     &format!(
                         "Order {} parkir needs_review: nominal bayar tidak sama dengan order.",
@@ -3046,10 +3125,14 @@ async fn grant_row(
                 return Ok((row.member_view(), VerifyOutcome::AlreadyGranted));
             }
             if changed {
-                // AREA 3 trigger (a): grant GAGAL dan order BARU parkir
-                // ke needs_review (transisi saja) -> alert + jejak.
-                crate::alerts::alert_with_store(
+                // B2 (28 Okt 2026): alert kanal env lama dialihkan ke
+                // kanal panel baru (satu sumber, tanpa duplikat).
+                // Jejak audit/aktivitas tetap ditulis di helper.
+                notify_needs_review_panel(
                     store,
+                    pool,
+                    &row,
+                    "Perlu ditinjau (grant ditahan)",
                     "Grant gagal — order perlu tinjauan",
                     &format!(
                         "Order {} gagal di-grant (kunci/member tidak aktif atau status berubah) dan diparkir needs_review.",

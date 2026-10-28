@@ -263,6 +263,13 @@ pub(crate) fn notify_admin(
 /// kegagalannya sendiri di dalam store.
 pub async fn alert_with_store(store: &AdminStore, title: &str, detail: &str) {
     alert(title, detail);
+    record_alert_activity(store, title, detail).await;
+}
+
+/// Jejak aktivitas + audit admin SAJA, tanpa pengiriman Telegram.
+/// Dipakai jalur B2 (needs_review) yang mengalihkan notifikasi ke kanal
+/// panel baru: satu sumber, tanpa duplikat dengan kanal env lama.
+pub async fn record_alert_activity(store: &AdminStore, title: &str, detail: &str) {
     store
         .persist_admin_audit("sistem-alert", title, detail, None, None)
         .await;

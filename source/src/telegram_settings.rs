@@ -23,6 +23,11 @@
 //! - **Minimal.** Pesan hanya berisi kode member, nama paket, hit,
 //!   nominal, dan waktu. TIDAK PERNAH: nomor rekening/target mentah,
 //!   nama pemilik rekening, kunci API, token, atau data pelanggan lain.
+//! - **Format premium.** Parse mode HTML: header brand `👑 RAJACEK`,
+//!   pemisah, judul berikon tebal, satu ikon per baris detail.
+//!   Nilai luar (kode, email, nama paket) di-escape agar tidak merusak
+//!   markup. Kanal alert env lama tidak memakai parse mode HTML dan
+//!   formatnya tidak diubah.
 //! - **Anti-spam kedaluwarsa.** Satu pesan per bucket, sekali saja
 //!   (`expiry_notified_at`). Bucket trial (tanpa package_id maupun
 //!   order_id) dikecualikan dari notifikasi ini.
@@ -41,6 +46,18 @@ pub const EXPIRY_WINDOW_HOURS: i64 = 24;
 /// Interval job kedaluwarsa di worker.
 pub const EXPIRY_JOB_INTERVAL_SECS: u64 = 6 * 3_600;
 
+/// Ambang order macet B1: order `paid` yang belum grant setelah sekian
+/// menit sejak lunas (paid_at, atau updated_at bila paid_at kosong —
+/// parsing paid_at Cutiezy bisa gagal, lihat K26).
+pub const STUCK_PAID_MINUTES: i64 = 15;
+
+/// Interval job order macet di worker.
+pub const STUCK_JOB_INTERVAL_SECS: u64 = 10 * 60;
+
+/// URL webhook perintah bot (kanonis www; token TIDAK PERNAH di URL —
+/// autentikasi memakai header secret, lihat botcmd).
+pub const TELEGRAM_WEBHOOK_URL: &str = "https://www.rajacek.com/v1/telegram/webhook";
+
 // ---------------------------------------------------------------------------
 // Pengaturan
 // ---------------------------------------------------------------------------
@@ -49,6 +66,12 @@ pub const EXPIRY_JOB_INTERVAL_SECS: u64 = 6 * 3_600;
 pub struct TelegramSettings {
     pub bot_token_ciphertext: Option<Vec<u8>>,
     pub chat_id: Option<String>,
+    /// Secret header webhook perintah bot, terenkripsi (migrasi 0037).
+    /// None = perintah bot belum pernah diaktifkan.
+    pub webhook_secret_ciphertext: Option<Vec<u8>>,
+    /// Hasil setWebhook terakhir (migrasi 0037). False = belum aktif
+    /// atau setWebhook terakhir gagal — panel menampilkan tombol retry.
+    pub webhook_active: bool,
 }
 
 /// Tampilan untuk panel admin (Manager). TIDAK PERNAH membawa token
@@ -59,6 +82,10 @@ pub struct TelegramSettingsView {
     pub has_bot_token: bool,
     pub chat_id: Option<String>,
     pub bot_token_tail: Option<String>,
+    /// Status webhook perintah bot (aktif = Telegram sudah mengarahkan
+    /// update ke endpoint webhook). Panel menampilkan tombol retry
+    /// bila false.
+    pub webhook_active: bool,
 }
 
 /// Input admin. Absen = pertahankan nilai lama; string kosong = hapus
@@ -73,7 +100,8 @@ pub async fn load_telegram_settings(
     pool: &MySqlPool,
 ) -> Result<TelegramSettings, AppError> {
     let row = sqlx::query_as::<_, TelegramSettingsRow>(
-        "SELECT bot_token_ciphertext, chat_id FROM telegram_settings WHERE id = 1",
+        "SELECT bot_token_ciphertext, chat_id, webhook_secret_ciphertext, webhook_active \
+         FROM telegram_settings WHERE id = 1",
     )
     .fetch_optional(pool)
     .await
@@ -82,10 +110,14 @@ pub async fn load_telegram_settings(
         Some(row) => TelegramSettings {
             bot_token_ciphertext: row.bot_token_ciphertext,
             chat_id: row.chat_id,
+            webhook_secret_ciphertext: row.webhook_secret_ciphertext,
+            webhook_active: row.webhook_active,
         },
         None => TelegramSettings {
             bot_token_ciphertext: None,
             chat_id: None,
+            webhook_secret_ciphertext: None,
+            webhook_active: false,
         },
     })
 }
@@ -94,6 +126,8 @@ pub async fn load_telegram_settings(
 struct TelegramSettingsRow {
     bot_token_ciphertext: Option<Vec<u8>>,
     chat_id: Option<String>,
+    webhook_secret_ciphertext: Option<Vec<u8>>,
+    webhook_active: bool,
 }
 
 impl TelegramSettings {
@@ -118,6 +152,7 @@ impl TelegramSettings {
             has_bot_token,
             chat_id,
             bot_token_tail: token.as_deref().map(token_tail),
+            webhook_active: self.webhook_active,
         }
     }
 
@@ -300,6 +335,37 @@ pub fn invoice_short(order_id: &str) -> String {
     format!("INV-{}", short.to_uppercase())
 }
 
+/// Escape nilai interpolasi untuk parse mode HTML Telegram (`&`, `<`,
+/// `>`). Nilai yang diketik admin (nama paket) dan email wajib lewat
+/// sini agar tidak merusak markup atau menyuntikkan tag. Nilai yang
+/// diformat server (rupiah, hit, waktu WIB, INV-pendek) hanya berisi
+/// angka/titik/tanda hubung sehingga tidak perlu di-escape.
+pub fn escape_html(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Teks lengkap satu pesan notifikasi admin (parse mode HTML): baris
+/// brand, pemisah, judul berikon tebal, lalu baris detail. Judul polos
+/// (tanpa markup) dipakai terpisah untuk log dan rekaman upaya panel.
+pub fn admin_message_text(icon: &str, title: &str, detail: &str) -> String {
+    format!(
+        "👑 <b>RAJACEK</b>\n{}\n{} <b>{}</b>\n{}",
+        "─".repeat(17),
+        icon,
+        title,
+        detail
+    )
+}
+
 /// Status trial untuk pesan member baru.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrialNote {
@@ -312,15 +378,19 @@ pub enum TrialNote {
     None,
 }
 
-/// (judul, detail) notifikasi member baru.
+/// (judul polos untuk log/panel, teks HTML lengkap) notifikasi member
+/// baru. Satu ikon per baris; nilai luar di-escape.
 pub fn new_member_message(
     member_code: &str,
     email: &str,
     trial: TrialNote,
     now: DateTime<Utc>,
 ) -> (String, String) {
+    let title = "Member Baru".to_owned();
     let mut detail = format!(
-        "Kode: {member_code}\nEmail: {email}\nWaktu: {}",
+        "🆔 Kode: {}\n📧 Email: {}\n🕐 Waktu: {}",
+        escape_html(member_code),
+        escape_html(email),
         format_wib_datetime(now)
     );
     match trial {
@@ -329,7 +399,9 @@ pub fn new_member_message(
             valid_days,
         } => {
             detail = format!(
-                "Kode: {member_code}\nEmail: {email}\nTrial: {} / {} hari\nWaktu: {}",
+                "🆔 Kode: {}\n📧 Email: {}\n🎁 Trial: {} / {} hari\n🕐 Waktu: {}",
+                escape_html(member_code),
+                escape_html(email),
                 format_hits(quota_hits),
                 valid_days,
                 format_wib_datetime(now)
@@ -337,16 +409,19 @@ pub fn new_member_message(
         }
         TrialNote::Held => {
             detail = format!(
-                "Kode: {member_code}\nEmail: {email}\nTrial: ditahan (batas IP)\nWaktu: {}",
+                "🆔 Kode: {}\n📧 Email: {}\n🎁 Trial: ditahan (batas IP)\n🕐 Waktu: {}",
+                escape_html(member_code),
+                escape_html(email),
                 format_wib_datetime(now)
             );
         }
         TrialNote::None => {}
     }
-    ("Member baru".to_owned(), detail)
+    (title.clone(), admin_message_text("🎉", &title, &detail))
 }
 
-/// (judul, detail) notifikasi pembelian paket (grant berhasil).
+/// (judul polos untuk log/panel, teks HTML lengkap) notifikasi
+/// pembelian paket (grant berhasil).
 pub fn purchase_message(
     member_code: &str,
     package_name: &str,
@@ -355,31 +430,51 @@ pub fn purchase_message(
     order_id: &str,
     now: DateTime<Utc>,
 ) -> (String, String) {
-    (
-        "Paket dibeli".to_owned(),
-        format!(
-            "Kode: {member_code}\nPaket: {package_name}\nKuota: {}\nNominal: {}\nInvoice: {}\nWaktu: {}",
-            format_hits(quota_hits),
-            format_rupiah(amount_idr),
-            invoice_short(order_id),
-            format_wib_datetime(now)
-        ),
-    )
+    let title = "Paket Dibeli".to_owned();
+    let detail = format!(
+        "🆔 Kode: {}\n📦 Paket: {}\n⚡ Kuota: {}\n💰 Nominal: {}\n🧾 Invoice: {}\n🕐 Waktu: {}",
+        escape_html(member_code),
+        escape_html(package_name),
+        format_hits(quota_hits),
+        format_rupiah(amount_idr),
+        invoice_short(order_id),
+        format_wib_datetime(now)
+    );
+    (title.clone(), admin_message_text("🛍️", &title, &detail))
 }
 
-/// (judul, detail) notifikasi paket hampir kedaluwarsa.
+/// (judul polos untuk log/panel, teks HTML lengkap) notifikasi paket
+/// hampir kedaluwarsa.
 pub fn expiry_message(
     member_code: &str,
     package_name: &str,
     remaining_hits: u64,
     expires_at: NaiveDateTime,
 ) -> (String, String) {
+    let title = "Paket Hampir Kedaluwarsa".to_owned();
+    let detail = format!(
+        "🆔 Kode: {}\n📦 Paket: {}\n⚡ Sisa: {}\n📅 Kedaluwarsa: {}",
+        escape_html(member_code),
+        escape_html(package_name),
+        format_hits(remaining_hits),
+        format_wib_naive(expires_at)
+    );
     (
-        "Paket hampir kedaluwarsa".to_owned(),
-        format!(
-            "Kode: {member_code}\nPaket: {package_name}\nSisa: {}\nKedaluwarsa: {}",
-            format_hits(remaining_hits),
-            format_wib_naive(expires_at)
+        title.clone(),
+        admin_message_text("⏰", &title, &detail),
+    )
+}
+
+/// (judul polos untuk log/panel, teks HTML lengkap) pesan tes dari
+/// panel admin.
+pub fn test_message() -> (String, String) {
+    let title = "Tes Notifikasi Rajacek".to_owned();
+    (
+        title.clone(),
+        admin_message_text(
+            "✅",
+            &title,
+            "Bot Telegram admin terhubung dan dapat mengirim pesan.",
         ),
     )
 }
@@ -523,14 +618,13 @@ pub async fn notify_expiring_buckets(
             continue;
         };
         let package_name = resolve_package_name(pool, &candidate).await;
-        let (title, detail) = expiry_message(
+        let (title, text) = expiry_message(
             &member_code,
             &package_name,
             candidate.remaining_hits,
             candidate.expires_at,
         );
-        let text = alerts::build_alert_text(&title, &detail);
-        match alerts::send_telegram_message(&base_url, &token, &chat_id, &text).await {
+        match alerts::send_telegram_message(&base_url, &token, &chat_id, &text, Some("HTML")).await {
             Ok(()) => {
                 let marked = sqlx::query(
                     "UPDATE quota_buckets SET expiry_notified_at = ? \
@@ -553,6 +647,273 @@ pub async fn notify_expiring_buckets(
                     "Notifikasi kedaluwarsa gagal terkirim; dicoba lagi pada tick berikutnya"
                 );
                 alerts::record_alert_attempt("failed", &title);
+            }
+        }
+    }
+    Ok(sent)
+}
+
+/// Format rupiah tanpa "Rp": 150000 → "150.000" (dipakai /stats).
+pub fn format_idr(amount: u64) -> String {
+    let digits = amount.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (idx, ch) in digits.chars().enumerate() {
+        if idx > 0 && (digits.len() - idx) % 3 == 0 {
+            out.push('.');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Webhook perintah bot (28 Okt 2026) + alert order macet (B1/B2/B3)
+// ---------------------------------------------------------------------------
+
+/// Secret webhook terdekripsi, bila ada. Dekripsi gagal → None (handler
+/// webhook menolak semua update dengan 403 — fail-closed).
+pub async fn load_webhook_secret(
+    pool: &MySqlPool,
+    cipher: &CredentialCipher,
+) -> Option<String> {
+    let settings = load_telegram_settings(pool).await.ok()?;
+    settings
+        .webhook_secret_ciphertext
+        .as_deref()
+        .and_then(|ciphertext| cipher.decrypt(ciphertext).ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Ambil secret yang ada, atau generate + simpan yang baru (32 byte acak
+/// → 64 hex). Dipanggil saat aktivasi webhook; kegagalan enkripsi/DB
+/// dikembalikan sebagai Err ke pemanggil (tombol aktivasi panel).
+async fn ensure_webhook_secret(
+    pool: &MySqlPool,
+    cipher: &CredentialCipher,
+) -> Result<String, AppError> {
+    if let Some(secret) = load_webhook_secret(pool, cipher).await {
+        return Ok(secret);
+    }
+    let secret = hex::encode(rand::random::<[u8; 32]>());
+    let ciphertext = cipher
+        .encrypt(&secret)
+        .map_err(|_| AppError::internal("Secret webhook tidak dapat dienkripsi"))?;
+    sqlx::query(
+        "INSERT INTO telegram_settings (id, webhook_secret_ciphertext) VALUES (1, ?) \
+         ON DUPLICATE KEY UPDATE webhook_secret_ciphertext = VALUES(webhook_secret_ciphertext)",
+    )
+    .bind(&ciphertext)
+    .execute(pool)
+    .await
+    .map_err(|_| AppError::internal("Secret webhook tidak dapat disimpan"))?;
+    Ok(secret)
+}
+
+pub(crate) async fn set_webhook_flag(pool: &MySqlPool, active: bool) {
+    if let Err(error) = sqlx::query(
+        "INSERT INTO telegram_settings (id, webhook_active) VALUES (1, ?) \
+         ON DUPLICATE KEY UPDATE webhook_active = VALUES(webhook_active)",
+    )
+    .bind(active)
+    .execute(pool)
+    .await
+    {
+        tracing::warn!(?error, "Penanda status webhook Telegram gagal ditulis");
+    }
+}
+
+/// Panggil Bot API setWebhook (best-effort). Mengembalikan true hanya
+/// bila Telegram menjawab ok=true. Token/secret TIDAK PERNAH di-log;
+/// body request tidak di-log (memuat secret_token).
+pub async fn call_set_webhook(token: &str, secret: &str) -> bool {
+    let base_url = crate::alerts::telegram_base_url();
+    let url = format!("{base_url}/bot{token}/setWebhook");
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    let body = serde_json::json!({
+        "url": TELEGRAM_WEBHOOK_URL,
+        "secret_token": secret,
+        "allowed_updates": ["message"],
+    });
+    match client.post(&url).json(&body).send().await {
+        Ok(response) => response
+            .json::<serde_json::Value>()
+            .await
+            .map(|value| value.get("ok").and_then(|v| v.as_bool()).unwrap_or(false))
+            .unwrap_or(false),
+        Err(error) => {
+            tracing::warn!(error = %error, "setWebhook Telegram gagal (jaringan)");
+            false
+        }
+    }
+}
+
+/// Aktivasi webhook perintah bot: pastikan secret → setWebhook → tulis
+/// flag hasil. TIDAK PERNAH mengembalikan Err: kegagalan apa pun hanya
+/// membuat flag false (panel menampilkan tombol retry) — penyimpanan
+/// pengaturan utama tidak boleh digagalkan oleh kegagalan ini.
+pub async fn refresh_webhook_status(
+    pool: &MySqlPool,
+    cipher: &CredentialCipher,
+) -> bool {
+    let Some((token, _chat_id)) = resolve_credentials(pool, Some(cipher)).await else {
+        set_webhook_flag(pool, false).await;
+        return false;
+    };
+    let active = match ensure_webhook_secret(pool, cipher).await {
+        Ok(secret) => call_set_webhook(&token, &secret).await,
+        Err(error) => {
+            tracing::warn!(error = %error, "Secret webhook Telegram gagal disiapkan");
+            false
+        }
+    };
+    set_webhook_flag(pool, active).await;
+    active
+}
+
+/// Predikat murni B1: order `paid` dianggap macet bila `since` (paid_at,
+/// atau updated_at bila paid_at kosong) sudah lewat ambang.
+pub fn stuck_paid_due(since: NaiveDateTime, now: NaiveDateTime) -> bool {
+    since + chrono::Duration::minutes(STUCK_PAID_MINUTES) <= now
+}
+
+/// Pesan alert order macet (format premium, sama dengan notifikasi).
+/// `status_label`: "Dibayar tapi belum grant" (B1) atau
+/// "Perlu ditinjau (selisih nominal)" / "Perlu ditinjau (grant ditahan)"
+/// (B2). TIDAK memuat target mentah/nama pemilik/kunci/token — order
+/// tidak punya target, dan invoice/paket/nominal adalah data admin.
+pub fn stuck_order_message(
+    member_code: &str,
+    order_id: &str,
+    package_name: &str,
+    amount_idr: u64,
+    status_label: &str,
+    since: NaiveDateTime,
+) -> (String, String) {
+    let invoice = format!("INV-{}", &order_id[..8.min(order_id.len())].to_uppercase());
+    let detail = format!(
+        "🆔 Kode member: {}\n🧾 Invoice: {}\n📦 Paket: {}\n💰 Nominal: Rp {}\n⚠️ Status: {}\n🕐 Sejak: {}",
+        escape_html(member_code),
+        invoice,
+        escape_html(package_name),
+        format_idr(amount_idr),
+        status_label,
+        format_wib_naive(since),
+    );
+    ("Order Macet".to_owned(), admin_message_text("🚨", "Order Macet", &detail))
+}
+
+/// Pesan alert QR yatim B3. QR yatim tercatat saat cancel QR gagal
+/// (create parsial / balapan guard / insert gagal): QR sudah terbit di
+/// Cutiezy tanpa baris order, sehingga berisiko dibayar tanpa order.
+/// Pesan TIDAK memuat token QR (itu kredensial pembayaran).
+pub fn orphan_qr_message(member_code: &str, amount_idr: u64, now: NaiveDateTime) -> (String, String) {
+    let detail = format!(
+        "🆔 Kode member: {}\n💰 Nominal: Rp {}\n⚠️ Status: QR yatim — cancel gagal, berisiko dibayar tanpa order\n🕐 Sejak: {}",
+        escape_html(member_code),
+        format_idr(amount_idr),
+        format_wib_naive(now),
+    );
+    (
+        "QR Yatim".to_owned(),
+        admin_message_text("🚨", "Order Macet", &detail),
+    )
+}
+
+#[derive(sqlx::FromRow)]
+struct StuckOrderCandidate {
+    id: String,
+    member_id: String,
+    package_name: String,
+    amount_idr: u64,
+    paid_at: Option<NaiveDateTime>,
+    updated_at: NaiveDateTime,
+}
+
+/// Job worker B1: alert order `paid` yang belum grant setelah ambang.
+/// Penanda `stuck_notified_at` ditulis HANYA bila kirim sukses
+/// (WHERE NULL + rows==1); gagal kirim → dicoba lagi tick berikut.
+/// Mengembalikan jumlah alert terkirim. Dormant bila kredensial kosong.
+pub async fn notify_stuck_paid_orders(
+    pool: &MySqlPool,
+    encryption_key: Option<&str>,
+) -> Result<usize, AppError> {
+    let cipher = CredentialCipher::new(encryption_key);
+    let Some((token, chat_id)) = resolve_credentials(pool, Some(&cipher)).await else {
+        tracing::warn!(
+            "Alert order macet dormant: bot token/chat ID Telegram belum dikonfigurasi"
+        );
+        return Ok(0);
+    };
+    let now = Utc::now().naive_utc();
+    let threshold = now - chrono::Duration::minutes(STUCK_PAID_MINUTES);
+    let candidates = sqlx::query_as::<_, StuckOrderCandidate>(
+        "SELECT id, member_id, package_name, amount_idr, paid_at, updated_at \
+         FROM package_orders \
+         WHERE status = 'paid' AND COALESCE(paid_at, updated_at) <= ? \
+         AND stuck_notified_at IS NULL \
+         ORDER BY COALESCE(paid_at, updated_at) ASC",
+    )
+    .bind(threshold)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| AppError::internal("Order macet tidak dapat dibaca"))?;
+    let base_url = crate::alerts::telegram_base_url();
+    let mut sent = 0usize;
+    for candidate in candidates {
+        let member_code: Option<String> = sqlx::query_scalar(
+            "SELECT member_code FROM members WHERE id = ?",
+        )
+        .bind(&candidate.member_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+        let Some(member_code) = member_code.filter(|v| !v.is_empty()) else {
+            tracing::warn!(
+                order_id = %candidate.id,
+                "Alert order macet dilewati: kode member tidak ditemukan"
+            );
+            continue;
+        };
+        let since = candidate.paid_at.unwrap_or(candidate.updated_at);
+        let (title, text) = stuck_order_message(
+            &member_code,
+            &candidate.id,
+            &candidate.package_name,
+            candidate.amount_idr,
+            "Dibayar tapi belum grant",
+            since,
+        );
+        match crate::alerts::send_telegram_message(&base_url, &token, &chat_id, &text, Some("HTML")).await
+        {
+            Ok(()) => {
+                let marked = sqlx::query(
+                    "UPDATE package_orders SET stuck_notified_at = ? \
+                     WHERE id = ? AND stuck_notified_at IS NULL",
+                )
+                .bind(now)
+                .bind(&candidate.id)
+                .execute(pool)
+                .await
+                .map_err(|_| AppError::internal("Penanda order macet gagal ditulis"))?;
+                if marked.rows_affected() == 1 {
+                    sent += 1;
+                    crate::alerts::record_alert_attempt("sent", &title);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    order_id = %candidate.id,
+                    error = %error,
+                    "Alert order macet gagal terkirim; dicoba lagi pada tick berikutnya"
+                );
+                crate::alerts::record_alert_attempt("failed", &title);
             }
         }
     }
@@ -620,9 +981,38 @@ mod tests {
     }
 
     #[test]
+    fn admin_message_text_has_brand_header_divider_and_bold_title() {
+        let text = admin_message_text("🎉", "Member Baru", "🆔 Kode: RC000001");
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], "👑 <b>RAJACEK</b>");
+        assert_eq!(lines[1].chars().count(), 17);
+        assert!(lines[1].chars().all(|ch| ch == '─'));
+        assert_eq!(lines[2], "🎉 <b>Member Baru</b>");
+        assert_eq!(lines[3], "🆔 Kode: RC000001");
+    }
+
+    #[test]
+    fn escape_html_neutralizes_markup_in_values() {
+        assert_eq!(
+            escape_html("A&B <C> \"D\""),
+            "A&amp;B &lt;C&gt; \"D\""
+        );
+        let (_, text) = purchase_message(
+            "RC000001",
+            "Paket & <Promo>",
+            100,
+            1000,
+            "01a16156-4f29-7034-ab51-f5c699827826",
+            Utc.with_ymd_and_hms(2026, 10, 28, 3, 4, 0).unwrap(),
+        );
+        assert!(text.contains("📦 Paket: Paket &amp; &lt;Promo&gt;"));
+        assert!(!text.contains("Paket & <Promo>"));
+    }
+
+    #[test]
     fn new_member_message_covers_trial_variants() {
         let now = Utc.with_ymd_and_hms(2026, 10, 28, 3, 4, 0).unwrap();
-        let (title, detail) = new_member_message(
+        let (title, text) = new_member_message(
             "RC000001",
             "member@contoh.id",
             TrialNote::Granted {
@@ -631,23 +1021,23 @@ mod tests {
             },
             now,
         );
-        assert_eq!(title, "Member baru");
-        assert!(detail.contains("Kode: RC000001"));
-        assert!(detail.contains("Email: member@contoh.id"));
-        assert!(detail.contains("Trial: 1.000 hit / 7 hari"));
-        assert!(detail.contains("28 Okt 2026, 10:04 WIB"));
+        assert_eq!(title, "Member Baru");
+        assert_eq!(
+            text,
+            "👑 <b>RAJACEK</b>\n─────────────────\n🎉 <b>Member Baru</b>\n🆔 Kode: RC000001\n📧 Email: member@contoh.id\n🎁 Trial: 1.000 hit / 7 hari\n🕐 Waktu: 28 Okt 2026, 10:04 WIB"
+        );
         let (_, held) =
             new_member_message("RC000002", "a@b.id", TrialNote::Held, now);
-        assert!(held.contains("Trial: ditahan (batas IP)"));
+        assert!(held.contains("🎁 Trial: ditahan (batas IP)"));
         let (_, none) =
             new_member_message("RC000003", "a@b.id", TrialNote::None, now);
-        assert!(!none.contains("Trial:"));
+        assert!(!none.contains("🎁 Trial:"));
     }
 
     #[test]
     fn purchase_message_is_minimal_and_exact() {
         let now = Utc.with_ymd_and_hms(2026, 10, 28, 3, 4, 0).unwrap();
-        let (title, detail) = purchase_message(
+        let (title, text) = purchase_message(
             "RC000001",
             "Starter",
             5000,
@@ -655,10 +1045,10 @@ mod tests {
             "01a16156-4f29-7034-ab51-f5c699827826",
             now,
         );
-        assert_eq!(title, "Paket dibeli");
+        assert_eq!(title, "Paket Dibeli");
         assert_eq!(
-            detail,
-            "Kode: RC000001\nPaket: Starter\nKuota: 5.000 hit\nNominal: Rp150.000\nInvoice: INV-01A16156\nWaktu: 28 Okt 2026, 10:04 WIB"
+            text,
+            "👑 <b>RAJACEK</b>\n─────────────────\n🛍️ <b>Paket Dibeli</b>\n🆔 Kode: RC000001\n📦 Paket: Starter\n⚡ Kuota: 5.000 hit\n💰 Nominal: Rp150.000\n🧾 Invoice: INV-01A16156\n🕐 Waktu: 28 Okt 2026, 10:04 WIB"
         );
     }
 
@@ -666,11 +1056,74 @@ mod tests {
     fn expiry_message_shows_wib_deadline() {
         let expires =
             NaiveDateTime::parse_from_str("2026-10-29 03:30:00", "%Y-%m-%d %H:%M:%S").unwrap();
-        let (title, detail) = expiry_message("RC000001", "Starter", 123, expires);
-        assert_eq!(title, "Paket hampir kedaluwarsa");
-        assert!(detail.contains("Kode: RC000001"));
-        assert!(detail.contains("Sisa: 123 hit"));
-        assert!(detail.contains("Kedaluwarsa: 29 Okt 2026, 10:30 WIB"));
+        let (title, text) = expiry_message("RC000001", "Starter", 123, expires);
+        assert_eq!(title, "Paket Hampir Kedaluwarsa");
+        assert_eq!(
+            text,
+            "👑 <b>RAJACEK</b>\n─────────────────\n⏰ <b>Paket Hampir Kedaluwarsa</b>\n🆔 Kode: RC000001\n📦 Paket: Starter\n⚡ Sisa: 123 hit\n📅 Kedaluwarsa: 29 Okt 2026, 10:30 WIB"
+        );
+    }
+
+    #[test]
+    fn format_idr_groups_thousands_with_dots() {
+        assert_eq!(format_idr(0), "0");
+        assert_eq!(format_idr(999), "999");
+        assert_eq!(format_idr(150000), "150.000");
+        assert_eq!(format_idr(5010000), "5.010.000");
+    }
+
+    #[test]
+    fn stuck_paid_due_applies_fifteen_minute_threshold() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 28, 10, 0, 0)
+            .unwrap()
+            .naive_utc();
+        let old = now - chrono::Duration::minutes(16);
+        let recent = now - chrono::Duration::minutes(14);
+        assert!(stuck_paid_due(old, now));
+        assert!(!stuck_paid_due(recent, now));
+    }
+
+    #[test]
+    fn stuck_order_message_has_premium_format_and_invoice() {
+        let since = Utc
+            .with_ymd_and_hms(2026, 10, 28, 9, 30, 0)
+            .unwrap()
+            .naive_utc();
+        let (title, text) = stuck_order_message(
+            "RC000001",
+            "01a16156-4f29-7034-ab51-f5c699827826",
+            "Paket Starter",
+            50000,
+            "Dibayar tapi belum grant",
+            since,
+        );
+        assert_eq!(title, "Order Macet");
+        assert!(text.contains("RAJACEK"));
+        assert!(text.contains("INV-01A16156"));
+        assert!(text.contains("RC000001"));
+        assert!(text.contains("Rp 50.000"));
+        assert!(text.contains("Dibayar tapi belum grant"));
+    }
+
+    #[test]
+    fn orphan_qr_message_has_no_token_content() {
+        let now = Utc.with_ymd_and_hms(2026, 10, 28, 10, 0, 0)
+            .unwrap()
+            .naive_utc();
+        let (_, text) = orphan_qr_message("RC000001", 75000, now);
+        assert!(text.contains("QR yatim"));
+        assert!(text.contains("Rp 75.000"));
+        assert!(!text.contains("qris_token"));
+    }
+
+    #[test]
+    fn test_message_uses_brand_header_and_checkmark_title() {
+        let (title, text) = test_message();
+        assert_eq!(title, "Tes Notifikasi Rajacek");
+        assert_eq!(
+            text,
+            "👑 <b>RAJACEK</b>\n─────────────────\n✅ <b>Tes Notifikasi Rajacek</b>\nBot Telegram admin terhubung dan dapat mengirim pesan."
+        );
     }
 
     #[test]
@@ -679,6 +1132,8 @@ mod tests {
         let settings = TelegramSettings {
             bot_token_ciphertext: Some(cipher.encrypt("token-rahasia-abcdef1234").unwrap()),
             chat_id: Some("123456".to_owned()),
+            webhook_secret_ciphertext: None,
+            webhook_active: false,
         };
         let view = settings.view(&cipher);
         assert!(view.configured);
@@ -690,6 +1145,8 @@ mod tests {
         let empty = TelegramSettings {
             bot_token_ciphertext: None,
             chat_id: None,
+            webhook_secret_ciphertext: None,
+            webhook_active: false,
         }
         .view(&cipher);
         assert!(!empty.configured);

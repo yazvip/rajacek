@@ -240,6 +240,10 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/telegram-settings/test",
             post(test_telegram_settings),
         )
+        .route(
+            "/v1/admin/telegram-webhook/activate",
+            post(activate_telegram_webhook),
+        )
         .route("/v1/member/packages", get(crate::member::purchase_packages))
         .route(
             "/v1/member/orders/preview",
@@ -263,6 +267,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/member/orders/:id/qr", get(crate::member::order_qr))
         .route("/v1/payments/qris/webhook", post(qris_webhook))
+        .route("/v1/telegram/webhook", post(telegram_webhook))
         .route(
             "/v1/admin/qris/settings",
             get(get_qris_settings).put(update_qris_settings),
@@ -4182,7 +4187,18 @@ async fn update_telegram_settings(
     let principal = require_admin_role(&state, &headers, Role::Manager).await?;
     let pool = telegram_pool(&state).await?;
     let cipher = telegram_cipher(&state);
-    let view = crate::telegram_settings::save_telegram_settings(&pool, input, &cipher).await?;
+    let mut view = crate::telegram_settings::save_telegram_settings(&pool, input, &cipher).await?;
+    // Aktivasi webhook perintah bot, best-effort (28 Okt 2026):
+    // setWebhook gagal hanya membuat flag false (panel menampilkan
+    // tombol retry) — tidak pernah menggagalkan penyimpanan.
+    if view.configured {
+        crate::telegram_settings::refresh_webhook_status(&pool, &cipher).await;
+    } else {
+        crate::telegram_settings::set_webhook_flag(&pool, false).await;
+    }
+    view = crate::telegram_settings::load_telegram_settings(&pool)
+        .await?
+        .view(&cipher);
     record_admin_activity(
         &state,
         &principal,
@@ -4235,6 +4251,131 @@ async fn test_telegram_settings(
             message: "Gagal mengirim pesan tes. Periksa token/chat ID dan log server.",
         },
     }))
+}
+
+/// Webhook perintah bot Telegram (publik, 28 Okt 2026). Keamanan
+/// berlapis — semuanya wajib, dalam urutan ini:
+/// 1. Header `X-Telegram-Bot-Api-Secret-Token` wajib cocok dengan secret
+///    yang disimpan server; tanpa secret / secret salah → 403 (bukan
+///    5xx, supaya Telegram berhenti retry). Tanpa pool DB → 403 juga
+///    (fail-closed: tidak bisa verifikasi = tolak).
+/// 2. Update bukan pesan teks → 200 diam. Pesan non-perintah → 200 diam.
+/// 3. Allowlist chat: hanya chat ID admin terkonfigurasi (panel, lalu
+///    env) yang dilayani; chat lain (termasuk grup) → 200 tanpa aksi,
+///    tanpa balasan, tanpa bocoran.
+/// 4. Balasan dikirim awaited ke chat yang sama; gagal kirim → log saja,
+///    respons tetap 200 (tidak menumpuk retry).
+/// Isi update TIDAK PERNAH di-log utuh — hanya nama perintah + status
+/// izin chat. Handler ini sengaja ringan: satu-dua query baca + satu
+/// kirim, jauh di bawah timeout layer 20 detik.
+async fn telegram_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> StatusCode {
+    let provided = headers
+        .get("X-Telegram-Bot-Api-Secret-Token")
+        .and_then(|value| value.to_str().ok());
+    let Some(pool) = state.store.pool() else {
+        return StatusCode::FORBIDDEN;
+    };
+    let cipher = telegram_cipher(&state);
+    let expected = crate::telegram_settings::load_webhook_secret(&pool, &cipher).await;
+    if !crate::botcmd::verify_webhook_secret(provided, expected.as_deref()) {
+        return StatusCode::FORBIDDEN;
+    }
+    let Ok(update) = serde_json::from_slice::<crate::botcmd::TelegramUpdate>(&body) else {
+        return StatusCode::OK;
+    };
+    let Some(message) = update.message else {
+        return StatusCode::OK;
+    };
+    let Some(text) = message.text else {
+        return StatusCode::OK;
+    };
+    let allowed_chat = match crate::telegram_settings::load_telegram_settings(&pool).await {
+        Ok(settings) => settings
+            .chat_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .or_else(|| {
+                std::env::var("TELEGRAM_CHAT_ID")
+                    .ok()
+                    .filter(|value| !value.trim().is_empty())
+            }),
+        Err(_) => None,
+    };
+    let Some(allowed_chat) = allowed_chat else {
+        return StatusCode::OK;
+    };
+    if message.chat.id.to_string() != allowed_chat.trim() {
+        tracing::warn!(
+            chat_id = message.chat.id,
+            "Perintah bot ditolak: chat tidak diizinkan"
+        );
+        return StatusCode::OK;
+    }
+    let Some(command) = crate::botcmd::parse_command(&text) else {
+        return StatusCode::OK;
+    };
+    let name = crate::botcmd::command_name(&command);
+    tracing::info!(command = name, "Perintah bot dari chat admin");
+    let reply = crate::botcmd::execute_command(&pool, &state.store, &command).await;
+    if let Some((token, chat_id)) =
+        crate::telegram_settings::resolve_credentials(&pool, Some(&cipher)).await
+    {
+        let base_url = crate::alerts::telegram_base_url();
+        if let Err(error) = crate::alerts::send_telegram_message(
+            &base_url,
+            &token,
+            &chat_id,
+            &reply,
+            Some("HTML"),
+        )
+        .await
+        {
+            tracing::warn!(command = name, error = %error, "Balasan perintah bot gagal terkirim");
+        }
+    }
+    StatusCode::OK
+}
+
+/// Retry manual aktivasi webhook perintah bot (panel Pengaturan →
+/// Bot Telegram). Manager-only. Mengembalikan view terbaru; bila
+/// setWebhook gagal, `webhook_active` false dan panel menampilkan
+/// tombol retry lagi. Bila Telegram belum dikonfigurasi → 400.
+async fn activate_telegram_webhook(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::telegram_settings::TelegramSettingsView>, AppError> {
+    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = telegram_pool(&state).await?;
+    let cipher = telegram_cipher(&state);
+    let view = crate::telegram_settings::load_telegram_settings(&pool)
+        .await?
+        .view(&cipher);
+    if !view.configured {
+        return Err(AppError::bad_request(
+            "Telegram belum dikonfigurasi — isi bot token dan chat ID dulu.",
+        ));
+    }
+    let active = crate::telegram_settings::refresh_webhook_status(&pool, &cipher).await;
+    record_admin_activity(
+        &state,
+        &principal,
+        "Perintah bot Telegram diaktifkan",
+        format!(
+            "Webhook perintah bot: {}",
+            if active { "aktif" } else { "gagal diaktifkan" }
+        ),
+    )
+    .await;
+    let view = crate::telegram_settings::load_telegram_settings(&pool)
+        .await?
+        .view(&cipher);
+    Ok(Json(view))
 }
 
 async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<AdminPrincipal, AppError> {

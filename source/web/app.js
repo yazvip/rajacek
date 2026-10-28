@@ -1942,6 +1942,9 @@
     if (settings.has_bot_token) parts.push(`token tersimpan${settings.bot_token_tail ? ` (••••${settings.bot_token_tail})` : ""}`);
     if (settings.chat_id) parts.push(`chat ID ${settings.chat_id}`);
     $("#telegram-status").textContent = parts.join(" · ");
+    $("#telegram-webhook-status").textContent = settings.configured
+      ? (settings.webhook_active ? "Perintah bot aktif — kirim /stats dari Telegram." : "Perintah bot belum aktif — tekan “Aktifkan perintah bot”.")
+      : "Perintah bot belum aktif (Telegram belum lengkap).";
   }
 
   const EYE_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
@@ -2955,6 +2958,15 @@
         const result = await api("/v1/admin/telegram-settings/test", { method: "POST", body: "{}" });
         $("#telegram-status").textContent = result.message;
         showToast(result.message, result.sent ? "success" : "error");
+      } catch (error) {
+        handleApiError(error);
+      }
+    });
+    $("#telegram-webhook-activate")?.addEventListener("click", async () => {
+      try {
+        await api("/v1/admin/telegram-webhook/activate", { method: "POST", body: "{}" });
+        await loadTelegramSettings();
+        showToast("Perintah bot diaktifkan. Kirim /stats dari Telegram.", "success");
       } catch (error) {
         handleApiError(error);
       }

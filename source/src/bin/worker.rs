@@ -148,6 +148,42 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Alert order macet B1 (28 Okt 2026): order `paid` yang belum grant
+    // setelah 15 menit — sekali saat startup, lalu tiap 10 menit.
+    // Anti-duplikat lewat kolom package_orders.stuck_notified_at: hanya
+    // order yang kirimnya berhasil yang ditandai; gagal kirim dicoba
+    // lagi tick berikutnya. Order waiting yang kedaluwarsa otomatis
+    // BUKAN macet (tidak pernah masuk seleksi: hanya status paid).
+    let stuck_pool = database.pool().clone();
+    let stuck_key = config.api_key_encryption_key.clone();
+    tokio::spawn(async move {
+        loop {
+            match rajacek_api::telegram_settings::notify_stuck_paid_orders(
+                &stuck_pool,
+                stuck_key.as_deref(),
+            )
+            .await
+            {
+                Ok(sent) => {
+                    tracing::info!(
+                        sent,
+                        "Alert order macet selesai (tick 10 menit)"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "Alert order macet gagal; dicoba lagi pada tick berikutnya"
+                    );
+                }
+            }
+            sleep(Duration::from_secs(
+                rajacek_api::telegram_settings::STUCK_JOB_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    });
+
     // Penghitung percobaan persist B15: sengaja di luar loop sesi agar
     // tidak me-reset tiap sesi worker gagal dan dimulai ulang.
     let mut persist_attempts = PersistAttempts::new();
