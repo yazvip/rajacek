@@ -35,15 +35,14 @@ h1,h2,h3,p { margin-top:0; } h1 { max-width:650px; margin-bottom:24px; color:var
 .price-badge::after { content:" ✦"; }
 .price-note { text-align:center; color:var(--muted); font-size:13.5px; margin-top:20px; }
 
-/* Promo paket: badge emas + harga asli dicoret + tanggal berakhir */
-.price-promo-badge { display:inline-block; padding:4px 10px; border-radius:999px; background:linear-gradient(135deg,#F8DC8A 0%,#E4C169 55%,#C9A24B 100%); color:#0C4A38; font-size:10.5px; font-weight:800; letter-spacing:1.2px; margin:8px 0 0; }
+/* Promo paket: badge biru flat + harga asli dicoret + tanggal berakhir */
+.price-promo-badge { display:inline-block; padding:4px 10px; border-radius:999px; background:#e1efff; color:#2563eb; font-size:10.5px; font-weight:800; letter-spacing:1.2px; margin:8px 0 0; }
 .price-old { color:var(--muted); font-size:14px; text-decoration:line-through; margin:4px 0 0; }
 .price-promo-ends { color:var(--muted); font-size:13px; margin:2px 0 0; }
 
-/* CTA premium kartu paket: tombol penuh menempel di bawah kartu */
-.price-card a.price-cta { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:auto; padding:13px 16px; border-radius:12px; background:linear-gradient(135deg,#0C4A38,#115e47); color:#fff; font-size:14px; font-weight:800; box-shadow:0 10px 22px rgba(12,74,56,.25); transition:transform .18s, box-shadow .18s; }
-.price-card a.price-cta:hover { transform:translateY(-2px); box-shadow:0 14px 28px rgba(12,74,56,.32); }
-.price-card.price-popular a.price-cta { background:linear-gradient(135deg,#F8DC8A 0%,#E4C169 55%,#C9A24B 100%); color:#0C4A38; }
+/* CTA kartu paket: tombol biru flat selaras .button-primary, menempel di bawah kartu */
+.price-card a.price-cta { display:flex; align-items:center; justify-content:center; gap:8px; margin-top:auto; padding:13px 16px; border-radius:12px; background:var(--blue); color:#fff; font-size:14px; font-weight:800; box-shadow:0 12px 24px #2563eb38; transition:transform .18s, box-shadow .18s, background .18s; }
+.price-card a.price-cta:hover { transform:translateY(-2px); background:#174fc4; box-shadow:0 14px 28px rgba(37,99,235,.32); }
 .pricing .price-card p { min-height: 0; }
 
 /* Kontak perusahaan: baris footer + kalimat penutup */
