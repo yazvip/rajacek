@@ -226,6 +226,10 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/members/:id/regenerate-key",
             post(regenerate_member_key),
         )
+        .route(
+            "/v1/admin/members/:id/email",
+            post(change_member_email),
+        )
         .route("/v1/admin/members/:id/detail", get(get_member_detail))
         .route(
             "/v1/admin/members/:id/keys/:key_id/adjust",
@@ -3869,6 +3873,151 @@ async fn regenerate_member_key(
     .await;
 
     Ok(Json(created))
+}
+
+// ---------------------------------------------------------------------------
+// Admin: ubah email member (28 Okt 2026)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ChangeMemberEmailInput {
+    email: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ChangeMemberEmailResponse {
+    member_id: Uuid,
+    member_code: Option<String>,
+    old_email: String,
+    new_email: String,
+    /// True bila satu kunci baru diterbitkan sebagai tambahan. False
+    /// bila member sudah memiliki kunci aktif — kunci lama tetap yang
+    /// berlaku (lihat catatan di handler; jangan ubah perilaku ini
+    /// tanpa memahami binding sesi member ke prefix kunci terkini).
+    new_key_issued: bool,
+    new_key_prefix: Option<String>,
+    /// Plaintext kunci baru, tampil SATU KALI. Tidak pernah dicatat di
+    /// log; dihilangkan dari JSON bila tidak ada kunci baru.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    new_api_key: Option<String>,
+}
+
+/// Validasi email member: bentuk minimal yang sama dengan validasi
+/// email admin (satu `@`, tanpa spasi, panjang wajar), dengan pesan
+/// berwording member. Normalisasi (trim + lowercase) dilakukan di sini
+/// agar semua pemanggil mendapat bentuk kanonis yang sama.
+fn validate_member_email(email: &str) -> Result<String, AppError> {
+    let normalized = email.trim().to_ascii_lowercase();
+    let valid = !normalized.is_empty()
+        && normalized.len() <= 255
+        && !normalized.contains(char::is_whitespace)
+        && normalized.matches('@').count() == 1
+        && !normalized.starts_with('@')
+        && !normalized.ends_with('@');
+    if valid {
+        Ok(normalized)
+    } else {
+        Err(AppError::bad_request("Email member tidak valid"))
+    }
+}
+
+async fn change_member_email(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Json(input): Json<ChangeMemberEmailInput>,
+) -> Result<Json<ChangeMemberEmailResponse>, AppError> {
+    // B20: sama ketatnya dengan assign-package/regenerate — Manager+.
+    let principal = require_admin_role_at(
+        &state,
+        &headers,
+        Role::Manager,
+        "POST /v1/admin/members/:id/email",
+    )
+    .await?;
+    let member = state
+        .store
+        .member_by_id(id)
+        .await?
+        .ok_or_else(|| AppError::not_found("Member tidak ditemukan"))?;
+    let raw = input.email.as_deref().unwrap_or("").trim();
+    if raw.is_empty() {
+        return Err(AppError::bad_request("Email baru wajib diisi"));
+    }
+    let new_email = validate_member_email(raw)?;
+    if new_email == member.email {
+        return Err(AppError::bad_request(
+            "Email baru sama dengan email sekarang",
+        ));
+    }
+    // Email boleh dipakai paling banyak oleh member ini sendiri; bila
+    // ada member lain memakainya, penautan Google via email menjadi
+    // ambigu — tolak dengan 409, jangan menimpa.
+    for other in state.store.member_by_email(&new_email).await? {
+        if other.id != member.id {
+            return Err(AppError::conflict("Email sudah dipakai member lain"));
+        }
+    }
+    let old_email = member.email.clone();
+    let updated = state
+        .store
+        .update_member_email(member.id, &new_email)
+        .await?;
+    // A1: kunci lama TETAP berlaku. Kunci baru diterbitkan HANYA bila
+    // member tidak punya kunci aktif — menerbitkan kunci kosong di
+    // atas kunci aktif akan membajak status "kunci terkini"
+    // (member_key() = non-revoked terbaru): sesi portal member yang
+    // terikat prefix lama ditolak, dan login berikutnya mengikat sesi
+    // ke kunci 0-kuota sehingga sandbox portal 402 padahal kuota lama
+    // masih ada. Bila member sudah punya kunci aktif, admin cukup
+    // memakai regenerate bila menginginkan format rc_.
+    let (new_key_issued, new_key_prefix, new_api_key) =
+        match state.store.member_key(member.id).await {
+            Some((summary, _)) if summary.status == "active" => (false, None, None),
+            _ => {
+                let rate_limit = state.store.default_rate_limit_per_minute();
+                let created = state
+                    .store
+                    .create_member_api_key(&updated, 0, None, rate_limit)
+                    .await?;
+                (
+                    true,
+                    Some(created.key.prefix.clone()),
+                    Some(created.plaintext_key),
+                )
+            }
+        };
+    record_admin_activity_with_entity(
+        &state,
+        &principal,
+        "Email member diubah",
+        format!("Email member diubah dari {old_email} ke {new_email}."),
+        Some("member"),
+        Some(&member.id.to_string()),
+    )
+    .await;
+    if let Some(prefix) = &new_key_prefix {
+        record_admin_activity_with_entity(
+            &state,
+            &principal,
+            "Kunci member diterbitkan",
+            format!(
+                "Kunci baru {prefix} diterbitkan untuk {new_email} (kunci lama tetap berlaku)."
+            ),
+            Some("api_key"),
+            Some(prefix),
+        )
+        .await;
+    }
+    Ok(Json(ChangeMemberEmailResponse {
+        member_id: member.id,
+        member_code: updated.member_code.clone(),
+        old_email,
+        new_email,
+        new_key_issued,
+        new_key_prefix,
+        new_api_key,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -8362,5 +8511,31 @@ mod admin_new_pin_tests {
     fn max_128_digits_accepted_and_129_rejected() {
         assert!(admin_new_pin_valid(&"9".repeat(128)));
         assert!(!admin_new_pin_valid(&"9".repeat(129)));
+    }
+}
+
+#[cfg(test)]
+mod change_member_email_tests {
+    use super::validate_member_email;
+
+    #[test]
+    fn valid_email_is_normalized() {
+        assert_eq!(
+            validate_member_email("  Member.Baru@Contoh.ID ").unwrap(),
+            "member.baru@contoh.id"
+        );
+    }
+
+    #[test]
+    fn malformed_emails_rejected() {
+        for bad in ["", "tanpa-at", "a@b@c", "@contoh.id", "user@", "user@con toh.id"] {
+            assert!(validate_member_email(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn overlong_email_rejected() {
+        let long = format!("{}@contoh.id", "a".repeat(250));
+        assert!(validate_member_email(&long).is_err());
     }
 }

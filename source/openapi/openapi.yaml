@@ -188,7 +188,7 @@ components:
       type: apiKey
       in: header
       name: X-API-Key
-      description: Kunci member dengan prefix `rv_live_`; Authorization Bearer juga didukung.
+      description: Kunci member (baru: prefix `rc_`; lama: `rv_live_` tetap berlaku); Authorization Bearer juga didukung.
   parameters:
     IdempotencyKey:
       name: Idempotency-Key

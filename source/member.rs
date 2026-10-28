@@ -1029,26 +1029,65 @@ async fn google_callback_inner(
     let (member, is_new) = match state.store.member_by_google_sub(&user.sub).await? {
         Some(member) => (member, false),
         None => {
-            match state
-                .store
-                .create_member(
-                    &user.sub,
-                    &email,
-                    user.name.as_deref(),
-                    user.picture.as_deref(),
-                )
-                .await
-            {
-                Ok(member) => (member, true),
-                Err(error) => {
-                    // A concurrent first sign-in for the same Google
-                    // account may have won the insert (unique google_sub);
-                    // adopt that row instead of failing the login.
-                    match state.store.member_by_google_sub(&user.sub).await? {
-                        Some(member) => (member, false),
-                        None => return Err(error),
+            // Penautan via email (28 Okt 2026): admin dapat mengubah
+            // email member yang kehilangan akses akun Google lamanya.
+            // Login dengan akun Google baru yang emailnya sudah diubah
+            // admin menautkan akun itu ke member lama (kuota/riwayat/
+            // kunci tetap) — tanpa ini, pencocokan google_sub akan
+            // membuat member baru dan pemulihan akses gagal.
+            // Keamanan: Google OAuth sudah membuktikan kepemilikan
+            // email tersebut; ambiguitas (>1 member beremail sama,
+            // mungkin karena email tidak unik di tabel) fail-closed.
+            match state.store.member_by_email(&email).await? {
+                candidates if candidates.len() == 1 => {
+                    let linked = candidates.into_iter().next().expect("satu kandidat");
+                    if let Err(error) = state
+                        .store
+                        .update_member_google_sub(linked.id, &user.sub)
+                        .await
+                    {
+                        // Jangan bocorkan penyebab (mis. sub sudah
+                        // dipakai member lain): login gagal generik.
+                        tracing::warn!(?error, "Penautan google_sub via email gagal");
+                        return Err(AppError::unauthorized(
+                            "Login gagal. Hubungi admin untuk bantuan.",
+                        ));
                     }
+                    (linked, false)
                 }
+                candidates if candidates.len() > 1 => {
+                    // Email tidak unik: menebak member mana yang
+                    // ditautkan bisa menyerahkan akun ke orang yang
+                    // salah — tolak, jangan buat member baru.
+                    tracing::warn!(
+                        candidate_count = candidates.len(),
+                        "Login Google ditolak: email cocok dengan lebih dari satu member"
+                    );
+                    return Err(AppError::unauthorized(
+                        "Login gagal. Hubungi admin untuk bantuan.",
+                    ));
+                }
+                _ => match state
+                    .store
+                    .create_member(
+                        &user.sub,
+                        &email,
+                        user.name.as_deref(),
+                        user.picture.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(member) => (member, true),
+                    Err(error) => {
+                        // A concurrent first sign-in for the same Google
+                        // account may have won the insert (unique google_sub);
+                        // adopt that row instead of failing the login.
+                        match state.store.member_by_google_sub(&user.sub).await? {
+                            Some(member) => (member, false),
+                            None => return Err(error),
+                        }
+                    }
+                },
             }
         }
     };

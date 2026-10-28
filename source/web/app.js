@@ -2033,6 +2033,12 @@
     const planEffective = member.plan_effective || member.plan_kind;
     $("#member-detail-title").textContent = member.name || member.email;
     $("#member-detail-sub").textContent = `${member.email} · Kode member: ${member.member_code || "—"} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[planEffective] || planEffective} · Daftar ${formatDate(member.created_at)} · Login terakhir ${member.last_login_at ? formatDate(member.last_login_at) : "—"}`;
+    // Formulir ubah email selalu mulai bersih agar nilai member
+    // sebelumnya tidak terbawa; onclick (bukan addEventListener) agar
+    // render ulang tidak menumpuk handler.
+    $("#member-email-new").value = "";
+    $("#member-email-change-result").textContent = "";
+    $("#member-email-change").onclick = submitMemberEmailChange;
     $("#member-detail-panel").hidden = false;
     const statusLabel = { active: "Aktif", disabled: "Nonaktif", revoked: "Dicabut" };
     $("#member-detail-keys").innerHTML = detail.keys.length ? detail.keys.map((key) => `<tr>
@@ -2082,6 +2088,38 @@
       ? `Total ${formatNumber(detail.usage_total_charged)} hit tertagih dalam ${detail.usage_days} hari terakhir (dari ledger; hit gratis pool invalid tidak masuk hitungan ini).`
       : "Pemakaian tidak tersedia (database tidak terhubung).";
     $("#member-detail-usage").innerHTML = detail.usage.map((day) => `<div class="member-usage-row"><span>${escapeHtml(day.date)}</span><span class="member-usage-bar"><span style="width:${Math.round((day.charged_hits / maxUsage) * 100)}%"></span></span><strong>${formatNumber(day.charged_hits)}</strong></div>`).join("");
+  }
+
+  async function submitMemberEmailChange() {
+    const detail = state.memberDetail;
+    if (!detail) return;
+    const member = detail.member;
+    const input = $("#member-email-new");
+    const result = $("#member-email-change-result");
+    const next = (input.value || "").trim().toLowerCase();
+    if (!next) { showToast("Isi email baru dulu.", "error"); return; }
+    if (next === member.email) { showToast("Email baru sama dengan email sekarang.", "error"); return; }
+    const hasActiveKey = detail.keys.some((key) => key.status === "active");
+    const ok = window.confirm(
+      `Ubah email member dari ${member.email} ke ${next}?\n\n` +
+      (hasActiveKey
+        ? "Kunci lama tetap berlaku; tidak ada kunci baru yang diterbitkan karena member sudah memiliki kunci aktif."
+        : "Kunci baru format rc_ akan diterbitkan sebagai tambahan (kunci lama tetap berlaku bila ada).") +
+      "\n\nLogin Google lama member akan putus; member login lagi dengan akun Google baru."
+    );
+    if (!ok) return;
+    try {
+      const changed = await api(`/v1/admin/members/${member.id}/email`, { method: "POST", body: { email: next } });
+      await openMemberDetail(member.id);
+      if (changed.new_api_key) {
+        result.innerHTML = `Email diubah ke <strong>${escapeHtml(changed.new_email)}</strong>. Kunci baru (hanya tampil sekali, sampaikan ke member): <code>${escapeHtml(changed.new_api_key)}</code>`;
+      } else {
+        result.textContent = `Email diubah ke ${changed.new_email}. Kunci lama tetap berlaku; tidak ada kunci baru yang diterbitkan.`;
+      }
+      showToast("Email member diubah.", "success");
+    } catch (error) {
+      handleApiError(error);
+    }
   }
 
   async function submitMemberAdjust(event, keyId) {

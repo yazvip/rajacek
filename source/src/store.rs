@@ -2210,6 +2210,84 @@ pub async fn prune_old_raw_targets(
         row.map(MemberRow::into_account).transpose()
     }
 
+    /// Semua member dengan email tersebut (perbandingan tak peka huruf).
+    /// Tabel members TIDAK punya unique constraint pada email (hanya
+    /// google_sub yang unik) — jadi hasil BISA lebih dari satu baris, dan
+    /// pemanggil yang memakai hasil ini untuk penautan identitas WAJIB
+    /// fail-closed bila jumlahnya bukan tepat satu (lihat callback
+    /// Google member). Tanpa pool (mode memori/dev) mengembalikan
+    /// daftar kosong, mengikuti pola member_by_google_sub.
+    pub async fn member_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Vec<crate::models::MemberAccount>, AppError> {
+        let Some(pool) = self.pool() else {
+            return Ok(Vec::new());
+        };
+        let rows = sqlx::query_as::<_, MemberRow>(
+            "SELECT id, member_code, google_sub, email, name, picture_url, plan_kind, status, created_at, last_login_at FROM members WHERE LOWER(email) = LOWER(?) ORDER BY created_at",
+        )
+        .bind(email)
+        .fetch_all(&pool)
+        .await
+        .map_err(|error| {
+            tracing::warn!(?error, "Gagal membaca member dari database");
+            AppError::internal("Data member tidak dapat dibaca")
+        })?;
+        rows.into_iter().map(MemberRow::into_account).collect()
+    }
+
+    /// Ubah email satu member (jalur admin). Mengembalikan akun yang
+    /// sudah diperbarui. TIDAK menyentuh google_sub, kuota, bucket,
+    /// riwayat, maupun kunci — penautan akun Google baru terjadi
+    /// terpisah lewat callback Google (pencocokan email).
+    pub async fn update_member_email(
+        &self,
+        id: Uuid,
+        email: &str,
+    ) -> Result<crate::models::MemberAccount, AppError> {
+        let Some(pool) = self.pool() else {
+            return Err(AppError::internal("Data member tidak dapat diubah"));
+        };
+        sqlx::query("UPDATE members SET email = ? WHERE id = ?")
+            .bind(email)
+            .bind(id.to_string())
+            .execute(&pool)
+            .await
+            .map_err(|error| {
+                tracing::warn!(?error, member_id = %id, "Gagal mengubah email member");
+                AppError::internal("Email member tidak dapat diubah")
+            })?;
+        self.member_by_id(id)
+            .await?
+            .ok_or_else(|| AppError::not_found("Member tidak ditemukan"))
+    }
+
+    /// Tautkan ulang akun Google member ke sub baru (penautan via email
+    /// di callback Google member). Login Google lama otomatis putus
+    /// karena pencocokan memakai google_sub. Gagal (mis. sub sudah
+    /// dipakai member lain — unique constraint) dikembalikan mentah;
+    /// pemanggil login memetakannya ke pesan generik.
+    pub async fn update_member_google_sub(
+        &self,
+        id: Uuid,
+        google_sub: &str,
+    ) -> Result<(), AppError> {
+        let Some(pool) = self.pool() else {
+            return Err(AppError::internal("Data member tidak dapat diubah"));
+        };
+        sqlx::query("UPDATE members SET google_sub = ? WHERE id = ?")
+            .bind(google_sub)
+            .bind(id.to_string())
+            .execute(&pool)
+            .await
+            .map_err(|error| {
+                tracing::warn!(?error, member_id = %id, "Gagal menautkan google_sub member");
+                AppError::internal("Akun Google tidak dapat ditautkan")
+            })?;
+        Ok(())
+    }
+
     /// Satu-satunya jalur pembuatan member di produksi (dipanggil dari
     /// Google callback member; grep `INSERT INTO members` tidak menemukan
     /// jalur lain). Setiap member baru mendapat kode RC berikutnya dari
@@ -5251,12 +5329,32 @@ impl AdminStore {
 /// the secret cannot be dictionary-attacked, and the previous Argon2 verification cost
 /// tens of milliseconds of CPU on EVERY validation request, dominating the hot path.
 /// Format: `sha256$<salt_hex>$<digest_hex>` where digest = SHA-256(salt || secret).
-/// Key prefixes are pure CSPRNG output (64 bit). A timestamp-derived prefix
+/// Key prefixes are pure CSPRNG output. A timestamp-derived prefix
 /// (the old UUIDv7 slice) collided for keys issued within one 256 ms window.
+/// Prefix format (28 Okt 2026, B1): `rc_` + 9 karakter acak [0-9A-Za-z]
+/// (~54 bit, 62^9 kombinasi). Kunci LAMA `rv_live_<16 hex>` tetap berlaku
+/// selamanya: lookup memakai `split_api_key` (rsplit_once('_')) yang
+/// format-agnostik, jadi mengganti generator ini tidak mematahkan kunci
+/// lama maupun sesi yang terikat prefix lama. Alfabet sengaja tanpa `_`
+/// agar split di `_` terakhir tetap memisahkan prefix dari secret.
 fn generate_key_prefix() -> String {
-    let mut bytes = [0_u8; 8];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    format!("rv_live_{}", hex::encode(bytes))
+    const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let mut suffix = String::with_capacity(9);
+    // Rejection sampling (byte < 248, kelipatan 62) agar distribusi
+    // seragam tanpa bias modulo; CSPRNG lewat fill_bytes seperti dulu.
+    while suffix.len() < 9 {
+        let mut bytes = [0_u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        for byte in bytes {
+            if byte < 248 {
+                suffix.push(ALPHABET[(byte % 62) as usize] as char);
+                if suffix.len() == 9 {
+                    break;
+                }
+            }
+        }
+    }
+    format!("rc_{suffix}")
 }
 
 pub(crate) fn hash_secret(secret: &str) -> Result<String, AppError> {
@@ -5301,7 +5399,11 @@ pub(crate) fn verify_secret(secret: &str, stored: &str) -> bool {
 
 fn split_api_key(raw_key: &str) -> Option<(String, String)> {
     let (prefix, secret) = raw_key.trim().rsplit_once('_')?;
-    if !prefix.starts_with("rv_")
+    // Dua keluarga prefix yang sah: `rv_` (kunci lama, tetap berlaku)
+    // dan `rc_` (kunci baru sejak 28 Okt 2026). Gerbang ini dipakai
+    // autentikasi API + login kunci portal — melupakannya membuat
+    // kunci baru tak bisa dipakai sama sekali.
+    if !(prefix.starts_with("rv_") || prefix.starts_with("rc_"))
         || secret.len() < 32
         || !secret.chars().all(|char| char.is_ascii_hexdigit())
     {
@@ -5818,14 +5920,37 @@ mod key_prefix_tests {
     fn prefixes_are_random_and_unique() {
         // The old UUIDv7-derived prefix collided within a 256 ms window
         // (audit 2026-10-25, K1). A thousand CSPRNG prefixes must be unique.
+        // Format sejak 28 Okt 2026 (B1): `rc_` + 9 karakter [0-9A-Za-z].
         let mut seen = HashSet::new();
         for _ in 0..1000 {
             let prefix = generate_key_prefix();
-            assert!(prefix.starts_with("rv_live_"), "{prefix}");
-            assert_eq!(prefix.len(), "rv_live_".len() + 16, "{prefix}");
-            assert!(prefix["rv_live_".len()..].chars().all(|c| c.is_ascii_hexdigit()));
+            assert!(prefix.starts_with("rc_"), "{prefix}");
+            assert_eq!(prefix.len(), "rc_".len() + 9, "{prefix}");
+            assert!(prefix["rc_".len()..]
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric()));
             assert!(seen.insert(prefix), "duplicate prefix generated");
         }
+    }
+
+    #[test]
+    fn split_api_key_roundtrips_new_and_old_formats() {
+        // Kunci baru: prefix rc_ + secret hex; kunci lama rv_live_ tetap
+        // harus ter-split dengan benar (rsplit_once('_')).
+        // Secret asli sepanjang 48 hex (issue_api_key); split menolak
+        // secret < 32 char — tes memakai 48 char agar realistis.
+        let new_key = format!(
+            "{}_abcdef0123456789abcdef0123456789abcdef0123456789",
+            generate_key_prefix()
+        );
+        let (prefix, secret) = split_api_key(&new_key).expect("split kunci baru");
+        assert!(prefix.starts_with("rc_"));
+        assert_eq!(secret.len(), 48);
+        let old_key = "rv_live_0123456789abcdef_abcdef0123456789abcdef0123456789abcdef0123456789";
+        let (prefix, secret) = split_api_key(old_key).expect("split kunci lama");
+        assert_eq!(prefix, "rv_live_0123456789abcdef");
+        assert_eq!(secret.len(), 48);
+        assert!(split_api_key("tanpa-underscore").is_none());
     }
 }
 

@@ -304,6 +304,10 @@
             </article>
 
             <article class="panel" id="member-detail-panel" hidden><div class="panel-heading"><div><span class="section-kicker">Detail member</span><h2 id="member-detail-title">—</h2><p class="tester-audit-note" id="member-detail-sub" style="margin:4px 0 0;"></p></div><button class="button button-secondary" id="member-detail-close" type="button">Tutup</button></div>
+            <h3>Ubah email member</h3>
+            <p class="tester-audit-note">Untuk member yang lupa atau tidak punya akses ke email Google lamanya. Setelah email diubah, member login lagi dengan akun Google baru yang emailnya sama dengan email baru ini — akun itu otomatis tertaut ke member yang sama (kuota dan riwayat tetap). Login Google lama langsung putus.</p>
+            <div class="form-grid"><label>Email baru<input id="member-email-new" type="email" placeholder="email-baru@contoh.id" autocomplete="off" /></label><div class="form-actions"><button class="button button-secondary" id="member-email-change" type="button">Ubah email</button></div></div>
+            <p class="tester-audit-note" id="member-email-change-result"></p>
             <h3>Kunci</h3>
             <div class="table-scroll"><table><thead><tr><th>Kunci</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Gratis invalid hari ini</th><th>Adjust kuota manual</th></tr></thead><tbody id="member-detail-keys"></tbody></table></div>
             <p class="tester-audit-note">Adjust kuota bersifat relatif (sisa ditambah/dikurangi delta, bukan di-set absolut) dan selalu dicatat di Aktivitas beserta alasan. Delta positif yang melampaui total ikut menaikkan total; delta negatif tidak mengubah total.</p>
@@ -411,6 +415,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261026-32" defer></script>
+    <script src="/app.js?v=20261026-33" defer></script>
   </body>
 </html>

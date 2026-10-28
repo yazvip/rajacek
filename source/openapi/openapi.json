@@ -3,7 +3,7 @@
   "info": {
     "title": "Rajacek API — Dokumentasi Member",
     "version": "1.0.0",
-    "description": "API validasi rekening bank, e-wallet, dan nomor WhatsApp Indonesia untuk member Rajacek.\n\n**Autentikasi:** semua endpoint validasi memerlukan header `X-API-Key: rv_live_...` (atau `Authorization: Bearer rv_live_...`). Jaga kerahasiaan kunci Anda; kunci hanya ditampilkan sekali saat dibuat.\n\n**Idempotency-Key dianjurkan** pada setiap POST validasi: nilai unik 8–200 karakter per operasi bisnis. Bila tidak dikirim atau kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons `Idempotency-Key`. Mengirim ulang request yang sama dengan kunci yang sama akan memutar respons yang sama tanpa memotong kuota dua kali.\n\n**Kode bank selalu 3 digit** (mis. `002` BRI, `014` BCA) — ambil daftar lengkapnya dari `GET /v1/banks`. Kode internal provider tidak pernah dipakai di sisi member.\n\n**Hasil validasi** ada di field `status` pada respons 200: `valid`, `invalid`, `not_found`, atau `pending`. Error teknis memakai format `ApiError` dengan HTTP 4xx/5xx.\n\n**Rate limit** bawaan 60 request/menit per kunci (header `X-RateLimit-Remaining`/`X-RateLimit-Reset` dikembalikan); kuota paket berkurang hanya untuk hasil yang tertagih (`valid`, `invalid`, `not_found`)."
+    "description": "API validasi rekening bank, e-wallet, dan nomor WhatsApp Indonesia untuk member Rajacek.\n\n**Autentikasi:** semua endpoint validasi memerlukan header `X-API-Key: rc_...` (kunci lama `rv_live_...` tetap berlaku) (atau `Authorization: Bearer rv_live_...`). Jaga kerahasiaan kunci Anda; kunci hanya ditampilkan sekali saat dibuat.\n\n**Idempotency-Key dianjurkan** pada setiap POST validasi: nilai unik 8–200 karakter per operasi bisnis. Bila tidak dikirim atau kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons `Idempotency-Key`. Mengirim ulang request yang sama dengan kunci yang sama akan memutar respons yang sama tanpa memotong kuota dua kali.\n\n**Kode bank selalu 3 digit** (mis. `002` BRI, `014` BCA) — ambil daftar lengkapnya dari `GET /v1/banks`. Kode internal provider tidak pernah dipakai di sisi member.\n\n**Hasil validasi** ada di field `status` pada respons 200: `valid`, `invalid`, `not_found`, atau `pending`. Error teknis memakai format `ApiError` dengan HTTP 4xx/5xx.\n\n**Rate limit** bawaan 60 request/menit per kunci (header `X-RateLimit-Remaining`/`X-RateLimit-Reset` dikembalikan); kuota paket berkurang hanya untuk hasil yang tertagih (`valid`, `invalid`, `not_found`)."
   },
   "servers": [
     {
@@ -612,7 +612,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-API-Key",
-        "description": "Kunci member berprefix `rv_live_`. Alternatif: `Authorization: Bearer rv_live_...`."
+        "description": "Kunci member (kunci baru berprefix `rc_`; kunci lama `rv_live_` tetap berlaku). Alternatif: `Authorization: Bearer rv_live_...`."
       }
     },
     "parameters": {

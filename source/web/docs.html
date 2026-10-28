@@ -100,7 +100,7 @@
       <main class="docs-body" id="content">
         <p class="eyebrow">Dokumentasi API · Member &amp; Publik</p>
         <h1>Integrasi Rajacek dalam hitungan menit.</h1>
-        <p>Rajacek membantu Anda mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, <strong>nomor WhatsApp</strong>, dan <strong>ID pelanggan PLN</strong> Indonesia lewat satu API sederhana. Pada semua contoh di halaman ini, <code>BASE_URL</code> adalah <code>https://rajacek.com</code> dan kunci yang dipakai adalah contoh <code>rv_live_CONTOH</code> — ganti dengan kunci Anda sendiri. Perlakukan kunci Anda seperti kata sandi: jangan dibagikan ke siapa pun.</p>
+        <p>Rajacek membantu Anda mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, <strong>nomor WhatsApp</strong>, dan <strong>ID pelanggan PLN</strong> Indonesia lewat satu API sederhana. Pada semua contoh di halaman ini, <code>BASE_URL</code> adalah <code>https://rajacek.com</code> dan kunci yang dipakai adalah contoh <code>rc_CONTOH</code> — ganti dengan kunci Anda sendiri. Kunci baru diawali <code>rc_</code>; kunci lama <code>rv_live_</code> tetap berlaku. Perlakukan kunci Anda seperti kata sandi: jangan dibagikan ke siapa pun.</p>
         <div class="docs-actions">
           <a class="button button-primary" href="/openapi.json">Unduh OpenAPI JSON</a>
           <a class="button button-quiet" href="#mulai-cepat">Mulai cepat ↓</a>
@@ -108,7 +108,7 @@
 
         <h2 id="mulai-cepat">Mulai cepat</h2>
         <ol>
-          <li><strong>Daftar dengan akun Google</strong> di <a href="/member">portal member</a>. API key (<code>rv_live_...</code>) langsung terbit — simpan baik-baik, kunci hanya ditampilkan satu kali. Pendaftar pertama mendapat <strong>trial gratis 10× cek selama 7 hari</strong>.</li>
+          <li><strong>Daftar dengan akun Google</strong> di <a href="/member">portal member</a>. API key (<code>rc_...</code>) langsung terbit — simpan baik-baik, kunci hanya ditampilkan satu kali. Pendaftar pertama mendapat <strong>trial gratis 10× cek selama 7 hari</strong>.</li>
           <li>Mau coba tanpa coding? Buka menu <strong>Coba Cek Live</strong> di portal — ceknya sungguhan dan memakai kuota trial Anda.</li>
           <li>Untuk cek rekening, ambil dulu kode bank 3 digit dari <code>GET /v1/banks</code>.</li>
           <li>Kirim request POST ke endpoint validasi dengan header <code>X-API-Key</code>. Selesai — contohnya ada di bawah ini.</li>
