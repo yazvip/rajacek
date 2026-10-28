@@ -149,7 +149,7 @@ pub fn help_message() -> String {
     let detail = [
         detail_row("📊", "Stats", "/stats — ringkasan hari ini (WIB)"),
         detail_row("💳", "Saldo", "/saldo RC000001 — sisa kuota member"),
-        detail_row("📜", "Riwayat", "/riwayat <request id> — detail satu validasi"),
+        detail_row("📜", "Riwayat", "/riwayat [request id] — detail satu validasi"),
         detail_row("🎁", "Trial", "/trial — ringkasan monitor trial"),
     ]
     .join("\n");
@@ -191,7 +191,7 @@ pub async fn today_stats(pool: &MySqlPool) -> Result<TodayStats, AppError> {
     .await
     .map_err(|_| AppError::internal("Query database gagal"))?;
     let (orders_granted, revenue_idr): (i64, Option<i64>) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(amount_idr), 0) FROM package_orders \
+        "SELECT COUNT(*), COALESCE(CAST(SUM(amount_idr) AS SIGNED), 0) FROM package_orders \
          WHERE status = 'granted' AND granted_at >= ?",
     )
     .bind(start)
@@ -308,7 +308,7 @@ pub fn saldo_message(info: &SaldoInfo) -> String {
         detail_row("⚡", "Sisa kuota", &format!("{} hit", info.remaining)),
         detail_row("📦", "Total kuota", &format!("{} hit", info.total)),
         detail_row("📅", "Masa aktif", &expiry),
-        detail_row("🏷️", "Plan", plan_label(&info.plan_effective)),
+        detail_row("🏷️", "Plan", &escape_html(plan_label(&info.plan_effective))),
         detail_row(
             "📌",
             "Status",
@@ -402,12 +402,15 @@ pub fn riwayat_message(info: &RiwayatInfo) -> String {
     let member = info.member_code.as_deref().unwrap_or("—");
     let detail = [
         detail_row("🕐", "Waktu", &format_wib_naive(info.occurred_at)),
-        detail_row("🆔", "Kode member", member),
-        detail_row("📦", "Produk", product_label(&info.product_code)),
+        // Nilai dari DB di-escape semua: kode member, label produk/hasil
+        // (passthrough `other`), dan nama endpoint (input admin) bisa
+        // saja mengandung karakter HTML.
+        detail_row("🆔", "Kode member", &escape_html(member)),
+        detail_row("📦", "Produk", &escape_html(product_label(&info.product_code))),
         // target_masked dari DB — TIDAK PERNAH target mentah.
         detail_row("🎯", "Target", &escape_html(&info.target_masked)),
-        detail_row("✅", "Hasil", outcome_label(&info.outcome)),
-        detail_row("🔌", "Sumber data", endpoint),
+        detail_row("✅", "Hasil", &escape_html(outcome_label(&info.outcome))),
+        detail_row("🔌", "Sumber data", &escape_html(endpoint)),
     ]
     .join("\n");
     admin_message_text("📜", "Detail Validasi", &detail)
@@ -428,7 +431,7 @@ pub fn riwayat_format_message() -> String {
         &detail_row(
             "ℹ️",
             "Format",
-            "Gunakan /riwayat <request id 10 karakter>, mis. /riwayat pHZl49uxzV",
+            "Gunakan /riwayat [request id 10 karakter], mis. /riwayat pHZl49uxzV",
         ),
     )
 }
@@ -525,7 +528,12 @@ pub async fn execute_command(
                 let date_label = (Utc::now() + Duration::hours(7)).format("%d %B %Y").to_string();
                 stats_message(&stats, &date_label)
             }
-            Err(_) => error_message(),
+            Err(error) => {
+                // Kegagalan query tidak lagi bisu: catat WARN dengan
+                // pesan error generik saja (tanpa argumen perintah).
+                tracing::warn!(command = "stats", error = %error, "Perintah bot gagal");
+                error_message()
+            }
         },
         BotCommand::Saldo(code) => match code {
             None => saldo_format_message(),
@@ -533,7 +541,10 @@ pub async fn execute_command(
             Some(code) => match member_saldo(pool, store, code).await {
                 Ok(Some(info)) => saldo_message(&info),
                 Ok(None) => saldo_not_found_message(code),
-                Err(_) => error_message(),
+                Err(error) => {
+                    tracing::warn!(command = "saldo", error = %error, "Perintah bot gagal");
+                    error_message()
+                }
             },
         },
         BotCommand::Riwayat(request_id) => match request_id {
@@ -542,12 +553,18 @@ pub async fn execute_command(
             Some(request_id) => match riwayat_detail(pool, request_id).await {
                 Ok(Some(info)) => riwayat_message(&info),
                 Ok(None) => riwayat_not_found_message(request_id),
-                Err(_) => error_message(),
+                Err(error) => {
+                    tracing::warn!(command = "riwayat", error = %error, "Perintah bot gagal");
+                    error_message()
+                }
             },
         },
         BotCommand::Trial => match trial_summary(pool, store).await {
             Ok(summary) => trial_message(&summary),
-            Err(_) => error_message(),
+            Err(error) => {
+                tracing::warn!(command = "trial", error = %error, "Perintah bot gagal");
+                error_message()
+            }
         },
         BotCommand::Unknown(_) => help_message(),
     }
@@ -637,6 +654,95 @@ mod tests {
             assert!(text.contains(cmd), "help hilang {cmd}");
         }
         assert!(text.contains("RAJACEK"));
+    }
+
+    /// Pesan bot dikirim dengan parse_mode HTML: satu `<` mentah di luar
+    /// tag <b> yang disengaja membuat Telegram menolak pesan (400).
+    /// Regresi bug /start 28 Okt 2026 (`<request id>` mentah di help).
+    fn assert_no_raw_angle_brackets(text: &str) {
+        let stripped = text.replace("<b>", "").replace("</b>", "");
+        assert!(
+            !stripped.contains('<') && !stripped.contains('>'),
+            "karakter sudut mentah tersisa: {text}"
+        );
+    }
+
+    #[test]
+    fn bot_messages_have_no_raw_angle_brackets() {
+        assert_no_raw_angle_brackets(&help_message());
+        assert_no_raw_angle_brackets(&riwayat_format_message());
+        assert_no_raw_angle_brackets(&saldo_format_message());
+        assert_no_raw_angle_brackets(&error_message());
+        assert_no_raw_angle_brackets(&saldo_not_found_message("RC000001"));
+        assert_no_raw_angle_brackets(&riwayat_not_found_message("pHZl49uxzV"));
+        assert_no_raw_angle_brackets(&stats_message(
+            &TodayStats {
+                validations: 1,
+                orders_granted: 0,
+                revenue_idr: 0,
+                new_members: 0,
+                trial_grants: 0,
+            },
+            "28 Oktober 2026",
+        ));
+        assert_no_raw_angle_brackets(&saldo_message(&SaldoInfo {
+            code: "RC000001".to_owned(),
+            plan_effective: "trial".to_owned(),
+            status: "active".to_owned(),
+            remaining: 1,
+            total: 2,
+            expiry: None,
+        }));
+        assert_no_raw_angle_brackets(&riwayat_message(&RiwayatInfo {
+            request_id: "pHZl49uxzV".to_owned(),
+            occurred_at: NaiveDateTime::parse_from_str("2026-10-28 10:00:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap(),
+            member_code: Some("RC000001".to_owned()),
+            product_code: "bank_account".to_owned(),
+            target_masked: "****1234".to_owned(),
+            outcome: "valid".to_owned(),
+            endpoint_name: Some("TukangCek".to_owned()),
+        }));
+        assert_no_raw_angle_brackets(&trial_message(&TrialSummary {
+            grants_24h: 0,
+            grants_7d: 0,
+            total_grants: 0,
+            held_7d: 0,
+            ips_at_limit_24h: 0,
+            alert: false,
+        }));
+        assert!(!help_message().contains("<request id>"));
+        assert!(!riwayat_format_message().contains("<request id"));
+    }
+
+    #[test]
+    fn bot_messages_escape_hostile_db_values() {
+        // Nilai dari DB (nama endpoint input admin, plan tersimpan,
+        // target tersamar) tidak boleh lolos mentah ke parse HTML.
+        let text = riwayat_message(&RiwayatInfo {
+            request_id: "pHZl49uxzV".to_owned(),
+            occurred_at: NaiveDateTime::parse_from_str("2026-10-28 10:00:00", "%Y-%m-%d %H:%M:%S")
+                .unwrap(),
+            member_code: Some("RC000001".to_owned()),
+            product_code: "bank_account".to_owned(),
+            target_masked: "****<tag>".to_owned(),
+            outcome: "valid".to_owned(),
+            endpoint_name: Some("A<&>B".to_owned()),
+        });
+        assert!(!text.contains("****<tag>"));
+        assert!(text.contains("****&lt;tag&gt;"));
+        assert!(!text.contains("A<&>B"));
+        assert!(text.contains("A&lt;&amp;&gt;B"));
+        let saldo = saldo_message(&SaldoInfo {
+            code: "RC000001".to_owned(),
+            plan_effective: "<tag>".to_owned(),
+            status: "active".to_owned(),
+            remaining: 1,
+            total: 2,
+            expiry: None,
+        });
+        assert!(!saldo.contains("Plan: <tag>"));
+        assert!(saldo.contains("&lt;tag&gt;"));
     }
 
     #[test]
