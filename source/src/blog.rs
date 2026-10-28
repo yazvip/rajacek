@@ -435,7 +435,7 @@ pub async fn blog_list(uri: Uri) -> Response {
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/landing.css?v=20261028-1" />
+    <link rel="stylesheet" href="/landing.css?v=20261028-2" />
     <style>
       .blog-list {{ width:min(1180px,calc(100% - 40px)); margin:auto; padding:48px 0 72px; }}
       .blog-list h1 {{ color:var(--navy); font-size:clamp(31px,4vw,46px); line-height:1.12; letter-spacing:-2px; margin-bottom:12px; }}

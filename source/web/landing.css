@@ -30,7 +30,7 @@ h1,h2,h3,p { margin-top:0; } h1 { max-width:650px; margin-bottom:24px; color:var
 
 /* Badge premium — paket populer: pil emas + teks hijau botol */
 .price-popular { box-shadow: 0 26px 50px rgba(12,74,56,.16); }
-.price-badge { position:absolute; top:-14px; right:18px; padding:7px 14px; background:linear-gradient(135deg,#F8DC8A 0%,#E4C169 55%,#C9A24B 100%); color:#0C4A38; border:1px solid #B8933F; box-shadow:0 10px 22px rgba(12,74,56,.28), inset 0 1px 0 rgba(255,255,255,.55); font-size:10.5px; font-weight:800; letter-spacing:1.6px; text-transform:uppercase; border-radius:999px; margin:0; }
+.price-badge { position:absolute; top:-14px; right:18px; padding:7px 14px; background:var(--blue); color:#fff; border:1px solid var(--blue); box-shadow:0 10px 22px #2563eb38; font-size:10.5px; font-weight:800; letter-spacing:1.6px; text-transform:uppercase; border-radius:999px; margin:0; }
 .price-badge::before { content:"✦ "; }
 .price-badge::after { content:" ✦"; }
 .price-note { text-align:center; color:var(--muted); font-size:13.5px; margin-top:20px; }
