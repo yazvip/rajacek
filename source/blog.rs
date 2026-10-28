@@ -419,18 +419,18 @@ pub async fn blog_list(uri: Uri) -> Response {
     <meta name="robots" content="index,follow,max-image-preview:large,max-snippet:-1" />
     <meta name="author" content="PT DATA BRIDGE NUSANTARA" />
     <link rel="canonical" href="https://www.rajacek.com/blog/" />
-    <link rel="icon" href="/favicon.png" />
+    <link rel="icon" href="/favicon.png?v=20261028-1" />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Rajacek" />
     <meta property="og:locale" content="id_ID" />
     <meta property="og:title" content="Blog Rajacek — Validasi Rekening, E-Wallet, WhatsApp &amp; PLN" />
     <meta property="og:description" content="Artikel dari Rajacek tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya." />
     <meta property="og:url" content="https://www.rajacek.com/blog/" />
-    <meta property="og:image" content="https://www.rajacek.com/og-cover.png" />
+    <meta property="og:image" content="https://www.rajacek.com/og-cover.png?v=20261028-1" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Blog Rajacek — Validasi Rekening, E-Wallet, WhatsApp &amp; PLN" />
     <meta name="twitter:description" content="Artikel dari Rajacek tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya." />
-    <meta name="twitter:image" content="https://www.rajacek.com/og-cover.png" />
+    <meta name="twitter:image" content="https://www.rajacek.com/og-cover.png?v=20261028-1" />
     {json_ld}
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -464,7 +464,7 @@ pub async fn blog_list(uri: Uri) -> Response {
   <body>
     <a class="skip-link" href="#content">Lewati ke konten utama</a>
     <header class="site-header">
-      <a class="brand" href="/" aria-label="Rajacek, beranda"><img class="brand-mark-img" src="/logo-mark.png" alt="" aria-hidden="true"><span>aja<span>cek</span></span></a>
+      <a class="brand" href="/" aria-label="Rajacek, beranda"><img class="brand-mark-img" src="/logo-mark.png?v=20261028-1" alt="" aria-hidden="true"><span>aja<span>cek</span></span></a>
       <nav aria-label="Navigasi utama"><a href="/">Beranda</a><a href="/docs">Dokumentasi</a><a href="/blog/">Blog</a></nav>
       <a class="nav-cta" href="/member">Masuk dashboard <span aria-hidden="true">→</span></a>
     </header>
@@ -476,7 +476,7 @@ pub async fn blog_list(uri: Uri) -> Response {
         {items}
       </div>
     </main>
-    <footer><a class="brand" href="/" aria-label="Rajacek, beranda"><img class="brand-mark-img" src="/logo-mark.png" alt="" aria-hidden="true"><span>aja<span>cek</span></span></a><p>© 2026 Rajacek · PT DATA BRIDGE NUSANTARA — Infrastruktur validasi untuk Indonesia.<br><span class="foot-contact">Hubungi kami: <a href="mailto:apivalidasi@gmail.com">apivalidasi@gmail.com</a> · <a href="https://t.me/xyz_yaz" target="_blank" rel="noopener">Telegram @xyz_yaz</a></span></p></footer>
+    <footer><a class="brand" href="/" aria-label="Rajacek, beranda"><img class="brand-mark-img" src="/logo-mark.png?v=20261028-1" alt="" aria-hidden="true"><span>aja<span>cek</span></span></a><p>© 2026 Rajacek · PT DATA BRIDGE NUSANTARA — Infrastruktur validasi untuk Indonesia.<br><span class="foot-contact">Hubungi kami: <a href="mailto:apivalidasi@gmail.com">apivalidasi@gmail.com</a> · <a href="https://t.me/xyz_yaz" target="_blank" rel="noopener">Telegram @xyz_yaz</a></span></p></footer>
   </body>
 </html>"##,
         items = items,
