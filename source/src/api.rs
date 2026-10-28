@@ -1534,7 +1534,8 @@ async fn pin_status(
 }
 
 /// Ganti PIN administrator (Manager+). PIN lama diverifikasi dulu;
-/// PIN baru minimal 8 karakter. Setelah ganti, `is_default` menjadi
+/// PIN baru hanya angka, minimal 6 digit, maksimal 128 digit.
+/// Setelah ganti, `is_default` menjadi
 /// false sehingga banner peringatan hilang. Sesi PIN yang sudah terbit
 /// TIDAK dicabut (tidak ada registri sesi); yang langsung berhenti
 /// adalah login baru dengan PIN lama — sesi lama hanya kedaluwarsa
@@ -1550,6 +1551,14 @@ struct PinChangeResponse {
     changed: bool,
 }
 
+/// Aturan PIN baru: hanya digit 0-9, minimal 6 digit, maksimal 128.
+/// Dipakai handler ganti PIN dan unit test; jalur login TIDAK memakai
+/// aturan ini (login hanya memverifikasi hash → 401 generik untuk
+/// nilai apa pun yang tidak cocok).
+pub(crate) fn admin_new_pin_valid(pin: &str) -> bool {
+    (6..=128).contains(&pin.len()) && pin.chars().all(|c| c.is_ascii_digit())
+}
+
 async fn pin_change(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1561,8 +1570,10 @@ async fn pin_change(
     if current_pin.is_empty() || new_pin.is_empty() {
         return Err(AppError::bad_request("PIN lama dan PIN baru wajib diisi"));
     }
-    if new_pin.len() < 8 || new_pin.len() > 128 {
-        return Err(AppError::bad_request("PIN baru minimal 8 karakter"));
+    if !admin_new_pin_valid(new_pin) {
+        return Err(AppError::bad_request(
+            "PIN baru harus berupa angka saja dan minimal 6 digit",
+        ));
     }
     let row = state.store.get_admin_pin().await;
     let current_ok = match &row {
@@ -8315,5 +8326,41 @@ mod tester_error_details_tests {
     fn tester_error_without_details_is_unchanged() {
         let error = AppError::service_unavailable("gagal");
         assert_eq!(strip_tester_raw_details(error).details, None);
+    }
+}
+
+#[cfg(test)]
+mod admin_new_pin_tests {
+    use super::admin_new_pin_valid;
+
+    #[test]
+    fn six_digits_accepted() {
+        assert!(admin_new_pin_valid("123456"));
+    }
+
+    #[test]
+    fn five_digits_rejected() {
+        assert!(!admin_new_pin_valid("12345"));
+    }
+
+    #[test]
+    fn letters_rejected() {
+        assert!(!admin_new_pin_valid("12345a"));
+    }
+
+    #[test]
+    fn symbols_rejected() {
+        assert!(!admin_new_pin_valid("12345!"));
+    }
+
+    #[test]
+    fn empty_rejected() {
+        assert!(!admin_new_pin_valid(""));
+    }
+
+    #[test]
+    fn max_128_digits_accepted_and_129_rejected() {
+        assert!(admin_new_pin_valid(&"9".repeat(128)));
+        assert!(!admin_new_pin_valid(&"9".repeat(129)));
     }
 }

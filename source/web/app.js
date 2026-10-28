@@ -3395,6 +3395,16 @@
       input.type = input.type === "password" ? "text" : "password";
     });
 
+    // PIN hanya angka: buang karakter non-digit saat mengetik/menempel
+    // (type tetap password agar tersamar; bukan type=number supaya
+    // tidak ada spinner/notasi e).
+    for (const id of ["#pin-pin", "#pin-current", "#pin-new", "#pin-new-confirm"]) {
+      $(id).addEventListener("input", (event) => {
+        const filtered = event.target.value.replace(/\D/g, "");
+        if (filtered !== event.target.value) event.target.value = filtered;
+      });
+    }
+
     // Login administrator dengan email + PIN (jalur produksi kedua di
     // samping Google). Pesan error berasal dari server dan sudah
     // generik ("Email atau PIN salah" / pesan throttle) — aman tampil.
@@ -3439,8 +3449,8 @@
         showToast("Lengkapi PIN lama, PIN baru, dan konfirmasinya.", "error");
         return;
       }
-      if (newPin.length < 8) {
-        showToast("PIN baru minimal 8 karakter.", "error");
+      if (newPin.length < 6 || !/^\d+$/.test(newPin)) {
+        showToast("PIN baru harus berupa angka saja dan minimal 6 digit.", "error");
         return;
       }
       if (newPin !== confirmPin) {
