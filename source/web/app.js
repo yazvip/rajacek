@@ -408,7 +408,27 @@
   async function refreshSession() {
     state.session = await api("/v1/auth/session");
     updateSessionUI();
+    if (state.session?.authenticated) {
+      refreshPinStatus().catch(() => {});
+    }
     return state.session;
+  }
+
+  // Status PIN administrator untuk banner "PIN masih default".
+  // Best-effort: gagal fetch = banner tetap tersembunyi, bukan error.
+  async function refreshPinStatus() {
+    const status = await api("/v1/admin/pin-status");
+    const banner = $("#pin-default-banner");
+    if (banner) banner.hidden = !status?.pin_default;
+    const chip = $("#pin-status-chip");
+    if (chip) {
+      chip.textContent = !status?.pin_configured
+        ? "Belum diatur"
+        : status.pin_default
+          ? "Masih default — segera ubah"
+          : "Sudah diubah";
+    }
+    return status;
   }
 
   function setActiveView(view) {
@@ -429,7 +449,7 @@
     if (view === "orders") loadOrders().catch(handleApiError);
     if (view === "analytics") loadAnalytics().catch(handleApiError);
     if (view === "providers") { loadProviderHealth().catch(handleApiError); loadStreamHealth().catch(handleApiError); loadTrialMonitor().catch(handleApiError); loadDlq().catch(handleApiError); }
-    if (view === "settings") { loadQrisSettings().catch(handleApiError); loadSiteSettings().catch(handleApiError); loadTelegramSettings().catch(handleApiError); }
+    if (view === "settings") { loadQrisSettings().catch(handleApiError); loadSiteSettings().catch(handleApiError); loadTelegramSettings().catch(handleApiError); refreshPinStatus().catch(() => {}); }
     window.scrollTo({ top: 0, behavior: "smooth" });
     document.body.classList.remove("menu-open");
   }
@@ -3368,6 +3388,74 @@
     $("#toggle-local-password").addEventListener("click", () => {
       const input = $("#local-password");
       input.type = input.type === "password" ? "text" : "password";
+    });
+
+    $("#toggle-pin-visibility").addEventListener("click", () => {
+      const input = $("#pin-pin");
+      input.type = input.type === "password" ? "text" : "password";
+    });
+
+    // Login administrator dengan email + PIN (jalur produksi kedua di
+    // samping Google). Pesan error berasal dari server dan sudah
+    // generik ("Email atau PIN salah" / pesan throttle) — aman tampil.
+    $("#pin-login-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const email = $("#pin-email").value.trim();
+      const pin = $("#pin-pin").value;
+      if (!email || !pin) {
+        showToast("Masukkan email dan PIN administrator.", "error");
+        return;
+      }
+      try {
+        const session = await api("/v1/auth/admin/pin-login", { method: "POST", body: { email, pin } });
+        state.session = session;
+        updateSessionUI();
+        if (session.role !== "admin") {
+          state.session = null;
+          updateSessionUI();
+          showLoginOnly();
+          showToast("Akun ini tidak dapat mengakses dashboard administrator.", "error");
+          return;
+        }
+        showAdmin();
+        await loadDashboard();
+        await refreshPinStatus().catch(() => {});
+        showToast("Login PIN administrator berhasil.", "success");
+      } catch (error) {
+        handleApiError(error);
+      }
+    });
+
+    $("#pin-default-banner-action").addEventListener("click", () => {
+      setActiveView("settings");
+    });
+
+    $("#pin-change-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const currentPin = $("#pin-current").value;
+      const newPin = $("#pin-new").value;
+      const confirmPin = $("#pin-new-confirm").value;
+      if (!currentPin || !newPin || !confirmPin) {
+        showToast("Lengkapi PIN lama, PIN baru, dan konfirmasinya.", "error");
+        return;
+      }
+      if (newPin.length < 8) {
+        showToast("PIN baru minimal 8 karakter.", "error");
+        return;
+      }
+      if (newPin !== confirmPin) {
+        showToast("Konfirmasi PIN baru tidak cocok.", "error");
+        return;
+      }
+      try {
+        await api("/v1/admin/pin-change", { method: "POST", body: { current_pin: currentPin, new_pin: newPin } });
+        $("#pin-change-status").textContent = "PIN berhasil diubah. Login berikutnya memakai PIN baru.";
+        event.target.reset();
+        await refreshPinStatus().catch(() => {});
+        showToast("PIN administrator berhasil diubah.", "success");
+      } catch (error) {
+        handleApiError(error);
+      }
     });
 
     $("#logout-button").addEventListener("click", async () => {

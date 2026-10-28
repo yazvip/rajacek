@@ -88,6 +88,61 @@ fn clear_local_login_failures(email: &str) {
 }
 
 // ---------------------------------------------------------------------------
+// PIN login throttling (per email + IP, in-memory, prune-on-write).
+// Bentuknya sama dengan throttle login lokal (A6), hanya anggarannya
+// lebih ketat karena PIN jauh lebih pendek dari password: 5 gagal
+// dalam 15 menit mengunci kunci (email, IP) itu; sukses menghapus
+// hitungan. Kunci gabungan (bukan per-email saja) supaya satu alamat
+// yang ditebak dari banyak IP tidak mengunci pemilik sahnya, dan
+// satu IP yang menebak banyak alamat tidak mengunci semuanya.
+// Kegagalan lock (mutex terkunci) fail-open seperti throttle lain.
+// ---------------------------------------------------------------------------
+const PIN_LOGIN_ATTEMPT_LIMIT: u32 = 5;
+const PIN_LOGIN_LOCK_WINDOW: Duration = Duration::from_secs(900);
+
+fn pin_login_attempt_table() -> &'static Mutex<HashMap<String, (u32, Instant)>> {
+    static TABLE: OnceLock<Mutex<HashMap<String, (u32, Instant)>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Kunci throttle PIN: email ternormalisasi + IP klien.
+pub(crate) fn pin_login_throttle_key(email: &str, ip: &str) -> String {
+    format!("{}|{}", normalize_admin_email(email), ip)
+}
+
+pub(crate) fn pin_login_throttled(key: &str) -> bool {
+    let Ok(table) = pin_login_attempt_table().try_lock() else {
+        return false;
+    };
+    matches!(table.get(key), Some((count, started))
+        if started.elapsed() <= PIN_LOGIN_LOCK_WINDOW && *count >= PIN_LOGIN_ATTEMPT_LIMIT)
+}
+
+pub(crate) fn record_pin_login_failure(key: &str) {
+    let Ok(mut table) = pin_login_attempt_table().try_lock() else {
+        return;
+    };
+    table.retain(|_, (_, started)| started.elapsed() <= PIN_LOGIN_LOCK_WINDOW);
+    let entry = table.entry(key.to_owned()).or_insert((0, Instant::now()));
+    if entry.1.elapsed() > PIN_LOGIN_LOCK_WINDOW {
+        *entry = (0, Instant::now());
+    }
+    entry.0 += 1;
+}
+
+pub(crate) fn clear_pin_login_failures(key: &str) {
+    if let Ok(mut table) = pin_login_attempt_table().try_lock() {
+        table.remove(key);
+    }
+}
+
+/// Normalisasi email admin: trim + lowercase ASCII, sama seperti jalur
+/// Google dan login lokal — allowlist disimpan lowercase.
+pub(crate) fn normalize_admin_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+// ---------------------------------------------------------------------------
 // OAuth start throttling (per client IP + purpose, in-memory; audit
 // flow K18, split per purpose by audit login 2026-10-27 KECIL-7a)
 // ---------------------------------------------------------------------------
@@ -487,7 +542,7 @@ pub async fn google_login_callback(
         source: "google".to_owned(),
         iat: now.timestamp() as usize,
     };
-    let mut response = Redirect::to("/admin").into_response();
+    let mut response = Redirect::to("/jawatengah123").into_response();
     append_session_cookie(&mut response, &config, &claims)?;
     // B16: the binding served its purpose once the session is minted;
     // clear it so no stale binding lingers for the next login.
@@ -579,6 +634,44 @@ pub fn local_login_response(
     Ok(response)
 }
 
+/// Terbitkan sesi administrator dari login PIN (2026-10-28).
+/// Pemanggil (handler) SUDAH memverifikasi: email anggota allowlist
+/// `ADMIN_GOOGLE_EMAILS`, hash PIN cocok, dan throttle lolos. Klaim
+/// memakai source "pin" (bukan "google") agar jejak audit membedakan
+/// kedua jalur; cookie diset lewat `append_session_cookie` yang sama
+/// persis dengan Google — flags HttpOnly/Secure/SameSite/Domain/TTL
+/// identik. Sesi PIN TIDAK dicabut otomatis saat PIN diganti (tidak
+/// ada registri sesi; sesi lama hanya kedaluwarsa pada TTL 8 jam) —
+/// yang langsung berhenti adalah login BARU dengan PIN lama.
+pub fn mint_pin_session_response(
+    config: &AppConfig,
+    email: &str,
+) -> Result<Response, AppError> {
+    let now = chrono::Utc::now();
+    let claims = SessionClaims {
+        sub: format!("pin:{email}"),
+        email: email.to_owned(),
+        name: "Administrator".to_owned(),
+        role: "admin".to_owned(),
+        exp: (now + chrono::Duration::seconds(SESSION_TTL_SECONDS)).timestamp() as usize,
+        iat: now.timestamp() as usize,
+        jti: uuid::Uuid::now_v7().to_string(),
+        source: "pin".to_owned(),
+    };
+    let mut response = Json(AuthSessionResponse {
+        authenticated: true,
+        email: Some(claims.email.clone()),
+        name: Some(claims.name.clone()),
+        role: Some(claims.role.clone()),
+        google_login_configured: config.google_login_is_configured(),
+        development_access_available: config.development_admin_token.is_some(),
+        local_login_available: false,
+    })
+    .into_response();
+    append_session_cookie(&mut response, config, &claims)?;
+    Ok(response)
+}
+
 pub fn session_from_headers(config: &AppConfig, headers: &HeaderMap) -> Option<AdminPrincipal> {
     let claims = claims_from_headers(config, headers)?;
     if claims.role != "admin" {
@@ -588,7 +681,14 @@ pub fn session_from_headers(config: &AppConfig, headers: &HeaderMap) -> Option<A
     // local-dev token must never pass as a Google token in production.
     // Tokens minted before the source claim existed are rejected in
     // production; the next login re-issues a sourced token.
-    if config.environment.is_production() && claims.source != "google" {
+    // Login PIN (2026-10-28) adalah sumber kedua yang sah di production:
+    // "google" ATAU "pin" — "local" tetap ditolak di production.
+    // Keanggotaan allowlist diperiksa di bawah untuk kedua sumber,
+    // jadi token PIN untuk email di luar allowlist tetap ditolak.
+    if config.environment.is_production()
+        && claims.source != "google"
+        && claims.source != "pin"
+    {
         return None;
     }
     let is_local_admin = config.environment.is_development()
@@ -603,6 +703,8 @@ pub fn session_from_headers(config: &AppConfig, headers: &HeaderMap) -> Option<A
         name: claims.name,
         source: if is_local_admin {
             "local_session"
+        } else if claims.source == "pin" {
+            "pin_session"
         } else {
             "google_session"
         },
@@ -645,7 +747,7 @@ pub fn require_admin(config: &AppConfig, headers: &HeaderMap) -> Result<AdminPri
 
     session_from_headers(config, headers).ok_or_else(|| {
         AppError::unauthorized(
-            "Sesi administrator tidak ditemukan. Masuk dengan Google atau gunakan token pengembangan.",
+            "Sesi administrator tidak ditemukan. Masuk dengan Google atau PIN, atau gunakan token pengembangan.",
         )
     })
 }
@@ -655,9 +757,9 @@ pub fn auth_session_response(config: &AppConfig, headers: &HeaderMap) -> AuthSes
     // this decoded signature + expiry only, so a pre-source admin token
     // or a local-dev token looked "logged in" here while every admin
     // action rejected it. session_from_headers enforces role == "admin",
-    // source == "google" in production, and allowlist membership (or the
-    // development local admin) — the same gate require_admin uses — so
-    // a token it rejects is never again reported as a valid login.
+    // source == "google" or "pin" in production, and allowlist membership
+    // (or the development local admin) — the same gate require_admin uses
+    // — so a token it rejects is never again reported as a valid login.
     // Response shape is unchanged; role is "admin" because the gate
     // already enforced it.
     if let Some(principal) = session_from_headers(config, headers) {
@@ -1282,6 +1384,48 @@ mod oauth_binding_and_session_gate_tests {
         let token = mint_admin_token("admin-tes@example.test", "admin", "local");
         let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
         assert!(!response.authenticated);
+    }
+
+    // Login PIN (2026-10-28): "pin" adalah sumber kedua yang sah di
+    // production; "local" tetap ditolak (tes di atas).
+    #[test]
+    fn pin_source_token_reports_authenticated_in_production() {
+        let config = test_config(
+            crate::config::Environment::Production,
+            vec!["admin-tes@example.test"],
+        );
+        let token = mint_admin_token("admin-tes@example.test", "admin", "pin");
+        let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
+        assert!(response.authenticated);
+        assert_eq!(response.email.as_deref(), Some("admin-tes@example.test"));
+        let principal =
+            session_from_headers(&config, &headers_with_admin_cookie(&token)).unwrap();
+        assert_eq!(principal.source, "pin_session");
+    }
+
+    #[test]
+    fn pin_login_throttle_locks_after_five_failures_and_clears() {
+        // Kunci unik per run: tabel throttle adalah static proses yang
+        // dipakai bersama semua tes di biner ini.
+        let key = format!(
+            "throttle-tes@example.test|203.0.113.{}",
+            uuid::Uuid::now_v7().to_string()
+        );
+        assert!(!pin_login_throttled(&key));
+        for _ in 0..5 {
+            record_pin_login_failure(&key);
+        }
+        assert!(pin_login_throttled(&key));
+        clear_pin_login_failures(&key);
+        assert!(!pin_login_throttled(&key));
+    }
+
+    #[test]
+    fn admin_email_normalization_trims_and_lowercases() {
+        assert_eq!(
+            normalize_admin_email("  Admin-Tes@Example.TEST "),
+            "admin-tes@example.test"
+        );
     }
 
     #[test]

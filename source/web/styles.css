@@ -1346,6 +1346,13 @@ td.empty-state { display: table-cell; }
 .development-login label { margin-bottom: 0; }
 .development-login label > input { margin-top: 6px; }
 .auth-footnote { margin-top: 16px; color: var(--muted); font-size: 12px; line-height: 1.6; text-align: center; }
+/* Banner peringatan PIN default: persisten (bukan popup) sampai PIN
+   diganti dari panel. Berada di dalam shell sehingga gerbang login
+   (body:not(.auth-ok)) menyembunyikannya sebelum sesi terverifikasi. */
+.pin-default-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 0 0 18px; padding: 12px 16px; border: 1px solid #f59e0b; border-radius: 12px; background: #fffbeb; color: #92400e; font-size: 13.5px; line-height: 1.5; }
+.pin-default-banner[hidden] { display: none; }
+.pin-default-banner strong { color: #78350f; }
+.pin-default-banner button { margin-left: auto; }
 .secret-modal { text-align: center; }
 .secret-icon {
   display: grid;

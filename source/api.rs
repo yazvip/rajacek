@@ -101,6 +101,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/admin/banks", get(list_bank_codes_admin))
         .route("/v1/auth/session", get(auth_session))
         .route("/v1/auth/local/login", post(local_login))
+        .route("/v1/auth/admin/pin-login", post(pin_login))
+        .route("/v1/admin/pin-status", get(pin_status))
+        .route("/v1/admin/pin-change", post(pin_change))
         .route("/v1/auth/google/start", get(google_login_start))
         .route("/v1/auth/google/callback", get(google_login_callback))
         .route("/v1/auth/logout", post(logout))
@@ -315,7 +318,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/blog", get(crate::blog::blog_list))
         .route("/blog/", get(crate::blog::blog_list))
         .route("/blog/:slug", get(crate::blog::blog_article))
-        .route_service("/admin", ServeFile::new("web/index.html"))
+        .route_service("/jawatengah123", ServeFile::new("web/index.html"))
         .fallback(fallback_handler)
         .layer(
             ServiceBuilder::new()
@@ -1438,6 +1441,149 @@ async fn local_login(
     }
 }
 
+/// Login administrator dengan email + PIN (2026-10-28). Jalur kedua
+/// di samping Google OAuth; panel tetap memakai cookie sesi yang sama.
+/// Keamanan yang ditegakkan di sini (bukan di panel):
+/// - Email dinormalisasi dan HARUS anggota `ADMIN_GOOGLE_EMAILS`
+///   (allowlist yang sama dengan Google).
+/// - Satu pesan generik "Email atau PIN salah" untuk SEMUA kegagalan
+///   (email tak dikenal, PIN salah, baris belum di-seed): tidak ada
+///   pembedaan yang bisa dipakai enumerasi.
+/// - Throttle gabungan (email + IP): 5 gagal dalam 15 menit -> 429.
+/// - PIN tidak pernah ditulis ke log; audit hanya membawa email.
+/// - Field hilang/kosong -> 400 (bukan 422): field dideklarasi Option
+///   dan divalidasi manual.
+#[derive(Deserialize)]
+struct PinLoginRequest {
+    email: Option<String>,
+    pin: Option<String>,
+}
+
+async fn pin_login(
+    State(state): State<AppState>,
+    ConnectInfo(address): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(input): Json<PinLoginRequest>,
+) -> Result<Response, AppError> {
+    let email = input
+        .email
+        .as_deref()
+        .map(auth::normalize_admin_email)
+        .unwrap_or_default();
+    let pin = input.pin.as_deref().unwrap_or("");
+    if email.is_empty() || pin.is_empty() {
+        return Err(AppError::bad_request("Email dan PIN wajib diisi"));
+    }
+    let ip = effective_client_ip(&headers, address.ip()).to_string();
+    let key = auth::pin_login_throttle_key(&email, &ip);
+    if auth::pin_login_throttled(&key) {
+        return Err(AppError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate_limited",
+            "Terlalu banyak percobaan, coba lagi nanti",
+        ));
+    }
+    let row = state.store.get_admin_pin().await;
+    let allowed = state.config.admin_google_emails.contains(&email);
+    let verified = match &row {
+        Some(row) => crate::store::verify_secret(pin, &row.pin_hash),
+        None => false,
+    };
+    if !allowed || !verified {
+        auth::record_pin_login_failure(&key);
+        record_admin_activity(
+            &state,
+            &audit_principal(&email),
+            "Login PIN administrator gagal",
+            "Percobaan login PIN gagal.".to_owned(),
+        )
+        .await;
+        return Err(AppError::unauthorized("Email atau PIN salah"));
+    }
+    auth::clear_pin_login_failures(&key);
+    let response = auth::mint_pin_session_response(&state.config, &email)?;
+    record_admin_activity(
+        &state,
+        &audit_principal(&email),
+        "Login PIN administrator berhasil",
+        format!("Login PIN admin {email} berhasil."),
+    )
+    .await;
+    Ok(response)
+}
+
+/// Status PIN administrator untuk panel (banner "PIN masih default").
+/// Hanya sesi admin (Viewer+) yang boleh membaca; tidak ada hash atau
+/// PIN yang pernah keluar lewat endpoint ini.
+#[derive(Serialize)]
+struct PinStatusResponse {
+    pin_configured: bool,
+    pin_default: bool,
+}
+
+async fn pin_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PinStatusResponse>, AppError> {
+    require_admin_role(&state, &headers, Role::Viewer).await?;
+    let row = state.store.get_admin_pin().await;
+    Ok(Json(PinStatusResponse {
+        pin_configured: row.is_some(),
+        pin_default: row.map(|row| row.is_default).unwrap_or(false),
+    }))
+}
+
+/// Ganti PIN administrator (Manager+). PIN lama diverifikasi dulu;
+/// PIN baru minimal 8 karakter. Setelah ganti, `is_default` menjadi
+/// false sehingga banner peringatan hilang. Sesi PIN yang sudah terbit
+/// TIDAK dicabut (tidak ada registri sesi); yang langsung berhenti
+/// adalah login baru dengan PIN lama — sesi lama hanya kedaluwarsa
+/// pada TTL 8 jam.
+#[derive(Deserialize)]
+struct PinChangeRequest {
+    current_pin: Option<String>,
+    new_pin: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PinChangeResponse {
+    changed: bool,
+}
+
+async fn pin_change(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<PinChangeRequest>,
+) -> Result<Json<PinChangeResponse>, AppError> {
+    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let current_pin = input.current_pin.as_deref().unwrap_or("");
+    let new_pin = input.new_pin.as_deref().unwrap_or("");
+    if current_pin.is_empty() || new_pin.is_empty() {
+        return Err(AppError::bad_request("PIN lama dan PIN baru wajib diisi"));
+    }
+    if new_pin.len() < 8 || new_pin.len() > 128 {
+        return Err(AppError::bad_request("PIN baru minimal 8 karakter"));
+    }
+    let row = state.store.get_admin_pin().await;
+    let current_ok = match &row {
+        Some(row) => crate::store::verify_secret(current_pin, &row.pin_hash),
+        None => false,
+    };
+    if !current_ok {
+        return Err(AppError::bad_request("PIN lama salah"));
+    }
+    let new_hash = crate::store::hash_secret(new_pin)?;
+    state.store.set_admin_pin(&new_hash, false).await?;
+    record_admin_activity(
+        &state,
+        &principal,
+        "PIN administrator diubah",
+        "PIN administrator diubah.".to_owned(),
+    )
+    .await;
+    Ok(Json(PinChangeResponse { changed: true }))
+}
+
 async fn google_login_start(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1475,10 +1621,10 @@ async fn google_login_callback(
     // redirect). On failure the email is not reliably known, so the
     // actor is "unknown" rather than a guess.
     // Audit login 2026-10-27 BESAR-2: a callback is a top-level
-    // browser navigation, so a failure must redirect to /admin with a
-    // safe `auth` code (see auth::oauth_failure_redirect) instead of
-    // rendering raw JSON. The audit record above keeps the detailed
-    // reason server-side; the URL carries only the safe code.
+    // browser navigation, so a failure must redirect to /jawatengah123
+    // with a safe `auth` code (see auth::oauth_failure_redirect)
+    // instead of rendering raw JSON. The audit record above keeps the
+    // detailed reason server-side; the URL carries only the safe code.
     let consent_denied = query.error.as_deref() == Some("access_denied");
     match auth::google_login_callback(
         state.config.clone(),
@@ -1507,7 +1653,7 @@ async fn google_login_callback(
                 "Percobaan login Google admin gagal (akun ditolak, state tidak valid, atau Google menolak kode).".to_owned(),
             )
             .await;
-            Ok(auth::oauth_failure_redirect("/admin", &error, consent_denied))
+            Ok(auth::oauth_failure_redirect("/jawatengah123", &error, consent_denied))
         }
     }
 }

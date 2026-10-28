@@ -291,6 +291,14 @@ struct ValidationStats {
 /// repository: generated external IDs, immutable API-key hashes, and append-only activity
 /// feed updates. The production repository can replace this implementation without changing
 /// the HTTP contract.
+/// Satu baris PIN login administrator (migrasi 0038, tabel
+/// `admin_pin_settings`, id=1). Lihat `get_admin_pin`/`set_admin_pin`.
+#[derive(Debug, Clone)]
+pub struct AdminPinRow {
+    pub pin_hash: String,
+    pub is_default: bool,
+}
+
 pub struct AdminStore {
     data: RwLock<StoreData>,
     default_rate_limit_per_minute: std::sync::atomic::AtomicU32,
@@ -4747,6 +4755,43 @@ impl AdminStore {
         }
     }
 
+    /// PIN login administrator (migrasi 0038, tabel `admin_pin_settings`,
+    /// satu baris id=1). Tanpa database (mode memory-only) PIN login
+    /// fail-closed: tidak ada baris, tidak ada login. Hash memakai format
+    /// yang sama dengan kunci API (`sha256$salt$digest`); baris dibuat
+    /// sekali saat deploy lewat SQL (hash TIDAK PERNAH ada di migrasi,
+    /// sumber, atau log).
+    pub async fn get_admin_pin(&self) -> Option<AdminPinRow> {
+        let pool = self.pool()?;
+        let row = sqlx::query_as::<_, (String, i64)>(
+            "SELECT pin_hash, CAST(is_default AS SIGNED) FROM admin_pin_settings WHERE id = 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        .ok()??;
+        Some(AdminPinRow {
+            pin_hash: row.0,
+            is_default: row.1 != 0,
+        })
+    }
+
+    pub async fn set_admin_pin(&self, pin_hash: &str, is_default: bool) -> Result<(), AppError> {
+        let Some(pool) = self.pool() else {
+            return Err(AppError::service_unavailable("Database tidak tersedia"));
+        };
+        sqlx::query(
+            "INSERT INTO admin_pin_settings (id, pin_hash, is_default, updated_at) VALUES (1, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE pin_hash = VALUES(pin_hash), is_default = VALUES(is_default), updated_at = VALUES(updated_at)",
+        )
+        .bind(pin_hash)
+        .bind(is_default as i64)
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .map_err(|_| AppError::internal("Gagal menyimpan PIN administrator"))?;
+        Ok(())
+    }
+
     /// Paginated admin-audit read for GET /v1/admin/activity (B12).
     /// With a database, rows come from `admin_audit_log` (newest first)
     /// with exact `action` match and substring `actor` match. Without
@@ -5214,7 +5259,7 @@ fn generate_key_prefix() -> String {
     format!("rv_live_{}", hex::encode(bytes))
 }
 
-fn hash_secret(secret: &str) -> Result<String, AppError> {
+pub(crate) fn hash_secret(secret: &str) -> Result<String, AppError> {
     let mut salt = [0u8; 16];
     rand::thread_rng().fill_bytes(&mut salt);
     let digest = secret_digest(&salt, secret);
@@ -5232,7 +5277,7 @@ fn secret_digest(salt: &[u8], secret: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-fn verify_secret(secret: &str, stored: &str) -> bool {
+pub(crate) fn verify_secret(secret: &str, stored: &str) -> bool {
     let mut parts = stored.split('$');
     let (Some("sha256"), Some(salt_hex), Some(digest_hex), None) =
         (parts.next(), parts.next(), parts.next(), parts.next())

@@ -88,32 +88,95 @@ fn clear_local_login_failures(email: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// OAuth start throttling (per client IP, in-memory; audit flow K18)
+// PIN login throttling (per email + IP, in-memory, prune-on-write).
+// Bentuknya sama dengan throttle login lokal (A6), hanya anggarannya
+// lebih ketat karena PIN jauh lebih pendek dari password: 5 gagal
+// dalam 15 menit mengunci kunci (email, IP) itu; sukses menghapus
+// hitungan. Kunci gabungan (bukan per-email saja) supaya satu alamat
+// yang ditebak dari banyak IP tidak mengunci pemilik sahnya, dan
+// satu IP yang menebak banyak alamat tidak mengunci semuanya.
+// Kegagalan lock (mutex terkunci) fail-open seperti throttle lain.
+// ---------------------------------------------------------------------------
+const PIN_LOGIN_ATTEMPT_LIMIT: u32 = 5;
+const PIN_LOGIN_LOCK_WINDOW: Duration = Duration::from_secs(900);
+
+fn pin_login_attempt_table() -> &'static Mutex<HashMap<String, (u32, Instant)>> {
+    static TABLE: OnceLock<Mutex<HashMap<String, (u32, Instant)>>> = OnceLock::new();
+    TABLE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Kunci throttle PIN: email ternormalisasi + IP klien.
+pub(crate) fn pin_login_throttle_key(email: &str, ip: &str) -> String {
+    format!("{}|{}", normalize_admin_email(email), ip)
+}
+
+pub(crate) fn pin_login_throttled(key: &str) -> bool {
+    let Ok(table) = pin_login_attempt_table().try_lock() else {
+        return false;
+    };
+    matches!(table.get(key), Some((count, started))
+        if started.elapsed() <= PIN_LOGIN_LOCK_WINDOW && *count >= PIN_LOGIN_ATTEMPT_LIMIT)
+}
+
+pub(crate) fn record_pin_login_failure(key: &str) {
+    let Ok(mut table) = pin_login_attempt_table().try_lock() else {
+        return;
+    };
+    table.retain(|_, (_, started)| started.elapsed() <= PIN_LOGIN_LOCK_WINDOW);
+    let entry = table.entry(key.to_owned()).or_insert((0, Instant::now()));
+    if entry.1.elapsed() > PIN_LOGIN_LOCK_WINDOW {
+        *entry = (0, Instant::now());
+    }
+    entry.0 += 1;
+}
+
+pub(crate) fn clear_pin_login_failures(key: &str) {
+    if let Ok(mut table) = pin_login_attempt_table().try_lock() {
+        table.remove(key);
+    }
+}
+
+/// Normalisasi email admin: trim + lowercase ASCII, sama seperti jalur
+/// Google dan login lokal — allowlist disimpan lowercase.
+pub(crate) fn normalize_admin_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// OAuth start throttling (per client IP + purpose, in-memory; audit
+// flow K18, split per purpose by audit login 2026-10-27 KECIL-7a)
 // ---------------------------------------------------------------------------
 // Same shape as the login throttles: a light limit (30 starts / 5 min
 // per IP) so a flood of unauthenticated starts cannot evict legitimate
 // in-flight states from the 1000-entry cap. The cap + 10-minute TTL in
 // OAuthStateStore::issue are unchanged. Lock contention fails open
-// (returns allowed), matching the other throttles.
+// (returns allowed), matching the other throttles. The budget is keyed
+// by (IP, purpose): a flood in one flow (e.g. member) must not spend
+// the other flow's budget for the same shared-NAT IP.
 
 const OAUTH_START_LIMIT: u32 = 30;
 const OAUTH_START_WINDOW: Duration = Duration::from_secs(300);
 
-fn oauth_start_table() -> &'static std::sync::Mutex<HashMap<String, (u32, Instant)>> {
-    static TABLE: OnceLock<std::sync::Mutex<HashMap<String, (u32, Instant)>>> = OnceLock::new();
+fn oauth_start_table(
+) -> &'static std::sync::Mutex<HashMap<(String, OAuthPurpose), (u32, Instant)>> {
+    static TABLE: OnceLock<
+        std::sync::Mutex<HashMap<(String, OAuthPurpose), (u32, Instant)>>,
+    > = OnceLock::new();
     TABLE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-/// Record one OAuth start attempt for `ip`. Returns `true` when the
-/// attempt is within the limit (and counts it); `false` when throttled
-/// (the attempt is not counted further, so the count saturates at the
-/// limit until the window rolls over).
-pub(crate) fn oauth_start_allowed(ip: &str) -> bool {
+/// Record one OAuth start attempt for (`ip`, `purpose`). Returns `true`
+/// when the attempt is within the limit (and counts it); `false` when
+/// throttled (the attempt is not counted further, so the count
+/// saturates at the limit until the window rolls over).
+pub(crate) fn oauth_start_allowed(ip: &str, purpose: OAuthPurpose) -> bool {
     let Ok(mut table) = oauth_start_table().lock() else {
         return true;
     };
     table.retain(|_, (_, started)| started.elapsed() <= OAUTH_START_WINDOW);
-    let entry = table.entry(ip.to_owned()).or_insert((0, Instant::now()));
+    let entry = table
+        .entry((ip.to_owned(), purpose))
+        .or_insert((0, Instant::now()));
     if entry.1.elapsed() > OAUTH_START_WINDOW {
         *entry = (0, Instant::now());
     }
@@ -125,8 +188,10 @@ pub(crate) fn oauth_start_allowed(ip: &str) -> bool {
 }
 
 /// Which sign-in flow an OAuth state belongs to. The callback for one flow
-/// must never accept a state issued for the other.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// must never accept a state issued for the other. Also part of the
+/// OAuth-start throttle key (audit login 2026-10-27 KECIL-7a), hence
+/// Hash.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum OAuthPurpose {
     Admin,
     Member,
@@ -139,8 +204,22 @@ struct PendingGoogleState {
     purpose: OAuthPurpose,
 }
 
-/// Temporary server-side OAuth state holder. For multi-replica production deployment this
-/// interface should be backed by Redis, while preserving the same single-use/expiry behavior.
+/// Temporary server-side OAuth state holder (in-memory).
+///
+/// Audit login 2026-10-27 KECIL-7b — accepted limitation, decided
+/// deliberately, NOT an oversight: moving this store to Redis was
+/// evaluated and rejected for now. The store is a concrete in-memory
+/// type, not an abstracted backend (no trait, no injected client), so a
+/// Redis move would rewrite issue/consume plus the AppState wiring in
+/// main.rs and would have to settle fail-open vs fail-closed semantics
+/// when Redis is down (fail-closed breaks every login while Redis is
+/// down; fail-open weakens the CSRF binding the audit declared clean).
+/// The production API is a single process, so the only cost of the
+/// in-memory store is that an API restart drops in-flight states:
+/// states live at most 10 minutes (OAUTH_STATE_TTL) and the user simply
+/// starts login again. That is acceptable behaviour, documented here so
+/// a future multi-replica move reopens this decision with its eyes
+/// open instead of rediscovering it.
 pub struct OAuthStateStore {
     states: Mutex<HashMap<String, PendingGoogleState>>,
 }
@@ -375,6 +454,53 @@ pub fn is_local_admin_email(email: &str) -> bool {
     email.trim().to_ascii_lowercase() == LOCAL_ADMIN_EMAIL
 }
 
+/// Audit login 2026-10-27 BESAR-2 — callback-failure contract shared
+/// by the admin and member callbacks (do not change one side alone).
+/// A callback is a top-level browser navigation, so a failure must
+/// never render as raw JSON: it redirects to the login page with one
+/// safe `auth` code and no internal detail in the URL:
+/// - `denied`: the user refused consent (`error=access_denied`).
+/// - `expired`: the state is invalid, expired, missing, or bound to a
+///   different browser/flow (all state problems share one code).
+/// - `unavailable`: Google could not be reached, or login is not
+///   configured (both surface as 503 from the callback path).
+/// - `failed`: everything else (non-allowlist account, unverified
+///   email, disabled member, bad code, database/internal errors).
+/// Only `access_denied` is classified from the query itself — every
+/// other Google error value falls through to `failed`, never to a
+/// distinct code, so no provider detail leaks into the URL.
+pub(crate) fn oauth_callback_error_code(
+    error: &AppError,
+    consent_denied: bool,
+) -> &'static str {
+    if consent_denied {
+        return "denied";
+    }
+    if error.status == StatusCode::SERVICE_UNAVAILABLE {
+        return "unavailable";
+    }
+    if error.message.contains("State login") {
+        return "expired";
+    }
+    "failed"
+}
+
+/// Build the BESAR-2 failure redirect for an OAuth callback. The
+/// target is always the login page itself; the error code is the only
+/// query value, so nothing internal (messages, emails, provider text)
+/// ever reaches the URL, the access log, or browser history.
+pub(crate) fn oauth_failure_redirect(
+    login_path: &str,
+    error: &AppError,
+    consent_denied: bool,
+) -> Response {
+    Redirect::to(&format!(
+        "{login_path}?auth={}",
+        oauth_callback_error_code(error, consent_denied)
+    ))
+    .into_response()
+}
+
 pub async fn google_login_callback(
     config: Arc<AppConfig>,
     states: Arc<OAuthStateStore>,
@@ -416,7 +542,7 @@ pub async fn google_login_callback(
         source: "google".to_owned(),
         iat: now.timestamp() as usize,
     };
-    let mut response = Redirect::to("/admin").into_response();
+    let mut response = Redirect::to("/jawatengah123").into_response();
     append_session_cookie(&mut response, &config, &claims)?;
     // B16: the binding served its purpose once the session is minted;
     // clear it so no stale binding lingers for the next login.
@@ -508,6 +634,44 @@ pub fn local_login_response(
     Ok(response)
 }
 
+/// Terbitkan sesi administrator dari login PIN (2026-10-28).
+/// Pemanggil (handler) SUDAH memverifikasi: email anggota allowlist
+/// `ADMIN_GOOGLE_EMAILS`, hash PIN cocok, dan throttle lolos. Klaim
+/// memakai source "pin" (bukan "google") agar jejak audit membedakan
+/// kedua jalur; cookie diset lewat `append_session_cookie` yang sama
+/// persis dengan Google — flags HttpOnly/Secure/SameSite/Domain/TTL
+/// identik. Sesi PIN TIDAK dicabut otomatis saat PIN diganti (tidak
+/// ada registri sesi; sesi lama hanya kedaluwarsa pada TTL 8 jam) —
+/// yang langsung berhenti adalah login BARU dengan PIN lama.
+pub fn mint_pin_session_response(
+    config: &AppConfig,
+    email: &str,
+) -> Result<Response, AppError> {
+    let now = chrono::Utc::now();
+    let claims = SessionClaims {
+        sub: format!("pin:{email}"),
+        email: email.to_owned(),
+        name: "Administrator".to_owned(),
+        role: "admin".to_owned(),
+        exp: (now + chrono::Duration::seconds(SESSION_TTL_SECONDS)).timestamp() as usize,
+        iat: now.timestamp() as usize,
+        jti: uuid::Uuid::now_v7().to_string(),
+        source: "pin".to_owned(),
+    };
+    let mut response = Json(AuthSessionResponse {
+        authenticated: true,
+        email: Some(claims.email.clone()),
+        name: Some(claims.name.clone()),
+        role: Some(claims.role.clone()),
+        google_login_configured: config.google_login_is_configured(),
+        development_access_available: config.development_admin_token.is_some(),
+        local_login_available: false,
+    })
+    .into_response();
+    append_session_cookie(&mut response, config, &claims)?;
+    Ok(response)
+}
+
 pub fn session_from_headers(config: &AppConfig, headers: &HeaderMap) -> Option<AdminPrincipal> {
     let claims = claims_from_headers(config, headers)?;
     if claims.role != "admin" {
@@ -517,7 +681,14 @@ pub fn session_from_headers(config: &AppConfig, headers: &HeaderMap) -> Option<A
     // local-dev token must never pass as a Google token in production.
     // Tokens minted before the source claim existed are rejected in
     // production; the next login re-issues a sourced token.
-    if config.environment.is_production() && claims.source != "google" {
+    // Login PIN (2026-10-28) adalah sumber kedua yang sah di production:
+    // "google" ATAU "pin" — "local" tetap ditolak di production.
+    // Keanggotaan allowlist diperiksa di bawah untuk kedua sumber,
+    // jadi token PIN untuk email di luar allowlist tetap ditolak.
+    if config.environment.is_production()
+        && claims.source != "google"
+        && claims.source != "pin"
+    {
         return None;
     }
     let is_local_admin = config.environment.is_development()
@@ -532,6 +703,8 @@ pub fn session_from_headers(config: &AppConfig, headers: &HeaderMap) -> Option<A
         name: claims.name,
         source: if is_local_admin {
             "local_session"
+        } else if claims.source == "pin" {
+            "pin_session"
         } else {
             "google_session"
         },
@@ -574,7 +747,7 @@ pub fn require_admin(config: &AppConfig, headers: &HeaderMap) -> Result<AdminPri
 
     session_from_headers(config, headers).ok_or_else(|| {
         AppError::unauthorized(
-            "Sesi administrator tidak ditemukan. Masuk dengan Google atau gunakan token pengembangan.",
+            "Sesi administrator tidak ditemukan. Masuk dengan Google atau PIN, atau gunakan token pengembangan.",
         )
     })
 }
@@ -584,9 +757,9 @@ pub fn auth_session_response(config: &AppConfig, headers: &HeaderMap) -> AuthSes
     // this decoded signature + expiry only, so a pre-source admin token
     // or a local-dev token looked "logged in" here while every admin
     // action rejected it. session_from_headers enforces role == "admin",
-    // source == "google" in production, and allowlist membership (or the
-    // development local admin) — the same gate require_admin uses — so
-    // a token it rejects is never again reported as a valid login.
+    // source == "google" or "pin" in production, and allowlist membership
+    // (or the development local admin) — the same gate require_admin uses
+    // — so a token it rejects is never again reported as a valid login.
     // Response shape is unchanged; role is "admin" because the gate
     // already enforced it.
     if let Some(principal) = session_from_headers(config, headers) {
@@ -843,7 +1016,7 @@ pub(crate) struct GoogleUserInfo {
 
 #[cfg(test)]
 mod oauth_start_throttle_tests {
-    use super::{oauth_start_allowed, OAUTH_START_LIMIT};
+    use super::{oauth_start_allowed, OAuthPurpose, OAUTH_START_LIMIT};
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static TEST_IP_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -857,9 +1030,9 @@ mod oauth_start_throttle_tests {
     fn first_attempts_allowed_then_throttled() {
         let ip = fresh_test_ip();
         for _ in 0..OAUTH_START_LIMIT {
-            assert!(oauth_start_allowed(&ip));
+            assert!(oauth_start_allowed(&ip, OAuthPurpose::Admin));
         }
-        assert!(!oauth_start_allowed(&ip));
+        assert!(!oauth_start_allowed(&ip, OAuthPurpose::Admin));
     }
 
     #[test]
@@ -867,10 +1040,131 @@ mod oauth_start_throttle_tests {
         let first = fresh_test_ip();
         let second = fresh_test_ip();
         for _ in 0..OAUTH_START_LIMIT {
-            assert!(oauth_start_allowed(&first));
+            assert!(oauth_start_allowed(&first, OAuthPurpose::Admin));
         }
-        assert!(!oauth_start_allowed(&first));
-        assert!(oauth_start_allowed(&second));
+        assert!(!oauth_start_allowed(&first, OAuthPurpose::Admin));
+        assert!(oauth_start_allowed(&second, OAuthPurpose::Admin));
+    }
+
+    // Audit login 2026-10-27 KECIL-7a: the same IP has a separate
+    // budget per purpose — exhausting member starts must not throttle
+    // admin starts for that IP (shared-NAT offices).
+    #[test]
+    fn same_ip_has_independent_budgets_per_purpose() {
+        let ip = fresh_test_ip();
+        for _ in 0..OAUTH_START_LIMIT {
+            assert!(oauth_start_allowed(&ip, OAuthPurpose::Member));
+        }
+        assert!(!oauth_start_allowed(&ip, OAuthPurpose::Member));
+        assert!(oauth_start_allowed(&ip, OAuthPurpose::Admin));
+    }
+}
+
+#[cfg(test)]
+mod oauth_callback_redirect_tests {
+    use super::{oauth_callback_error_code, oauth_failure_redirect, OAuthPurpose};
+    use crate::error::AppError;
+    use axum::http::{header, StatusCode};
+
+    fn location_of(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get(header::LOCATION)
+            .expect("redirect membawa Location")
+            .to_str()
+            .expect("Location valid")
+            .to_owned()
+    }
+
+    #[test]
+    fn consent_denied_maps_to_denied_regardless_of_error() {
+        let error = AppError::unauthorized("Login Google dibatalkan atau ditolak");
+        assert_eq!(oauth_callback_error_code(&error, true), "denied");
+        assert_eq!(
+            location_of(&oauth_failure_redirect("/member", &error, true)),
+            "/member?auth=denied"
+        );
+    }
+
+    #[test]
+    fn service_unavailable_maps_to_unavailable() {
+        // Covers both Google-down (token/userinfo fetch) and login-not-
+        // configured: both surface as 503 on the callback path.
+        let error = AppError::service_unavailable("Login Google belum dikonfigurasi");
+        assert_eq!(oauth_callback_error_code(&error, false), "unavailable");
+        assert_eq!(
+            location_of(&oauth_failure_redirect("/admin", &error, false)),
+            "/admin?auth=unavailable"
+        );
+    }
+
+    #[test]
+    fn state_problems_map_to_expired() {
+        for message in [
+            "State login tidak valid atau sudah kedaluwarsa",
+            "State login tidak cocok dengan browser peminta",
+            "State login tidak cocok dengan alur masuk ini",
+            "State login Google tidak ditemukan",
+        ] {
+            let error = AppError::unauthorized(message);
+            assert_eq!(
+                oauth_callback_error_code(&error, false),
+                "expired",
+                "pesan: {message}"
+            );
+        }
+        assert_eq!(
+            location_of(&oauth_failure_redirect(
+                "/member",
+                &AppError::unauthorized("State login tidak valid atau sudah kedaluwarsa"),
+                false
+            )),
+            "/member?auth=expired"
+        );
+    }
+
+    #[test]
+    fn other_failures_map_to_failed_without_leaking_detail() {
+        let cases = [
+            AppError::forbidden("Akun Google ini tidak memiliki akses administrator"),
+            AppError::forbidden("Akun member dinonaktifkan. Hubungi admin untuk bantuan."),
+            AppError::unauthorized("Kode login Google tidak dapat diverifikasi"),
+            AppError::internal("Terjadi kesalahan internal. Silakan coba kembali."),
+            AppError::new(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "Terlalu banyak percobaan masuk.",
+            ),
+        ];
+        for error in &cases {
+            assert_eq!(
+                oauth_callback_error_code(error, false),
+                "failed",
+                "error: {error}"
+            );
+            let location = location_of(&oauth_failure_redirect("/admin", error, false));
+            assert_eq!(location, "/admin?auth=failed");
+            assert!(
+                !location.contains("administrator")
+                    && !location.contains("dinonaktifkan"),
+                "detail internal bocor ke URL: {location}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_access_denied_google_error_is_not_denied() {
+        // fetch_google_user collapses every Google error value into one
+        // message; only an explicit access_denied flag earns `denied`.
+        let error = AppError::unauthorized("Login Google dibatalkan atau ditolak");
+        assert_eq!(oauth_callback_error_code(&error, false), "failed");
+    }
+
+    #[test]
+    fn purposes_stay_distinct_for_throttle_keys() {
+        // Guard for the KECIL-7a key type: the two purposes must not
+        // collapse into one throttle bucket.
+        assert_ne!(OAuthPurpose::Admin, OAuthPurpose::Member);
     }
 }
 
@@ -1090,6 +1384,48 @@ mod oauth_binding_and_session_gate_tests {
         let token = mint_admin_token("admin-tes@example.test", "admin", "local");
         let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
         assert!(!response.authenticated);
+    }
+
+    // Login PIN (2026-10-28): "pin" adalah sumber kedua yang sah di
+    // production; "local" tetap ditolak (tes di atas).
+    #[test]
+    fn pin_source_token_reports_authenticated_in_production() {
+        let config = test_config(
+            crate::config::Environment::Production,
+            vec!["admin-tes@example.test"],
+        );
+        let token = mint_admin_token("admin-tes@example.test", "admin", "pin");
+        let response = auth_session_response(&config, &headers_with_admin_cookie(&token));
+        assert!(response.authenticated);
+        assert_eq!(response.email.as_deref(), Some("admin-tes@example.test"));
+        let principal =
+            session_from_headers(&config, &headers_with_admin_cookie(&token)).unwrap();
+        assert_eq!(principal.source, "pin_session");
+    }
+
+    #[test]
+    fn pin_login_throttle_locks_after_five_failures_and_clears() {
+        // Kunci unik per run: tabel throttle adalah static proses yang
+        // dipakai bersama semua tes di biner ini.
+        let key = format!(
+            "throttle-tes@example.test|203.0.113.{}",
+            uuid::Uuid::now_v7().to_string()
+        );
+        assert!(!pin_login_throttled(&key));
+        for _ in 0..5 {
+            record_pin_login_failure(&key);
+        }
+        assert!(pin_login_throttled(&key));
+        clear_pin_login_failures(&key);
+        assert!(!pin_login_throttled(&key));
+    }
+
+    #[test]
+    fn admin_email_normalization_trims_and_lowercases() {
+        assert_eq!(
+            normalize_admin_email("  Admin-Tes@Example.TEST "),
+            "admin-tes@example.test"
+        );
     }
 
     #[test]
