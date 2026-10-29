@@ -1887,6 +1887,16 @@ td.empty-state { display: table-cell; }
 .settings-tab.is-active { color: var(--brand-700); border-bottom-color: var(--brand); }
 .settings-tab:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
 
+/* --- Tab layanan provider (29 Okt 2026): pola yang sama dengan tab
+   Pengaturan. Bar tab nowrap + scroll horizontal di layar sempit;
+   panel disembunyikan via [hidden] yang sudah dijamin display:none
+   oleh aturan global di atas. */
+.provider-tabs { display: flex; gap: 4px; flex-wrap: nowrap; overflow-x: auto; margin-top: 20px; border-bottom: 1px solid var(--line); }
+.provider-tab { padding: 10px 14px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; flex: none; }
+.provider-tab:hover { color: var(--brand-700); }
+.provider-tab.is-active { color: var(--brand-700); border-bottom-color: var(--brand); }
+.provider-tab:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+
 /* --- Analitik: KPI tidak lagi menempel panel Periode; 3 kolom desktop --- */
 #view-analytics .metric-grid { gap: 20px; }
 @media (min-width: 1024px) {

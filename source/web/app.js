@@ -18,6 +18,9 @@
     // yang sudah dimuat (kombinasi dengan filter q/status/tanggal
     // server). Default: Semua.
     membersTab: "all",
+    // Tab layanan provider (29 Okt 2026): tab aktif disimpan di state
+    // agar tidak reset setiap renderProviders() di-render ulang.
+    providerTab: "bank_account",
     orders: [],
     ordersPage: { limit: 100, offset: 0 },
     adminActivity: { items: [], total: 0, limit: 50, offset: 0, action: "", actor: "", from: "", to: "", loaded: false },
@@ -868,8 +871,15 @@
         <div><span>Terakhir diubah</span><span>${formatDate(endpoint.updated_at)}</span></div>
       </div>
     </article>`).join("") : `<div class="ep-empty">Belum ada server untuk layanan ini.</div>`;
-      return `<div class="provider-group"><div class="provider-group-head"><div><h3>${productLabel(product)}</h3><span class="ep-group-meta">${servers.length} server · ${activeServers.length} aktif</span></div><button class="button button-secondary" type="button" data-action="add-provider" data-id="${product}">+ Tambah Server</button></div>${rows}</div>`;
+      return `<div class="provider-group" id="provider-tab-${product}" role="tabpanel" aria-labelledby="provider-tab-btn-${product}"${product === state.providerTab ? "" : " hidden"}><div class="provider-group-head"><div><h3>${productLabel(product)}</h3><span class="ep-group-meta">${servers.length} server · ${activeServers.length} aktif</span></div><button class="button button-secondary" type="button" data-action="add-provider" data-id="${product}">+ Tambah Server</button></div>${rows}</div>`;
     }).join("");
+    // Sinkronkan tombol tab statis dengan tab aktif di state — render
+    // ulang tidak boleh me-reset tab yang sedang dibuka admin.
+    document.querySelectorAll("[data-provider-tab]").forEach((button) => {
+      const active = button.dataset.providerTab === state.providerTab;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
     if ($("#tester-endpoint")) updateTesterFields();
   }
 
@@ -3309,6 +3319,23 @@
           other.setAttribute("aria-selected", active ? "true" : "false");
         });
         document.querySelectorAll("#view-settings [role=\"tabpanel\"]").forEach((panel) => {
+          panel.hidden = panel.id !== button.getAttribute("aria-controls");
+        });
+      });
+    });
+    // Tab layanan provider: hanya show/hide panel (panel tetap di DOM;
+    // aksi endpoint jalan via delegasi data-action di dokumen, jadi tab
+    // yang hidden tidak merusak aksi apa pun). Tab aktif disimpan di
+    // state agar renderProviders() berikutnya tidak me-reset-nya.
+    document.querySelectorAll("[data-provider-tab]").forEach((button) => {
+      button.addEventListener("click", () => {
+        state.providerTab = button.dataset.providerTab;
+        document.querySelectorAll("[data-provider-tab]").forEach((other) => {
+          const active = other === button;
+          other.classList.toggle("is-active", active);
+          other.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        document.querySelectorAll("#provider-grid [role=\"tabpanel\"]").forEach((panel) => {
           panel.hidden = panel.id !== button.getAttribute("aria-controls");
         });
       });
