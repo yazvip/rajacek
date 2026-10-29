@@ -3299,6 +3299,20 @@
         });
       });
     });
+    // Tab Pengaturan: hanya show/hide panel (tanpa reload data, tanpa
+    // mengubah nilai form — panel disembunyikan, bukan dihapus dari DOM).
+    document.querySelectorAll("[data-settings-tab]").forEach((button) => {
+      button.addEventListener("click", () => {
+        document.querySelectorAll("[data-settings-tab]").forEach((other) => {
+          const active = other === button;
+          other.classList.toggle("is-active", active);
+          other.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        document.querySelectorAll("#view-settings [role=\"tabpanel\"]").forEach((panel) => {
+          panel.hidden = panel.id !== button.getAttribute("aria-controls");
+        });
+      });
+    });
     $("#refresh-provider-health")?.addEventListener("click", async () => {
       try {
         await loadProviderHealth();
@@ -3476,6 +3490,9 @@
 
     $("#pin-default-banner-action").addEventListener("click", () => {
       setActiveView("settings");
+      // Banner PIN harus membuka tab PIN, bukan tab default — panel PIN
+      // tersembunyi di balik tab lain bila hanya view yang dialihkan.
+      $("#settings-tab-btn-pin")?.click();
     });
 
     $("#pin-change-form").addEventListener("submit", async (event) => {
