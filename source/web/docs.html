@@ -6,30 +6,30 @@
     <title>Dokumentasi API Member — Rajacek</title>
     <meta name="description" content="Dokumentasi API Rajacek untuk member: autentikasi API key, validasi rekening bank, e-wallet, WhatsApp, dan PLN, idempotensi, rate limit, kuota, dan kode error." />
     <meta name="robots" content="index,follow" />
-    <meta name="theme-color" content="#071225" />
+    <meta name="theme-color" content="#E1EDD4" />
     <link rel="canonical" href="https://www.rajacek.com/docs" />
     <link rel="icon" href="/favicon.png?v=20261028-1" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/landing.css?v=20261028-4" />
+    <link rel="stylesheet" href="/landing.css?v=20261030-1" />
     <style>
       /* Dokumentasi memakai token visual yang sama dengan landing page:
          Manrope/DM Mono, canvas terang, navy sebagai fondasi, dan biru
          sebagai aksen utama. Komponen docs hanya mengatur layout konten. */
-      :root { --ink:#10213d; --muted:#60718c; --line:#dce4ef; --canvas:#f6f8fc; --white:#fff; --navy:#071225; --blue:#2563eb; --cyan:#06b6d4; --mint:#10b981; --violet:#7c3aed; --radius:22px; --font:"Manrope", Aptos, "Segoe UI", sans-serif; --mono:"DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      :root { --ink:#10213d; --muted:#60718c; --line:#d3ddc9; --canvas:#E1EDD4; --white:#fff; --navy:#36397E; --blue:#4D52B4; --cyan:#4E9CE8; --mint:#70D6C5; --violet:#4D52B4; --radius:22px; --font:"Manrope", Aptos, "Segoe UI", sans-serif; --mono:"DM Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       body { background:var(--canvas); font-family:var(--font); color:var(--ink); }
       .site-header { min-height:82px; }
       .brand { color:var(--navy); font-size:22px; letter-spacing:-1.3px; }
       nav a { color:#51637d; } nav a:hover { color:var(--blue); } nav a[aria-current="page"] { color:var(--blue); }
       .nav-cta { color:var(--blue); background:transparent; padding:0; border-radius:0; }
-      .nav-cta:hover { background:transparent; color:#174fc4; }
+      .nav-cta:hover { background:transparent; color:#3D4199; }
       .docs-layout { display:grid; grid-template-columns:264px minmax(0,1fr); gap:2rem; max-width:1180px; margin:0 auto; padding:2.5rem 1.25rem 5rem; }
       .docs-toc { position:sticky; top:98px; align-self:start; background:var(--white); border:1px solid var(--line); border-radius:var(--radius); padding:1.15rem 1.25rem 1.3rem; box-shadow:0 1px 2px rgba(16,33,61,.05); font-size:.92rem; }
       .docs-toc p { font-size:.68rem; letter-spacing:.16em; text-transform:uppercase; font-weight:800; color:var(--blue); margin:1.05rem 0 .45rem; }
       .docs-toc p:first-child { margin-top:0; }
       .docs-toc a { display:block; color:#51637d; text-decoration:none; padding:.34rem .55rem; margin:0 -.55rem; border-radius:8px; }
-      .docs-toc a:hover { color:#174fc4; background:#eaf2ff; }
+      .docs-toc a:hover { color:#3D4199; background:#E1EDD4; }
       .docs-body { min-width:0; background:var(--white); border:1px solid var(--line); border-radius:var(--radius); padding:2.5rem 2.6rem 3rem; box-shadow:0 1px 2px rgba(16,33,61,.05); }
       .docs-body h1 { font-weight:800; font-size:2.4rem; line-height:1.15; letter-spacing:-.02em; color:var(--ink); margin:.35rem 0 .8rem; }
       .docs-body h2 { font-weight:800; font-size:1.5rem; line-height:1.25; letter-spacing:-.02em; color:var(--ink); margin:2.8rem 0 .7rem; padding-top:2rem; border-top:1px solid var(--line); }
@@ -39,11 +39,11 @@
       .docs-body a { color:var(--blue); font-weight:600; }
       .docs-body a:hover { text-decoration:underline; }
       .docs-body .eyebrow { color:var(--blue); }
-      .docs-body code { font-family:var(--mono); font-size:.86em; background:#eef4ff; color:#174fc4; padding:.08rem .35rem; border-radius:6px; }
-      .docs-body pre { background:var(--navy); color:#dce8fb; border:1px solid #1a3158; border-radius:14px; padding:1.2rem 1.3rem; overflow-x:auto; font-family:var(--mono); font-size:.85rem; line-height:1.65; margin:1rem 0 1.3rem; box-shadow:0 1px 2px rgba(16,33,61,.05); }
+      .docs-body code { font-family:var(--mono); font-size:.86em; background:#E1EDD4; color:#3D4199; padding:.08rem .35rem; border-radius:6px; }
+      .docs-body pre { background:var(--navy); color:#E1EDD4; border:1px solid #4D52B4; border-radius:14px; padding:1.2rem 1.3rem; overflow-x:auto; font-family:var(--mono); font-size:.85rem; line-height:1.65; margin:1rem 0 1.3rem; box-shadow:0 1px 2px rgba(16,33,61,.05); }
       .docs-body pre code { background:transparent; color:inherit; padding:0; font-size:inherit; border-radius:0; white-space:pre; }
       .docs-body pre::selection, .docs-body pre code::selection { background:var(--blue); color:#fff; }
-      .docs-body :not(pre) > code { color:#174fc4; }
+      .docs-body :not(pre) > code { color:#3D4199; }
       table { border-collapse:collapse; width:100%; margin:.9rem 0 1.3rem; font-size:.93rem; }
       th, td { border:0; border-bottom:1px solid var(--line); padding:.65rem .8rem; text-align:left; vertical-align:top; }
       th { background:transparent; color:var(--muted); font-size:.7rem; letter-spacing:.13em; text-transform:uppercase; border-bottom:2px solid var(--line); }
@@ -51,11 +51,11 @@
       .method.get { background:var(--mint); } .method.post { background:var(--blue); }
       .endpoint-path { font-family:var(--mono); font-weight:700; color:var(--ink); font-size:.92em; }
       .callout { background:#fffbeb; border:1px solid #fde68a; border-left:4px solid #f59e0b; border-radius:12px; padding:.95rem 1.15rem; margin:1.1rem 0; color:#92400e; }
-      .callout.info { background:#e7fdf7; border-color:#b8f1df; border-left-color:var(--mint); color:#087451; }
+      .callout.info { background:#E1EDD4; border-color:#CAE5BC; border-left-color:var(--mint); color:#087451; }
       .callout p { color:inherit; margin:0; }
       .docs-actions { display:flex; gap:.7rem; flex-wrap:wrap; margin:1.3rem 0; }
-      .docs-body .button-primary { background:var(--blue); box-shadow:0 12px 24px #2563eb38; color:#fff; }
-      .button-primary:hover { background:#174fc4; }
+      .docs-body .button-primary { background:var(--blue); box-shadow:0 12px 24px #4D52B438; color:#fff; }
+      .button-primary:hover { background:#3D4199; }
       .button-quiet { border-color:var(--line); color:#28415f; }
       .docs-body details { border-bottom:1px solid var(--line); padding:1.05rem 0; }
       .docs-body summary { cursor:pointer; font-weight:700; color:var(--ink); }
@@ -78,7 +78,7 @@
         .docs-mobilemenu p { font-size:.68rem; letter-spacing:.16em; text-transform:uppercase; font-weight:800; color:var(--blue); margin:.8rem 0 .3rem; }
         .docs-mobilemenu p:first-child { margin-top:.2rem; }
         .docs-mobilemenu a { display:block; color:#51637d; text-decoration:none; padding:.45rem .55rem; border-radius:8px; }
-        .docs-mobilemenu a:hover { color:#174fc4; background:#eaf2ff; }
+        .docs-mobilemenu a:hover { color:#3D4199; background:#E1EDD4; }
         .docs-layout { padding:1.2rem .9rem 3rem; }
         .docs-body { padding:1.5rem 1.1rem 2rem; }
         .docs-body h1 { font-size:1.7rem; }
@@ -86,6 +86,12 @@
         .docs-body pre { font-size:.8rem; padding:1rem; }
         .docs-body :not(pre) > code { overflow-wrap:anywhere; }
       }
+
+      /* Peacock Feather (2026-10-30): band header gradasi + chip GET tinta gelap di atas toska. */
+      .docs-hero { background:linear-gradient(180deg,#4D52B4,#4E9CE8,#70D6C5,#CAE5BC,#E1EDD4); border-radius:14px; padding:2rem 2.2rem; margin:0 0 1.5rem; }
+      .docs-hero .eyebrow { color:#E1EDD4; margin:0 0 .4rem; }
+      .docs-hero h1 { color:#fff; margin:0; }
+      .method.get { color:#10213d; }
 </style>
   </head>
   <body>
@@ -126,8 +132,10 @@
       </aside>
 
       <main class="docs-body" id="content">
-        <p class="eyebrow">Dokumentasi API · Member &amp; Publik</p>
-        <h1>Integrasi Rajacek dalam hitungan menit.</h1>
+        <div class="docs-hero">
+          <p class="eyebrow">Dokumentasi API · Member &amp; Publik</p>
+          <h1>Integrasi Rajacek dalam hitungan menit.</h1>
+        </div>
         <p>Rajacek mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, <strong>nomor WhatsApp</strong>, dan <strong>ID pelanggan PLN</strong> Indonesia lewat satu API. Semua contoh di halaman ini memakai domain asli <code>https://www.rajacek.com</code> dan bisa langsung disalin-tempel. Ganti saja kunci contoh <code>rc_CONTOH</code> dengan kunci Anda sendiri. Kunci baru diawali <code>rc_</code>. Kunci lama <code>rv_live_</code> tetap berlaku. Perlakukan kunci Anda seperti kata sandi. Jangan dibagikan ke siapa pun.</p>
         <div class="docs-actions">
           <a class="button button-primary" href="/openapi.json">Unduh OpenAPI JSON</a>

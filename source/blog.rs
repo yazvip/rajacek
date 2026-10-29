@@ -435,7 +435,7 @@ pub async fn blog_list(uri: Uri) -> Response {
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/landing.css?v=20261028-4" />
+    <link rel="stylesheet" href="/landing.css?v=20261030-1" />
     <style>
       .blog-list {{ width:min(1180px,calc(100% - 40px)); margin:auto; padding:48px 0 72px; }}
       .blog-list h1 {{ color:var(--navy); font-size:clamp(31px,4vw,46px); line-height:1.12; letter-spacing:-2px; margin-bottom:12px; }}
@@ -459,7 +459,10 @@ pub async fn blog_list(uri: Uri) -> Response {
         .blog-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; }}
       }}
       @media (max-width:480px) {{ .blog-list {{ width:calc(100% - 28px); padding:36px 0 56px; }} .blog-card-body {{ padding:18px; }} }}
-    </style>
+    
+      .blog-hero {{ background:linear-gradient(180deg,#4D52B4,#4E9CE8,#70D6C5,#CAE5BC,#E1EDD4); border-radius:28px; padding:36px 32px; margin-bottom:28px; }}
+      .blog-hero h1 {{ color:#fff; margin:0; }}
+</style>
   </head>
   <body>
     <a class="skip-link" href="#content">Lewati ke konten utama</a>
@@ -471,7 +474,9 @@ pub async fn blog_list(uri: Uri) -> Response {
     <main id="content">
       <div class="blog-list">
         <p class="eyebrow">Blog</p>
-        <h1>Blog Rajacek</h1>
+        <div class="blog-hero">
+          <h1>Blog Rajacek</h1>
+        </div>
         <p class="lede">Artikel tentang validasi rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN — pengertian, cara kerja, dan manfaatnya.</p>
         {items}
       </div>
