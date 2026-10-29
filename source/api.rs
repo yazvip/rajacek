@@ -5,7 +5,7 @@ use std::{
 };
 
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     extract::{ConnectInfo, Extension, Path, Query, Request, State},
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
@@ -136,10 +136,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/member/overview", get(crate::member::overview))
         .route("/v1/member/history", get(crate::member::history))
         .route("/v1/member/usage", get(crate::member::usage))
-        .route("/v1/validate/bank-account", post(validate_bank_account))
-        .route("/v1/validate/ewallet", post(validate_ewallet))
-        .route("/v1/validate/whatsapp", post(validate_whatsapp))
-        .route("/v1/validate/pln", post(validate_pln))
+        .route("/api/v3/validate", get(validate_v3_get).post(validate_v3_post))
+        .route("/v1/validate/bank-account", get(v1_validate_gone).post(v1_validate_gone))
+        .route("/v1/validate/ewallet", get(v1_validate_gone).post(v1_validate_gone))
+        .route("/v1/validate/whatsapp", get(v1_validate_gone).post(v1_validate_gone))
+        .route("/v1/validate/pln", get(v1_validate_gone).post(v1_validate_gone))
         .route("/v1/admin/overview", get(admin_overview))
         .route("/v1/admin/analytics", get(admin_analytics))
         .route("/v1/admin/providers/health", get(admin_providers_health))
@@ -1724,48 +1725,170 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     response
 }
 
-async fn validate_bank_account(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    ConnectInfo(address): ConnectInfo<SocketAddr>,
-    Extension(RequestStart(request_started)): Extension<RequestStart>,
-    Json(input): Json<BankAccountValidationRequest>,
-) -> Result<Response, AppError> {
-    let request = normalize_bank_request(input)?;
-    validate(state, headers, address, request, request_started).await
+/// v3 validation (replaces the four v1 product endpoints, removed
+/// 2026-10-29): a single endpoint that dispatches on `code`.
+/// GET carries code/accountNumber/api_key as query params and is never
+/// idempotent (each GET is a fresh validation); POST carries a JSON body
+/// and reuses the v1 Idempotency-Key mechanism exactly.
+#[derive(Debug, Deserialize)]
+struct V3ValidateQuery {
+    code: Option<String>,
+    #[serde(rename = "accountNumber")]
+    account_number: Option<String>,
+    #[serde(rename = "api_key")]
+    api_key: Option<String>,
 }
 
-async fn validate_ewallet(
+async fn validate_v3_get(
     State(state): State<AppState>,
     headers: HeaderMap,
     ConnectInfo(address): ConnectInfo<SocketAddr>,
     Extension(RequestStart(request_started)): Extension<RequestStart>,
-    Json(input): Json<EwalletValidationRequest>,
+    Query(query): Query<V3ValidateQuery>,
 ) -> Result<Response, AppError> {
-    let request = normalize_ewallet_request(input)?;
-    validate(state, headers, address, request, request_started).await
+    let code = query
+        .code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("code wajib diisi"))?;
+    let account_number = query
+        .account_number
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::bad_request("accountNumber wajib diisi"))?;
+    let request = resolve_v3_code(code, account_number)?;
+    let raw_api_key = resolve_v3_api_key(query.api_key.as_deref(), &headers)?;
+    validate_v3_execute(
+        state,
+        headers,
+        address,
+        request_started,
+        request,
+        &raw_api_key,
+        true,
+    )
+    .await
 }
 
-async fn validate_whatsapp(
+async fn validate_v3_post(
     State(state): State<AppState>,
     headers: HeaderMap,
     ConnectInfo(address): ConnectInfo<SocketAddr>,
     Extension(RequestStart(request_started)): Extension<RequestStart>,
-    Json(input): Json<WhatsappValidationRequest>,
+    body: Bytes,
 ) -> Result<Response, AppError> {
-    let request = normalize_whatsapp_request(input)?;
-    validate(state, headers, address, request, request_started).await
+    let value: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| AppError::bad_request("Body JSON tidak valid"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| AppError::bad_request("Body harus berupa objek JSON"))?;
+    let code = v3_body_string(object, "code")?;
+    let account_number = v3_body_string(object, "accountNumber")?;
+    let body_api_key = match object.get("api_key") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(value)) => Some(value.as_str()),
+        Some(_) => {
+            return Err(AppError::bad_request("api_key harus berupa string"));
+        }
+    };
+    let request = resolve_v3_code(&code, &account_number)?;
+    let raw_api_key = resolve_v3_api_key(body_api_key, &headers)?;
+    validate_v3_execute(
+        state,
+        headers,
+        address,
+        request_started,
+        request,
+        &raw_api_key,
+        false,
+    )
+    .await
 }
 
-async fn validate_pln(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    ConnectInfo(address): ConnectInfo<SocketAddr>,
-    Extension(RequestStart(request_started)): Extension<RequestStart>,
-    Json(input): Json<PlnValidationRequest>,
-) -> Result<Response, AppError> {
-    let request = normalize_pln_request(input)?;
-    validate(state, headers, address, request, request_started).await
+/// Extracts a required string field from a v3 POST body. A JSON number
+/// (e.g. `"code": 2` instead of `"002"`) is a 400, never silently
+/// coerced — a coerced `2` would validate a different bank than `002`.
+fn v3_body_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<String, AppError> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => {
+            Err(AppError::bad_request(format!("{field} wajib diisi")))
+        }
+        Some(serde_json::Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(AppError::bad_request(format!("{field} wajib diisi")));
+            }
+            Ok(trimmed.to_owned())
+        }
+        Some(_) => Err(AppError::bad_request(format!(
+            "{field} harus berupa string"
+        ))),
+    }
+}
+
+/// Maps a v3 `code` to the v1 product request it desugars to. Matching
+/// is case-insensitive for the word codes and slugs (mirroring the v1
+/// e-wallet normalizer); a bank code must be exactly three digits.
+/// Resolution order is unambiguous: no slug, `pln`, or `whatsapp` is
+/// numeric, and no bank code is alphabetic.
+fn resolve_v3_code(
+    code: &str,
+    account_number: &str,
+) -> Result<ProviderValidationRequest, AppError> {
+    let normalized = code.trim().to_ascii_lowercase();
+    if normalized == "pln" {
+        return normalize_pln_request(PlnValidationRequest {
+            customer_id: account_number.to_owned(),
+        });
+    }
+    if normalized == "whatsapp" {
+        return normalize_whatsapp_request(WhatsappValidationRequest {
+            phone_number: account_number.to_owned(),
+        });
+    }
+    if crate::ewallet_codes::is_supported_slug(&normalized) {
+        return normalize_ewallet_request(EwalletValidationRequest {
+            provider: normalized,
+            account_number: account_number.to_owned(),
+        });
+    }
+    if normalized.len() == 3
+        && normalized.chars().all(|character| character.is_ascii_digit())
+    {
+        return normalize_bank_request(BankAccountValidationRequest {
+            bank_code: normalized,
+            account_number: account_number.to_owned(),
+        });
+    }
+    Err(AppError::bad_request(
+        "code tidak dikenal: gunakan kode bank 3 digit, slug e-wallet, pln, atau whatsapp",
+    ))
+}
+
+/// Resolves the member API key for v3 from the request's own api_key
+/// (query for GET, body for POST), falling back to the v1 header forms.
+/// Two different supplied keys is a 401 rather than a silent pick — the
+/// caller must not be able to smuggle a second key past the one it
+/// appears to use.
+fn resolve_v3_api_key(
+    explicit: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<String, AppError> {
+    let explicit = explicit.map(str::trim).filter(|value| !value.is_empty());
+    let header = api_key_from_headers(headers);
+    match (explicit, header) {
+        (Some(a), Some(b)) if a != b => {
+            Err(AppError::unauthorized("API key tidak valid"))
+        }
+        (Some(a), _) => Ok(a.to_owned()),
+        (None, Some(b)) => Ok(b.to_owned()),
+        (None, None) => Err(AppError::unauthorized("API key tidak ditemukan")),
+    }
 }
 
 /// Client IP for rate limiting. The TCP peer is authoritative, except when the
@@ -1801,23 +1924,33 @@ pub(crate) fn effective_client_ip(headers: &HeaderMap, peer: IpAddr) -> IpAddr {
         .unwrap_or(peer)
 }
 
-async fn validate(
+/// Shared v3 pipeline: authenticate the resolved key, then run the
+/// same `execute_validation` as v1. `fresh_idempotency` is true for GET:
+/// every GET mints a brand-new idempotency key (never read from the
+/// header, never echoed), so a GET is always a fresh validation.
+/// POST reuses the v1 header mechanism exactly (validate 8–200 ASCII,
+/// generate UUID v7 when absent, echo the generated key).
+async fn validate_v3_execute(
     state: AppState,
     headers: HeaderMap,
     address: SocketAddr,
-    request: ProviderValidationRequest,
     request_started: Instant,
+    request: ProviderValidationRequest,
+    raw_api_key: &str,
+    fresh_idempotency: bool,
 ) -> Result<Response, AppError> {
     let request_id = request_id(&headers)?;
-    let raw_api_key = api_key_from_headers(&headers)
-        .ok_or_else(|| AppError::unauthorized("Header API key tidak ditemukan"))?;
     let api_key = state
         .store
         .authenticate_api_key(raw_api_key)
         .await
         .map_err(|error| error.with_request_id(request_id.clone()))?;
-    let (raw_idempotency_key, idempotency_generated) = idempotency_key_or_generate(&headers)
-        .map_err(|error| error.with_request_id(request_id.clone()))?;
+    let (raw_idempotency_key, idempotency_generated) = if fresh_idempotency {
+        (Uuid::now_v7().to_string(), false)
+    } else {
+        idempotency_key_or_generate(&headers)
+            .map_err(|error| error.with_request_id(request_id.clone()))?
+    };
     let client_ip = effective_client_ip(&headers, address.ip());
     let mut response = execute_validation(
         state,
@@ -1840,6 +1973,18 @@ async fn validate(
     Ok(response)
 }
 
+/// Migration stub for the removed v1 product endpoints: 410 Gone with
+/// a pointer to v3, so clients get a readable migration hint instead of
+/// a bare 404. (Deliberately kept: remove entirely for a plain 404.)
+async fn v1_validate_gone() -> Response {
+    let body = serde_json::json!({
+        "code": "gone",
+        "message": "Endpoint v1 sudah tidak tersedia, gunakan /api/v3/validate",
+        "request_id": short_request_id(),
+    });
+    (StatusCode::GONE, Json(body)).into_response()
+}
+
 /// The shared validation pipeline (scope, idempotency, rate limit, quota,
 /// provider, ledger event) used by the public API and by the member
 /// portal's live-check sandbox. `channel` marks where the check came from
@@ -1856,7 +2001,7 @@ pub(crate) async fn execute_validation(
     channel: &'static str,
 ) -> Result<Response, AppError> {
     // AREA 6 — sakelar maintenance: bila aktif, SEMUA jalur validasi
-    // (API /v1/validate/* maupun portal "Coba Cek Live", karena keduanya
+    // (API /api/v3/validate maupun portal "Coba Cek Live", karena keduanya
     // lewat fungsi ini) ditolak 503 SEBELUM scope, idempotensi, maupun
     // kuota tersentuh, sehingga tidak ada hit yang terpotong. Health,
     // login, portal, dan endpoint lain tidak lewat sini dan tidak
@@ -8044,10 +8189,10 @@ mod site_status_tests {
         // laporan: verifikasi itu diserahkan ke integrasi dengan DB.
         let base = serve_test_app(test_app_state(None).await).await;
         let response = reqwest::Client::new()
-            .post(format!("{base}/v1/validate/bank-account"))
+            .post(format!("{base}/api/v3/validate"))
             .header("X-API-Key", "rv_demo_0123456789abcdef0123456789abcdef")
             .json(&serde_json::json!({
-                "bank_code": "002",
+                "code": "002",
                 "account_number": "1234567890",
             }))
             .send()
@@ -8060,6 +8205,120 @@ mod site_status_tests {
         );
         let body = response.text().await.expect("body validasi");
         assert!(!body.contains(MAINTENANCE_MESSAGE));
+    }
+
+    #[tokio::test]
+    async fn v3_validate_replaces_v1_and_old_paths_are_gone() {
+        let base = serve_test_app(test_app_state(None).await).await;
+        let client = reqwest::Client::new();
+
+        // v3 route exists: no key -> 401, not 404.
+        let no_key = client
+            .get(format!("{base}/api/v3/validate?code=002&accountNumber=1234567890"))
+            .send()
+            .await
+            .expect("GET v3 tanpa kunci");
+        assert_eq!(no_key.status(), 401);
+        let no_key_post = client
+            .post(format!("{base}/api/v3/validate"))
+            .json(&serde_json::json!({
+                "code": "002",
+                "accountNumber": "1234567890",
+            }))
+            .send()
+            .await
+            .expect("POST v3 tanpa kunci");
+        assert_eq!(no_key_post.status(), 401);
+
+        // Old v1 paths are 410 with a pointer to v3.
+        for path in [
+            "/v1/validate/bank-account",
+            "/v1/validate/ewallet",
+            "/v1/validate/whatsapp",
+            "/v1/validate/pln",
+        ] {
+            let gone = client
+                .post(format!("{base}{path}"))
+                .send()
+                .await
+                .expect("POST v1 lama");
+            assert_eq!(gone.status(), 410, "{path} harus 410");
+            let body = gone.text().await.expect("body 410");
+            assert!(body.contains("/api/v3/validate"), "{path} harus menunjuk ke v3");
+        }
+
+        // Code validation precedes auth and never coerces numbers.
+        let number_code = client
+            .post(format!("{base}/api/v3/validate"))
+            .json(&serde_json::json!({ "code": 2, "account_number": "1234567890" }))
+            .send()
+            .await
+            .expect("POST v3 code angka");
+        assert_eq!(number_code.status(), 400);
+        let unknown = client
+            .get(format!("{base}/api/v3/validate?code=tidakada&accountNumber=1234567890"))
+            .send()
+            .await
+            .expect("GET v3 code tak dikenal");
+        assert_eq!(unknown.status(), 400);
+    }
+
+    #[test]
+    fn v3_code_resolution_covers_all_products() {
+        let bank = resolve_v3_code("002", "1234567890").expect("bank 002");
+        assert_eq!(bank.product, ValidationProduct::BankAccount);
+        assert_eq!(bank.provider_hint.as_deref(), Some("002"));
+        let wallet = resolve_v3_code("DANA", "081234567890").expect("dana");
+        assert_eq!(wallet.product, ValidationProduct::Ewallet);
+        assert_eq!(wallet.provider_hint.as_deref(), Some("dana"));
+        let pln = resolve_v3_code("pln", "123456789012").expect("pln");
+        assert_eq!(pln.product, ValidationProduct::Pln);
+        let wa = resolve_v3_code("whatsapp", "081234567890").expect("whatsapp");
+        assert_eq!(wa.product, ValidationProduct::Whatsapp);
+        assert_eq!(wa.target, "6281234567890");
+        assert!(resolve_v3_code("999", "1234567890").is_err());
+        assert!(resolve_v3_code("2", "1234567890").is_err());
+        assert!(resolve_v3_code("tidakada", "1234567890").is_err());
+    }
+
+    #[test]
+    fn v3_api_key_resolution_prefers_explicit_and_rejects_mismatch() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("rc_header_key"));
+        assert_eq!(
+            resolve_v3_api_key(Some("rc_query_key"), &HeaderMap::new()).expect("eksplisit"),
+            "rc_query_key"
+        );
+        assert_eq!(
+            resolve_v3_api_key(Some("rc_header_key"), &headers).expect("sama"),
+            "rc_header_key"
+        );
+        assert!(resolve_v3_api_key(Some("rc_query_key"), &headers).is_err());
+        assert!(resolve_v3_api_key(Some("rc_lain"), &headers).is_err());
+        assert_eq!(
+            resolve_v3_api_key(None, &headers).expect("header saja"),
+            "rc_header_key"
+        );
+        assert!(resolve_v3_api_key(None, &HeaderMap::new()).is_err());
+    }
+
+    #[test]
+    fn v3_body_string_rejects_numbers_and_blanks() {
+        let object = serde_json::json!({ "code": 2, "accountNumber": "123" })
+            .as_object()
+            .expect("objek")
+            .clone();
+        assert!(v3_body_string(&object, "code").is_err());
+        assert!(v3_body_string(&object, "missing").is_err());
+        let blank = serde_json::json!({ "code": "   " })
+            .as_object()
+            .expect("objek")
+            .clone();
+        assert!(v3_body_string(&blank, "code").is_err());
+        assert_eq!(
+            v3_body_string(&object, "accountNumber").expect("string"),
+            "123"
+        );
     }
 
     #[tokio::test]

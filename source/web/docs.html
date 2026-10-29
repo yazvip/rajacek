@@ -111,14 +111,16 @@
           <li><strong>Daftar dengan akun Google</strong> di <a href="/member">portal member</a>. API key (<code>rc_...</code>) langsung terbit — simpan baik-baik, kunci hanya ditampilkan satu kali. Pendaftar pertama mendapat <strong>trial gratis 10× cek selama 7 hari</strong>.</li>
           <li>Mau coba tanpa coding? Buka menu <strong>Coba Cek Live</strong> di portal — ceknya sungguhan dan memakai kuota trial Anda.</li>
           <li>Untuk cek rekening, ambil dulu kode bank 3 digit dari <code>GET /v1/banks</code>.</li>
-          <li>Kirim request POST ke endpoint validasi dengan header <code>X-API-Key</code>. Selesai — contohnya ada di bawah ini.</li>
+          <li>Kirim request ke endpoint validasi <code>/api/v3/validate</code> — paling mudah lewat GET dengan kunci di query, atau POST dengan kunci di header. Selesai — contohnya ada di bawah ini.</li>
         </ol>
         <div class="callout"><strong>Trial habis?</strong> Setelah kuota trial habis atau 7 hari berakhir, API akan menolak cek baru dengan kode <code>402</code>. Lanjutkan ke paket berbayar lewat portal member — beli paket dengan QRIS dan kuota langsung aktif.</div>
-        <pre><code>curl -X POST $BASE_URL/v1/validate/bank-account \
+        <pre><code>curl "$BASE_URL/api/v3/validate?code=014&accountNumber=1234567890&api_key=rc_CONTOH"</code></pre>
+        <p>Atau POST dengan kunci di header (mendukung <code>Idempotency-Key</code> — lihat <a href="#idempotensi">Idempotensi</a>):</p>
+        <pre><code>curl -X POST $BASE_URL/api/v3/validate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: rv_live_CONTOH" \
   -H "Idempotency-Key: order-20261021-0001" \
-  -d '{"bank_code": "014", "account_number": "1234567890"}'</code></pre>
+  -d '{"code": "014", "accountNumber": "1234567890"}'</code></pre>
         <p>Respons sukses (HTTP 200):</p>
         <pre><code>{
   "request_id": "Kx7fA92pQm",
@@ -147,10 +149,11 @@
 }</code></pre>
 
         <h2 id="autentikasi">Autentikasi</h2>
-        <p>Setiap request harus membawa API key Anda. Ada dua cara mengirimnya:</p>
+        <p>Setiap request harus membawa API key Anda. Ada tiga cara mengirimnya:</p>
         <pre><code>X-API-Key: rv_live_KUNCI_ANDA
 # atau
 Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
+        <p>Cara ketiga, khusus <code>/api/v3/validate</code>: <code>api_key</code> lewat query (GET) atau field <code>api_key</code> di body JSON (POST). Bila lebih dari satu sumber kunci dikirim dengan nilai berbeda, request ditolak 401. Jangan bagikan URL yang masih mengandung <code>api_key</code> — kunci di query bisa tercatat di log server dan riwayat browser.</p>
         <ul>
           <li>Setiap kunci punya <strong>izin (scope)</strong> per produk: <code>validate:bank_account</code>, <code>validate:ewallet</code>, <code>validate:whatsapp</code>, <code>validate:pln</code>, atau <code>validate:*</code> untuk semua produk. Kunci tanpa izin produk akan ditolak dengan kode 403.</li>
           <li>Kunci hanya ditampilkan <strong>satu kali</strong>, saat dibuat. Sesudah itu server hanya menyimpan sidik jarinya (hash) — kunci asli tidak bisa ditampilkan lagi.</li>
@@ -159,6 +162,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
 
         <h2 id="idempotensi">Idempotensi</h2>
         <p><code>Idempotency-Key</code> adalah kode unik yang <strong>Anda</strong> tentukan untuk satu operasi, misalnya nomor order. Fungsinya: kalau request yang sama terkirim dua kali (misalnya jaringan putus lalu Anda mengulang), hasilnya tidak diproses dua kali. Isi dengan 8–200 karakter ASCII tanpa spasi. <strong>Header ini dianjurkan.</strong> Kalau tidak dikirim atau kosong, server membuatkan kode otomatis dan mengembalikannya di header respons <code>Idempotency-Key</code> — request tetap jalan, tetapi pengiriman ulang akan dihitung sebagai cek baru.</p>
+        <p><strong>GET tidak idempotent:</strong> setiap GET ke <code>/api/v3/validate</code> adalah cek baru — pengiriman ulang GET tidak memutar respons dan bisa tertagih lagi. Untuk operasi yang harus aman diulang, pakai POST dengan <code>Idempotency-Key</code> yang sama.</p>
         <ul>
           <li>Retry dengan kunci dan isi request yang persis sama → Anda menerima respons yang sama persis (ada header <code>X-Idempotent-Replay: true</code>) dan <strong>kuota tidak terpotong dua kali</strong>.</li>
           <li>Kunci yang sama tetapi isi request berbeda → ditolak dengan kode <strong>409</strong>.</li>
@@ -187,7 +191,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         </ul>
 
         <h2 id="daftar-bank">Daftar bank <span class="method get">GET</span> <span class="endpoint-path">/v1/banks</span></h2>
-        <p>Endpoint ini <strong>bebas, tanpa API key</strong>. Hasilnya adalah daftar semua bank yang didukung beserta kode resminya (3 digit). Pakai nilai <code>code_bank</code> sebagai <code>bank_code</code> saat mengecek rekening.</p>
+        <p>Endpoint ini <strong>bebas, tanpa API key</strong>. Hasilnya adalah daftar semua bank yang didukung beserta kode resminya (3 digit). Pakai nilai <code>code_bank</code> sebagai <code>code</code> saat mengecek rekening lewat <code>/api/v3/validate</code>.</p>
         <pre><code>[
   { "code_bank": "002", "name_bank": "BRI" },
   { "code_bank": "008", "name_bank": "MANDIRI" },
@@ -195,13 +199,15 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
   { "code_bank": "014", "name_bank": "BCA" }
 ]</code></pre>
 
-        <h2 id="validasi-bank">Validasi rekening <span class="method post">POST</span> <span class="endpoint-path">/v1/validate/bank-account</span></h2>
+        <div class="callout"><strong>Migrasi dari v1:</strong> endpoint lama <code>POST /v1/validate/bank-account</code>, <code>/ewallet</code>, <code>/whatsapp</code>, dan <code>/pln</code> sudah tidak tersedia dan menjawab <strong>410 Gone</strong> dengan arahan ke <code>/api/v3/validate</code>. Satu endpoint v3 melayani semua produk lewat <code>code</code>: kode bank 3 digit, slug e-wallet (<code>dana</code>, <code>gopay</code>, <code>gopay_driver</code>, <code>ovo</code>, <code>shopeepay</code>, <code>linkaja</code>, <code>astrapay</code>, <code>isaku</code>, <code>kaspro</code>), <code>pln</code>, atau <code>whatsapp</code> — nomornya selalu di <code>accountNumber</code>.</div>
+
+        <h2 id="validasi-bank">Validasi rekening <span class="method get">GET</span> <span class="method post">POST</span> <span class="endpoint-path">/api/v3/validate</span></h2>
         <table>
           <tr><th>Field</th><th>Wajib</th><th>Keterangan</th></tr>
-          <tr><td><code>bank_code</code></td><td>Ya</td><td>Kode bank <strong>3 digit</strong> dari <code>GET /v1/banks</code> (mis. <code>014</code> = BCA).</td></tr>
-          <tr><td><code>account_number</code></td><td>Ya</td><td>Nomor rekening 6–32 karakter (angka, spasi, dan tanda hubung diperbolehkan).</td></tr>
+          <tr><td><code>code</code></td><td>Ya</td><td>Kode bank <strong>3 digit</strong> dari <code>GET /v1/banks</code> (mis. <code>014</code> = BCA).</td></tr>
+          <tr><td><code>accountNumber</code></td><td>Ya</td><td>Nomor rekening 6–32 karakter (angka, spasi, dan tanda hubung diperbolehkan).</td></tr>
         </table>
-        <p>Contoh request dan respons sukses ada di <a href="#mulai-cepat">Mulai cepat</a>. Kalau nomornya tidak ditemukan di bank tujuan, respons tetap HTTP 200 dengan <code>status: "not_found"</code> — hasil seperti ini tetap tertagih, karena pemeriksaannya benar-benar dilakukan:</p>
+        <p>Contoh request dan respons sukses ada di <a href="#mulai-cepat">Mulai cepat</a>. Kalau nomornya tidak ditemukan di bank tujuan, respons tetap HTTP 200 dengan <code>status: "not_found"</code> — hasil seperti ini masuk pool gratis invalid/not_found (gratis 100 pertama per hari per kunci, selebihnya 1 hit; lihat <a href="#rate-limit-kuota">Rate limit &amp; kuota</a>):</p>
         <pre><code>{
   "request_id": "Qm3Za8Kd1s",
   "status": "not_found",
@@ -225,18 +231,20 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
 }</code></pre>
         <p>Scope: <code>validate:bank_account</code>.</p>
 
-        <h2 id="validasi-ewallet">Validasi e-wallet <span class="method post">POST</span> <span class="endpoint-path">/v1/validate/ewallet</span></h2>
+        <h2 id="validasi-ewallet">Validasi e-wallet <span class="method get">GET</span> <span class="method post">POST</span> <span class="endpoint-path">/api/v3/validate</span></h2>
         <table>
           <tr><th>Field</th><th>Wajib</th><th>Keterangan</th></tr>
-          <tr><td><code>provider</code></td><td>Ya</td><td>Isi dengan salah satu kode e-wallet di bawah.</td></tr>
-          <tr><td><code>account_number</code></td><td>Ya</td><td>Nomor akun/nomor HP e-wallet 6–32 karakter.</td></tr>
+          <tr><td><code>code</code></td><td>Ya</td><td>Isi dengan salah satu kode e-wallet di bawah.</td></tr>
+          <tr><td><code>accountNumber</code></td><td>Ya</td><td>Nomor akun/nomor HP e-wallet 6–32 karakter.</td></tr>
         </table>
         <p>Kode e-wallet yang didukung: <code>dana</code>, <code>gopay</code>, <code>gopay_driver</code>, <code>ovo</code>, <code>shopeepay</code>, <code>linkaja</code>, <code>astrapay</code>, <code>isaku</code>, <code>kaspro</code>.</p>
-        <pre><code>curl -X POST $BASE_URL/v1/validate/ewallet \
+        <pre><code>curl "$BASE_URL/api/v3/validate?code=gopay&accountNumber=081234567890&api_key=rc_CONTOH"</code></pre>
+        <p>Atau POST dengan <code>Idempotency-Key</code>:</p>
+        <pre><code>curl -X POST $BASE_URL/api/v3/validate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: rv_live_CONTOH" \
   -H "Idempotency-Key: topup-20261021-0007" \
-  -d '{"provider": "gopay", "account_number": "081234567890"}'</code></pre>
+  -d '{"code": "gopay", "accountNumber": "081234567890"}'</code></pre>
         <p>Respons sukses (HTTP 200):</p>
         <pre><code>{
   "request_id": "Vz81hNqP4e",
@@ -261,16 +269,19 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
 }</code></pre>
         <p>Scope: <code>validate:ewallet</code>.</p>
 
-        <h2 id="validasi-whatsapp">Validasi WhatsApp <span class="method post">POST</span> <span class="endpoint-path">/v1/validate/whatsapp</span></h2>
+        <h2 id="validasi-whatsapp">Validasi WhatsApp <span class="method get">GET</span> <span class="method post">POST</span> <span class="endpoint-path">/api/v3/validate</span></h2>
         <table>
           <tr><th>Field</th><th>Wajib</th><th>Keterangan</th></tr>
-          <tr><td><code>phone_number</code></td><td>Ya</td><td>Nomor format internasional (<code>+628...</code>) atau lokal (<code>08...</code>).</td></tr>
+          <tr><td><code>code</code></td><td>Ya</td><td>Isi <code>whatsapp</code>.</td></tr>
+          <tr><td><code>accountNumber</code></td><td>Ya</td><td>Nomor format internasional (<code>+628...</code>) atau lokal (<code>08...</code>).</td></tr>
         </table>
-        <pre><code>curl -X POST $BASE_URL/v1/validate/whatsapp \
+        <pre><code>curl "$BASE_URL/api/v3/validate?code=whatsapp&accountNumber=081234567890&api_key=rc_CONTOH"</code></pre>
+        <p>Atau POST dengan <code>Idempotency-Key</code>:</p>
+        <pre><code>curl -X POST $BASE_URL/api/v3/validate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: rv_live_CONTOH" \
   -H "Idempotency-Key: wa-20261021-0003" \
-  -d '{"phone_number": "+6281234567890"}'</code></pre>
+  -d '{"code": "whatsapp", "accountNumber": "081234567890"}'</code></pre>
         <p>Respons nomor terdaftar WhatsApp (HTTP 200):</p>
         <pre><code>{
   "request_id": "Rt5wXc92Nb",
@@ -295,8 +306,9 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         <p>Nomor yang tidak terdaftar WhatsApp menghasilkan <code>status: "invalid"</code> dengan <code>result: { "phone_number": "...", "service_code": "whatsapp", "registered": false }</code> — bentuk field lainnya sama.</p>
         <p>Scope: <code>validate:whatsapp</code>. Gunakan layanan ini dengan bertanggung jawab — bukan untuk spam atau mengumpulkan nomor secara massal.</p>
 
-        <h2 id="validasi-pln">Validasi PLN</h2>
-        <p>Produk <code>pln</code> memeriksa <strong>ID pelanggan PLN</strong> — 11–12 digit numerik. Di portal member, pilih tab <strong>PLN</strong> di <strong>Coba Cek Live</strong> lalu masukkan ID pelanggan; lewat API, produk ini memakai kode produk <code>pln</code> dan scope <code>validate:pln</code> (atau <code>validate:*</code>).</p>
+        <h2 id="validasi-pln">Validasi PLN <span class="method get">GET</span> <span class="method post">POST</span> <span class="endpoint-path">/api/v3/validate</span></h2>
+        <p>Produk <code>pln</code> memeriksa <strong>ID pelanggan PLN</strong> — 11–12 digit numerik. Di portal member, pilih tab <strong>PLN</strong> di <strong>Coba Cek Live</strong> lalu masukkan ID pelanggan; lewat API, pakai <code>code=pln</code> dan <code>accountNumber</code> berisi ID pelanggan, dengan scope <code>validate:pln</code> (atau <code>validate:*</code>).</p>
+        <pre><code>curl "$BASE_URL/api/v3/validate?code=pln&accountNumber=123456789012&api_key=rc_CONTOH"</code></pre>
         <p>Hasil valid (HTTP 200) menampilkan nama pelanggan (<code>account_name</code>, selalu huruf besar semua) dan, bila tersedia, <code>tarif</code> serta <code>daya</code>:</p>
         <pre><code>{
   "status": "valid",
@@ -338,6 +350,7 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
           <tr><td>402</td><td><code>quota_exhausted</code></td><td>Kuota paket Anda habis. Beli paket di portal member untuk menambah kuota.</td></tr>
           <tr><td>403</td><td><code>forbidden</code></td><td>API key Anda tidak punya izin (scope) untuk produk ini.</td></tr>
           <tr><td>409</td><td><code>conflict</code></td><td>Idempotency-Key yang sama sudah dipakai dengan isi berbeda, atau request sebelumnya masih diproses. Untuk operasi baru, pakai kunci baru.</td></tr>
+          <tr><td>410</td><td><code>gone</code></td><td>Endpoint v1 sudah tidak tersedia. Pindah ke <code>/api/v3/validate</code>.</td></tr>
           <tr><td>429</td><td><code>rate_limited</code></td><td>Anda terlalu cepat (rate limit) atau antrean sedang penuh. Tunggu sesuai header <code>Retry-After</code>, lalu coba lagi.</td></tr>
           <tr><td>502</td><td><code>provider_error</code></td><td>Layanan pemeriksa memberi respons yang tidak bisa diproses. Aman diulang dengan Idempotency-Key yang sama.</td></tr>
           <tr><td>503</td><td><code>service_unavailable</code></td><td>Layanan pemeriksa sedang tidak tersedia, atau produk ini belum aktif. Coba lagi beberapa saat.</td></tr>
@@ -352,13 +365,13 @@ Authorization: Bearer rv_live_KUNCI_ANDA</code></pre>
         <h3>Apakah nama pemilik rekening selalu tersedia?</h3>
         <p>Umumnya tersedia untuk bank dan e-wallet. Untuk WhatsApp memang tidak ada nama — yang menjadi acuan adalah <code>registered</code> (terdaftar atau tidak).</p>
         <h3>Request saya 200 tetapi <code>valid: false</code> — apakah ditagih?</h3>
-        <p>Lihat <code>status</code>-nya: <code>invalid</code>, <code>not_found</code>, dan <code>not_kyc</code> tetap tertagih karena nomornya benar-benar diperiksa. <code>pending</code> tidak tertagih.</p>
+        <p>Lihat <code>status</code>-nya: <code>not_kyc</code> selalu tertagih; <code>invalid</code> dan <code>not_found</code> masuk pool gratis (gratis 100 pertama per hari per kunci, selebihnya 1 hit). <code>pending</code> tidak tertagih.</p>
         <h3>Berapa lama respons idempotensi disimpan?</h3>
         <p>Respons idempotensi disimpan <strong>24 jam</strong>. Lewat dari itu, kunci yang sama dianggap operasi baru.</p>
         <h3>Bolehkan saya memakai satu kunci untuk banyak server?</h3>
         <p>Boleh. Tapi lebih aman dan rapi bila setiap aplikasi atau lingkungan punya kunci sendiri — kalau ada masalah, Anda cukup mencabut satu kunci itu saja.</p>
 
-        <p style="margin-top:2.5rem;color:var(--muted);font-size:.9rem;">Rajacek API · Dokumentasi member v1.0 · Terakhir diselaraskan dengan kontrak API pada 23 Oktober 2026.</p>
+        <p style="margin-top:2.5rem;color:var(--muted);font-size:.9rem;">Rajacek API · Dokumentasi member · Terakhir diselaraskan dengan kontrak API pada 29 Oktober 2026.</p>
       </main>
     </div>
   </body>

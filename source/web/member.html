@@ -719,7 +719,7 @@
                 <div class="section-head">
                   <div>
                     <h2 class="section">Contoh Pemanggilan API (cURL) per Produk</h2>
-                    <p class="sub">Gunakan header <code class="mono" style="color:var(--brand-700);">Authorization: Bearer</code> atau <code class="mono" style="color:var(--brand-700);">X-API-Key</code></p>
+                    <p class="sub">Kunci lewat query <code class="mono" style="color:var(--brand-700);">api_key</code> (GET) atau header <code class="mono" style="color:var(--brand-700);">Authorization: Bearer</code> / <code class="mono" style="color:var(--brand-700);">X-API-Key</code></p>
                   </div>
                 </div>
                 <div class="snippet-box" style="margin-top:14px;">
@@ -727,6 +727,7 @@
                     <button type="button" class="active" data-snippet-tab="bank_account">Bank</button>
                     <button type="button" data-snippet-tab="ewallet">E-Wallet</button>
                     <button type="button" data-snippet-tab="whatsapp">WhatsApp</button>
+                    <button type="button" data-snippet-tab="pln">PLN</button>
                     <span class="spacer"></span>
                     <button type="button" class="snippet-copy" id="snippetCopy">Salin</button>
                   </div>
@@ -1223,20 +1224,13 @@
 
       const SNIPPETS = {
         bank_account:
-`curl -X POST https://rajacek.com/v1/validate/bank-account \\
-  -H "X-API-Key: <API_KEY_ANDA>" \\
-  -H "Idempotency-Key: contoh-001" \\
-  -d '{"bank_code":"014","account_number":"1234567890"}'`,
+`curl "https://rajacek.com/api/v3/validate?code=014&accountNumber=1234567890&api_key=<API_KEY_ANDA>"`,
         ewallet:
-`curl -X POST https://rajacek.com/v1/validate/ewallet \\
-  -H "X-API-Key: <API_KEY_ANDA>" \\
-  -H "Idempotency-Key: contoh-002" \\
-  -d '{"provider":"gopay","account_number":"081234567890"}'`,
+`curl "https://rajacek.com/api/v3/validate?code=gopay&accountNumber=081234567890&api_key=<API_KEY_ANDA>"`,
         whatsapp:
-`curl -X POST https://rajacek.com/v1/validate/whatsapp \\
-  -H "X-API-Key: <API_KEY_ANDA>" \\
-  -H "Idempotency-Key: contoh-003" \\
-  -d '{"phone_number":"081234567890"}'`,
+`curl "https://rajacek.com/api/v3/validate?code=whatsapp&accountNumber=081234567890&api_key=<API_KEY_ANDA>"`,
+        pln:
+`curl "https://rajacek.com/api/v3/validate?code=pln&accountNumber=123456789012&api_key=<API_KEY_ANDA>"`,
       };
       let snippetProduct = 'bank_account';
       function renderSnippet() {

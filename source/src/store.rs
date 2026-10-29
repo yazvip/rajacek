@@ -5673,7 +5673,7 @@ fn sample_policies(now: chrono::DateTime<Utc>) -> Vec<RateLimitPolicy> {
             id: Uuid::now_v7(),
             name: "Proteksi IP publik".to_owned(),
             scope: "ip".to_owned(),
-            target: "Endpoint /v1/validate/*".to_owned(),
+            target: "Endpoint /api/v3/validate".to_owned(),
             requests_per_minute: 180,
             burst: 45,
             concurrency_limit: 24,

@@ -2,10 +2,12 @@ openapi: 3.1.0
 info:
   title: Rajacek Validation API
   version: 0.1.0
-  summary: API validasi rekening, e-wallet, dan WhatsApp dengan kontrol quota, rate limit, dan idempotensi.
+  summary: API validasi rekening, e-wallet, WhatsApp, dan PLN dengan kontrol quota, rate limit, dan idempotensi.
   description: |
     Rajacek menerima permintaan validasi melalui API key yang memiliki scope produk sesuai.
-    Endpoint validasi menerima `Idempotency-Key` unik dari klien; bila tidak dikirim atau kosong, server membuatkannya otomatis dan mengembalikannya lewat header respons `Idempotency-Key` (retry tanpa kunci sendiri dianggap operasi baru).
+    Satu endpoint `GET /api/v3/validate` (kunci lewat query `api_key`) dan `POST /api/v3/validate` (kunci lewat header atau field body `api_key`) melayani semua produk lewat `code`: kode bank 3 digit, slug e-wallet, `pln`, atau `whatsapp`.
+    Endpoint POST menerima `Idempotency-Key` unik dari klien; bila tidak dikirim atau kosong, server membuatkannya otomatis dan mengembalikannya lewat header respons `Idempotency-Key` (retry tanpa kunci sendiri dianggap operasi baru). GET tidak idempotent: setiap GET adalah cek baru.
+    Endpoint v1 (`POST /v1/validate/...`) sudah tidak tersedia dan menjawab 410 Gone.
 
     Nilai rekening, nomor e-wallet, dan nomor telepon harus diperlakukan sebagai data sensitif.
     Jangan menulis nilai tersebut ke log aplikasi klien atau membagikannya tanpa dasar hukum/izin yang sesuai.
@@ -78,67 +80,35 @@ paths:
               schema:
                 type: array
                 items: { $ref: '#/components/schemas/BankCode' }
-  /v1/validate/bank-account:
-    post:
+  /api/v3/validate:
+    get:
       tags: [Validation]
-      operationId: validateBankAccount
-      summary: Memvalidasi rekening bank
+      operationId: validateV3Get
+      summary: Memvalidasi lewat query string
       description: |
-        Mengirim permintaan validasi rekening ke provider yang telah disetujui.
-        API key memerlukan scope `validate:bank_account` atau `validate:*`.
+        Satu endpoint untuk semua produk. `code` memilih produk: kode bank 3 digit (mis. `002` BRI), slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`), `pln`, atau `whatsapp`; nomornya di `accountNumber`.
+        GET tidak idempotent: setiap GET adalah cek baru. Kunci lewat query `api_key` atau header (`X-API-Key` / `Authorization: Bearer`); bila sumber berbeda nilainya, request ditolak 401.
+        API key memerlukan scope produk yang sesuai atau `validate:*`.
       parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Kode produk (lihat deskripsi).
+        - name: accountNumber
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp.
+        - name: api_key
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Kunci API member (boleh juga lewat header).
         - $ref: '#/components/parameters/RequestId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/BankAccountValidationRequest'
-            examples:
-              bca:
-                value:
-                  bank_code: '014'
-                  account_number: '1234567890'
-      responses:
-        '200':
-          $ref: '#/components/responses/ValidationSuccess'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '402':
-          $ref: '#/components/responses/QuotaExhausted'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '502':
-          $ref: '#/components/responses/ProviderError'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
-  /v1/validate/ewallet:
-    post:
-      tags: [Validation]
-      operationId: validateEwallet
-      summary: Memvalidasi akun e-wallet
-      description: API key memerlukan scope `validate:ewallet` atau `validate:*`.
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-        - $ref: '#/components/parameters/RequestId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/EwalletValidationRequest'
-            examples:
-              gopay:
-                value:
-                  provider: gopay
-                  account_number: '081234567890'
       responses:
         '200':
           $ref: '#/components/responses/ValidationSuccess'
@@ -146,18 +116,16 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '402': { $ref: '#/components/responses/QuotaExhausted' }
         '403': { $ref: '#/components/responses/Forbidden' }
-        '409': { $ref: '#/components/responses/Conflict' }
         '429': { $ref: '#/components/responses/RateLimited' }
         '502': { $ref: '#/components/responses/ProviderError' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
-  /v1/validate/whatsapp:
     post:
       tags: [Validation]
-      operationId: validateWhatsapp
-      summary: Memvalidasi nomor WhatsApp
+      operationId: validateV3Post
+      summary: Memvalidasi lewat body JSON (mendukung idempotensi)
       description: |
-        API key memerlukan scope `validate:whatsapp` atau `validate:*`.
-        Produk ini tidak boleh digunakan untuk spam, enumerasi massal, atau pengiriman OTP tanpa persetujuan.
+        Sama seperti GET, tetapi kunci lewat header atau field body `api_key`, dan mendukung `Idempotency-Key` (8–200 karakter ASCII tanpa spasi). `code` harus berupa string — angka `2` bukan `"002"` dan ditolak 400.
+        API key memerlukan scope produk yang sesuai atau `validate:*`.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
         - $ref: '#/components/parameters/RequestId'
@@ -166,11 +134,16 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/WhatsappValidationRequest'
+              $ref: '#/components/schemas/V3ValidateRequest'
             examples:
-              indonesia:
+              bank:
                 value:
-                  phone_number: '+6281234567890'
+                  code: '002'
+                  accountNumber: '1234567890'
+              ewallet:
+                value:
+                  code: gopay
+                  accountNumber: '081234567890'
       responses:
         '200':
           $ref: '#/components/responses/ValidationSuccess'
@@ -188,7 +161,7 @@ components:
       type: apiKey
       in: header
       name: X-API-Key
-      description: Kunci member (baru: prefix `rc_`; lama: `rv_live_` tetap berlaku); Authorization Bearer juga didukung.
+      description: 'Kunci member (baru: prefix `rc_`; lama: `rv_live_` tetap berlaku); Authorization Bearer juga didukung.'
   parameters:
     IdempotencyKey:
       name: Idempotency-Key
@@ -285,47 +258,22 @@ components:
       properties:
         code_bank: { type: string, pattern: '^[0-9]{3}$', example: '002' }
         name_bank: { type: string, example: BRI }
-    BankAccountValidationRequest:
+    V3ValidateRequest:
       type: object
       additionalProperties: false
-      required: [bank_code, account_number]
+      required: [code, accountNumber]
       properties:
-        bank_code:
+        code:
           type: string
-          minLength: 3
-          maxLength: 3
-          pattern: '^[0-9]{3}$'
-          description: Public Rajacek `code_bank`, not a provider-specific ID.
+          description: Kode produk — kode bank 3 digit (mis. `002` BRI), slug e-wallet, `pln`, atau `whatsapp`. Harus string.
           example: '002'
-        account_number:
+        accountNumber:
           type: string
-          minLength: 6
-          maxLength: 32
-          pattern: '^[0-9 -]+$'
-    EwalletValidationRequest:
-      type: object
-      additionalProperties: false
-      required: [provider, account_number]
-      properties:
-        provider:
+          description: Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp.
+          example: '1234567890'
+        api_key:
           type: string
-          description: Provider e-wallet yang sudah dikonfigurasi, misalnya `gopay`.
-          minLength: 2
-          maxLength: 48
-        account_number:
-          type: string
-          minLength: 6
-          maxLength: 32
-          pattern: '^[0-9 -]+$'
-    WhatsappValidationRequest:
-      type: object
-      additionalProperties: false
-      required: [phone_number]
-      properties:
-        phone_number:
-          type: string
-          description: Nomor Indonesia seperti `+6281234567890` atau `081234567890`.
-          maxLength: 32
+          description: Kunci API member (opsional bila sudah dikirim lewat header).
     ValidationResponse:
       type: object
       required: [request_id, status, valid, product, message, meta]

@@ -26,14 +26,14 @@ promo, expiry) dihitung dalam WIB (UTC+7 tetap).
 
 ## 1. FLOW VALIDASI (API member)
 
-Endpoint: `POST /v1/validate` (bank / e-wallet / WhatsApp).
-Auth: header `x-api-key` atau `Authorization: Bearer`.
+Endpoint: `GET/POST /api/v3/validate` (bank / e-wallet / WhatsApp / PLN; satu endpoint, produk dipilih lewat `code`). Endpoint v1 (`POST /v1/validate/...`) sudah tidak tersedia (410 Gone).
+Auth: header `x-api-key` atau `Authorization: Bearer`, atau `api_key` lewat query (GET) / field body (POST); bila lebih dari satu sumber ada dan nilainya berbeda → 401.
 
 ```
 Request
   → Auth kunci (hash sha256$salt$digest; kunci revoked/disabled → 401;
     expired tetap boleh beli paket untuk perpanjangan)
-  → Idempotency-Key (opsional; kosong → server generate UUID v7 + echo header;
+  → Idempotency-Key POST saja (opsional; kosong → server generate UUID v7 + echo header; GET tidak idempotent — setiap GET adalah cek baru);
     kiriman klien divalidasi 8–200 karakter; replay TIDAK potong kuota 2x)
   → Rate limit kunci (default 60/menit, bisa override per member;
     sliding-window 60 detik sejak Fase 4, K7 — bukan bucket menit kalender)

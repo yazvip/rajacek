@@ -3,7 +3,7 @@
   "info": {
     "title": "Rajacek API — Dokumentasi Member",
     "version": "1.0.0",
-    "description": "API validasi rekening bank, e-wallet, dan nomor WhatsApp Indonesia untuk member Rajacek.\n\n**Autentikasi:** semua endpoint validasi memerlukan header `X-API-Key: rc_...` (kunci lama `rv_live_...` tetap berlaku) (atau `Authorization: Bearer rv_live_...`). Jaga kerahasiaan kunci Anda; kunci hanya ditampilkan sekali saat dibuat.\n\n**Idempotency-Key dianjurkan** pada setiap POST validasi: nilai unik 8–200 karakter per operasi bisnis. Bila tidak dikirim atau kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons `Idempotency-Key`. Mengirim ulang request yang sama dengan kunci yang sama akan memutar respons yang sama tanpa memotong kuota dua kali.\n\n**Kode bank selalu 3 digit** (mis. `002` BRI, `014` BCA) — ambil daftar lengkapnya dari `GET /v1/banks`. Kode internal provider tidak pernah dipakai di sisi member.\n\n**Hasil validasi** ada di field `status` pada respons 200: `valid`, `invalid`, `not_found`, atau `pending`. Error teknis memakai format `ApiError` dengan HTTP 4xx/5xx.\n\n**Rate limit** bawaan 60 request/menit per kunci (header `X-RateLimit-Remaining`/`X-RateLimit-Reset` dikembalikan); kuota paket berkurang hanya untuk hasil yang tertagih (`valid`, `invalid`, `not_found`)."
+    "description": "API validasi rekening bank, e-wallet, nomor WhatsApp, dan ID pelanggan PLN Indonesia untuk member Rajacek.\n\n**Endpoint:** satu endpoint `GET /api/v3/validate` (kunci lewat query `api_key`) dan `POST /api/v3/validate` (kunci lewat header `X-API-Key` / `Authorization: Bearer`, atau field body `api_key`). Kunci lama `rv_live_...` tetap berlaku; kunci baru diawali `rc_...`. Jaga kerahasiaan kunci Anda; kunci hanya ditampilkan sekali saat dibuat. Bila lebih dari satu sumber kunci dikirim dengan nilai berbeda, request ditolak 401.\n\n**Idempotency-Key** hanya berlaku untuk POST: nilai unik 8–200 karakter per operasi bisnis. Bila tidak dikirim atau kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons `Idempotency-Key`. Mengirim ulang request yang sama dengan kunci yang sama akan memutar respons yang sama tanpa memotong kuota dua kali. GET tidak idempotent: setiap GET adalah cek baru.\n\n**Kode produk (`code`):** kode bank 3 digit (mis. `002` BRI, `014` BCA) — ambil daftar lengkapnya dari `GET /v1/banks`; slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`); `pln`; atau `whatsapp`. `code` harus berupa string — angka `2` bukan `\"002\"` dan ditolak 400. Kode internal provider tidak pernah dipakai di sisi member.\n\n**Hasil validasi** ada di field `status` pada respons 200: `valid`, `invalid`, `not_found`, `not_kyc`, atau `pending`. Error teknis memakai format `ApiError` dengan HTTP 4xx/5xx. Endpoint v1 (`POST /v1/validate/...`) sudah tidak tersedia dan menjawab 410 Gone.\n\n**Rate limit** bawaan 60 request/menit per kunci (header `X-RateLimit-Remaining`/`X-RateLimit-Reset` dikembalikan); kuota paket berkurang untuk hasil `valid` dan `not_kyc` (1 hit), serta `invalid`/`not_found` di luar jatah gratis 100 pertama per hari per kunci (WIB)."
   },
   "servers": [
     {
@@ -123,39 +123,46 @@
         }
       }
     },
-    "/v1/validate/bank-account": {
-      "post": {
+    "/api/v3/validate": {
+      "get": {
         "tags": [
           "Validation"
         ],
-        "summary": "Validasi rekening bank",
-        "description": "Memvalidasi nomor rekening dan mengembalikan nama pemilik terdaftar bila ditemukan.\n\nScope kunci yang diperlukan: `validate:bank_account` atau `validate:*`.",
+        "operationId": "validateV3Get",
+        "summary": "Validasi lewat query string",
+        "description": "Satu endpoint untuk semua produk. `code` memilih produk: kode bank 3 digit (mis. `002` BRI), slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`), `pln`, atau `whatsapp`; nomornya di `accountNumber`.\n\nGET tidak idempotent: setiap GET adalah cek baru. Kunci lewat query `api_key` atau header (`X-API-Key` / `Authorization: Bearer`); bila sumber berbeda nilainya, request ditolak 401.\n\nScope kunci yang diperlukan: scope produk yang sesuai atau `validate:*`.",
         "parameters": [
           {
-            "$ref": "#/components/parameters/IdempotencyKey"
+            "name": "code",
+            "in": "query",
+            "required": true,
+            "description": "Kode produk: kode bank 3 digit, slug e-wallet, `pln`, atau `whatsapp`.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "accountNumber",
+            "in": "query",
+            "required": true,
+            "description": "Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "api_key",
+            "in": "query",
+            "required": false,
+            "description": "Kunci API member (boleh juga lewat header).",
+            "schema": {
+              "type": "string"
+            }
           },
           {
             "$ref": "#/components/parameters/RequestId"
           }
         ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/BankAccountValidationRequest"
-              },
-              "examples": {
-                "bca": {
-                  "value": {
-                    "bank_code": "014",
-                    "account_number": "1234567890"
-                  }
-                }
-              }
-            }
-          }
-        },
         "responses": {
           "200": {
             "description": "Validasi selesai diproses. Periksa field `status` untuk hasil bisnisnya.",
@@ -234,16 +241,6 @@
               }
             }
           },
-          "409": {
-            "description": "Idempotency-Key yang sama sedang diproses atau bertabrakan dengan payload berbeda.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
           "429": {
             "description": "Rate limit terlampaui atau antrean provider penuh. Tunggu sesuai `Retry-After`.",
             "headers": {
@@ -282,15 +279,14 @@
             }
           }
         }
-      }
-    },
-    "/v1/validate/ewallet": {
+      },
       "post": {
         "tags": [
           "Validation"
         ],
-        "summary": "Validasi akun e-wallet",
-        "description": "Memvalidasi nomor akun e-wallet berdasarkan kode provider publik.\n\nScope kunci yang diperlukan: `validate:ewallet` atau `validate:*`.",
+        "operationId": "validateV3Post",
+        "summary": "Validasi lewat body JSON (mendukung idempotensi)",
+        "description": "Sama seperti GET, tetapi kunci lewat header atau field body `api_key`, dan mendukung `Idempotency-Key` (8–200 karakter ASCII tanpa spasi). `code` harus berupa string — angka `2` bukan `\"002\"` dan ditolak 400.\n\nScope kunci yang diperlukan: scope produk yang sesuai atau `validate:*`.",
         "parameters": [
           {
             "$ref": "#/components/parameters/IdempotencyKey"
@@ -304,173 +300,19 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/EwalletValidationRequest"
+                "$ref": "#/components/schemas/V3ValidateRequest"
               },
               "examples": {
-                "gopay": {
+                "bank": {
                   "value": {
-                    "provider": "gopay",
-                    "account_number": "081234567890"
+                    "code": "002",
+                    "accountNumber": "1234567890"
                   }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Validasi selesai diproses. Periksa field `status` untuk hasil bisnisnya.",
-            "headers": {
-              "X-Request-ID": {
-                "schema": {
-                  "type": "string"
-                }
-              },
-              "X-RateLimit-Remaining": {
-                "schema": {
-                  "type": "integer"
-                }
-              },
-              "X-RateLimit-Reset": {
-                "schema": {
-                  "type": "integer",
-                  "description": "Detik sampai jendela limit berikutnya."
-                }
-              },
-              "X-Idempotent-Replay": {
-                "schema": {
-                  "type": "string",
-                  "enum": [
-                    "true"
-                  ]
                 },
-                "description": "Hadir hanya bila respons diputar dari idempotency cache."
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ValidationResponse"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Permintaan tidak memenuhi kontrak (field hilang/format salah/kode tidak dikenal).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "API key tidak ada, tidak valid, atau sudah dicabut.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "402": {
-            "description": "Kuota paket habis.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Kunci tidak memiliki scope produk ini.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Idempotency-Key yang sama sedang diproses atau bertabrakan dengan payload berbeda.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "429": {
-            "description": "Rate limit terlampaui atau antrean provider penuh. Tunggu sesuai `Retry-After`.",
-            "headers": {
-              "Retry-After": {
-                "schema": {
-                  "type": "integer"
-                }
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "Provider validasi mengembalikan respons yang tidak dapat diproses.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          },
-          "503": {
-            "description": "Provider sedang tidak tersedia (termasuk circuit breaker terbuka) atau endpoint belum dikonfigurasi.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ApiError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/v1/validate/whatsapp": {
-      "post": {
-        "tags": [
-          "Validation"
-        ],
-        "summary": "Validasi nomor WhatsApp",
-        "description": "Memeriksa apakah nomor terdaftar di WhatsApp. Dilarang untuk spam, enumerasi massal, atau pengiriman OTP tanpa persetujuan pemilik nomor.\n\nScope kunci yang diperlukan: `validate:whatsapp` atau `validate:*`.",
-        "parameters": [
-          {
-            "$ref": "#/components/parameters/IdempotencyKey"
-          },
-          {
-            "$ref": "#/components/parameters/RequestId"
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/WhatsappValidationRequest"
-              },
-              "examples": {
-                "indonesia": {
+                "ewallet": {
                   "value": {
-                    "phone_number": "+6281234567890"
+                    "code": "gopay",
+                    "accountNumber": "081234567890"
                   }
                 }
               }
@@ -612,7 +454,7 @@
         "type": "apiKey",
         "in": "header",
         "name": "X-API-Key",
-        "description": "Kunci member (kunci baru berprefix `rc_`; kunci lama `rv_live_` tetap berlaku). Alternatif: `Authorization: Bearer rv_live_...`."
+        "description": "Kunci member (kunci baru berprefix `rc_`; kunci lama `rv_live_` tetap berlaku). Alternatif: `Authorization: Bearer <kunci>`. Untuk `GET /api/v3/validate`, kunci juga bisa dikirim lewat query `api_key`."
       }
     },
     "parameters": {
@@ -757,77 +599,6 @@
           }
         }
       },
-      "BankAccountValidationRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "bank_code",
-          "account_number"
-        ],
-        "properties": {
-          "bank_code": {
-            "type": "string",
-            "minLength": 3,
-            "maxLength": 3,
-            "pattern": "^[0-9]{3}$",
-            "description": "Kode bank resmi 3 digit dari GET /v1/banks.",
-            "example": "014"
-          },
-          "account_number": {
-            "type": "string",
-            "minLength": 6,
-            "maxLength": 32,
-            "pattern": "^[0-9 -]+$",
-            "example": "1234567890"
-          }
-        }
-      },
-      "EwalletValidationRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "provider",
-          "account_number"
-        ],
-        "properties": {
-          "provider": {
-            "type": "string",
-            "enum": [
-              "dana",
-              "gopay",
-              "gopay_driver",
-              "ovo",
-              "shopeepay",
-              "linkaja",
-              "astrapay",
-              "isaku",
-              "kaspro"
-            ],
-            "description": "Kode provider e-wallet publik.",
-            "example": "gopay"
-          },
-          "account_number": {
-            "type": "string",
-            "minLength": 6,
-            "maxLength": 32,
-            "example": "081234567890"
-          }
-        }
-      },
-      "WhatsappValidationRequest": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "phone_number"
-        ],
-        "properties": {
-          "phone_number": {
-            "type": "string",
-            "description": "Nomor format internasional atau lokal Indonesia (08...).",
-            "example": "+6281234567890"
-          }
-        }
-      },
       "ValidationStatus": {
         "type": "string",
         "description": "Billing: valid dan not_kyc memotong 1 hit; invalid dan not_found (satu pool bersama) gratis hingga 100 per hari per kunci (WIB), selebihnya 1 hit; pending, provider_error, rate_limited, dan quota_exhausted tidak memotong dan tidak memakan jatah gratis. Kunci bersaldo 0 tetap ditolak 402 sebelum cek berjalan.",
@@ -948,6 +719,30 @@
             ],
             "format": "date-time",
             "description": "Masa aktif paket yang sedang dipakai (kedaluwarsa paket yang paling cepat habis), sama dengan yang tampil di portal member. null berarti kunci tidak pernah kedaluwarsa. Bukan tanggal kunci mati: kunci tetap bisa dipakai selama masih ada paket aktif, dan tanggal ini bergeser otomatis saat paket yang sedang dipakai habis atau lewat masa aktifnya."
+          }
+        }
+      },
+      "V3ValidateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "accountNumber"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "Kode produk: kode bank 3 digit (mis. 002 BRI), slug e-wallet (dana, gopay, gopay_driver, ovo, shopeepay, linkaja, astrapay, isaku, kaspro), pln, atau whatsapp. Harus string.",
+            "example": "002"
+          },
+          "accountNumber": {
+            "type": "string",
+            "description": "Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp.",
+            "example": "1234567890"
+          },
+          "api_key": {
+            "type": "string",
+            "description": "Kunci API member (opsional bila sudah dikirim lewat header)."
           }
         }
       },
