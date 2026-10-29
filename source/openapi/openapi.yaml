@@ -7,12 +7,11 @@ info:
     Rajacek menerima permintaan validasi melalui API key yang memiliki scope produk sesuai.
     Satu endpoint `GET /api/v3/validate` (kunci lewat query `api_key`) dan `POST /api/v3/validate` (kunci lewat header atau field body `api_key`) melayani semua produk lewat `code`: kode bank 3 digit, slug e-wallet, `pln`, atau `whatsapp`.
     Endpoint POST menerima `Idempotency-Key` unik dari klien; bila tidak dikirim atau kosong, server membuatkannya otomatis dan mengembalikannya lewat header respons `Idempotency-Key` (retry tanpa kunci sendiri dianggap operasi baru). GET tidak idempotent: setiap GET adalah cek baru.
-    Endpoint v1 (`POST /v1/validate/...`) sudah tidak tersedia dan menjawab 410 Gone.
 
     Nilai rekening, nomor e-wallet, dan nomor telepon harus diperlakukan sebagai data sensitif.
     Jangan menulis nilai tersebut ke log aplikasi klien atau membagikannya tanpa dasar hukum/izin yang sesuai.
 servers:
-  - url: https://rajacek.com
+  - url: https://www.rajacek.com
     description: Produksi
 security:
   - ApiKeyAuth: []

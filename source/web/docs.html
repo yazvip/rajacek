@@ -63,6 +63,29 @@
       @media (max-width: 900px) { .site-header nav { display:none; } .docs-layout { grid-template-columns:1fr; padding-top:1.6rem; } .docs-toc { position:static; } .docs-body { padding:1.7rem 1.3rem 2.2rem; } .docs-body h1 { font-size:2rem; } }
     /* AUDIT GRUP D 2026-10-26 - OPSIONAL docs: tabel di-scroll di HP, bukan meluber. */
 @media (max-width: 640px) { .docs-body table { display:block; overflow-x:auto; } }
+
+      /* Dropdown menu mobile: sidebar disembunyikan, diganti bar atas mengambang. */
+      .docs-mobilebar { display:none; }
+      @media (max-width: 768px) {
+        .docs-toc { display:none; }
+        .docs-mobilebar { display:block; position:sticky; top:72px; z-index:15; background:var(--white); border:1px solid var(--line); border-radius:14px; padding:.6rem .7rem; margin:0 0 1.2rem; box-shadow:0 1px 2px rgba(16,33,61,.06); }
+        .docs-mobilebar-btn { display:flex; align-items:center; justify-content:space-between; width:100%; background:var(--white); border:1px solid var(--line); border-radius:10px; padding:.65rem .85rem; font:inherit; font-weight:700; color:var(--ink); cursor:pointer; }
+        .docs-mobilebar-btn:hover { border-color:var(--blue); color:var(--blue); }
+        .docs-mobilebar-btn .chev { transition:transform .15s ease; color:var(--blue); }
+        .docs-mobilebar-btn[aria-expanded="true"] .chev { transform:rotate(180deg); }
+        .docs-mobilemenu { display:none; margin-top:.6rem; border-top:1px solid var(--line); padding-top:.6rem; max-height:60vh; overflow-y:auto; }
+        .docs-mobilemenu.open { display:block; }
+        .docs-mobilemenu p { font-size:.68rem; letter-spacing:.16em; text-transform:uppercase; font-weight:800; color:var(--blue); margin:.8rem 0 .3rem; }
+        .docs-mobilemenu p:first-child { margin-top:.2rem; }
+        .docs-mobilemenu a { display:block; color:#51637d; text-decoration:none; padding:.45rem .55rem; border-radius:8px; }
+        .docs-mobilemenu a:hover { color:#174fc4; background:#eaf2ff; }
+        .docs-layout { padding:1.2rem .9rem 3rem; }
+        .docs-body { padding:1.5rem 1.1rem 2rem; }
+        .docs-body h1 { font-size:1.7rem; }
+        .docs-body h2 { font-size:1.25rem; }
+        .docs-body pre { font-size:.8rem; padding:1rem; }
+        .docs-body :not(pre) > code { overflow-wrap:anywhere; }
+      }
 </style>
   </head>
   <body>
@@ -77,7 +100,12 @@
       <a class="nav-cta" href="/member">Portal member <span aria-hidden="true">→</span></a>
     </header>
 
-    <div class="docs-layout">
+        <div class="docs-mobilebar">
+      <button type="button" class="docs-mobilebar-btn" id="docsMenuBtn" aria-expanded="false" aria-controls="docsMobileMenu">Daftar isi <span class="chev" aria-hidden="true">▾</span></button>
+      <nav class="docs-mobilemenu" id="docsMobileMenu" aria-label="Daftar isi dokumentasi"></nav>
+    </div>
+
+<div class="docs-layout">
       <aside class="docs-toc" aria-label="Daftar isi dokumentasi">
         <p>Memulai</p>
         <a href="#mulai-cepat">Mulai cepat</a>
@@ -100,7 +128,7 @@
       <main class="docs-body" id="content">
         <p class="eyebrow">Dokumentasi API · Member &amp; Publik</p>
         <h1>Integrasi Rajacek dalam hitungan menit.</h1>
-        <p>Rajacek mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, <strong>nomor WhatsApp</strong>, dan <strong>ID pelanggan PLN</strong> Indonesia lewat satu API. Semua contoh di halaman ini memakai domain asli <code>https://rajacek.com</code> dan bisa langsung disalin-tempel. Ganti saja kunci contoh <code>rc_CONTOH</code> dengan kunci Anda sendiri. Kunci baru diawali <code>rc_</code>. Kunci lama <code>rv_live_</code> tetap berlaku. Perlakukan kunci Anda seperti kata sandi. Jangan dibagikan ke siapa pun.</p>
+        <p>Rajacek mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, <strong>nomor WhatsApp</strong>, dan <strong>ID pelanggan PLN</strong> Indonesia lewat satu API. Semua contoh di halaman ini memakai domain asli <code>https://www.rajacek.com</code> dan bisa langsung disalin-tempel. Ganti saja kunci contoh <code>rc_CONTOH</code> dengan kunci Anda sendiri. Kunci baru diawali <code>rc_</code>. Kunci lama <code>rv_live_</code> tetap berlaku. Perlakukan kunci Anda seperti kata sandi. Jangan dibagikan ke siapa pun.</p>
         <div class="docs-actions">
           <a class="button button-primary" href="/openapi.json">Unduh OpenAPI JSON</a>
           <a class="button button-quiet" href="#mulai-cepat">Mulai cepat ↓</a>
@@ -114,9 +142,9 @@
           <li>Kirim request ke endpoint validasi <code>/api/v3/validate</code>. Paling mudah: GET dengan kunci di query, atau POST dengan kunci di header. Contohnya di bawah ini.</li>
         </ol>
         <div class="callout"><strong>Trial habis?</strong> Setelah kuota trial habis atau 7 hari berakhir, API menolak cek baru dengan kode <code>402</code>. Lanjutkan ke paket berbayar lewat portal member. Beli paket dengan QRIS dan kuota langsung aktif.</div>
-        <pre><code>curl "https://rajacek.com/api/v3/validate?code=014&accountNumber=1234567890&api_key=rc_CONTOH"</code></pre>
+        <pre><code>curl "https://www.rajacek.com/api/v3/validate?code=014&accountNumber=1234567890&api_key=rc_CONTOH"</code></pre>
         <p>Atau POST dengan kunci di header (mendukung <code>Idempotency-Key</code> — lihat <a href="#idempotensi">Idempotensi</a>):</p>
-        <pre><code>curl -X POST https://rajacek.com/api/v3/validate \
+        <pre><code>curl -X POST https://www.rajacek.com/api/v3/validate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: rc_CONTOH" \
   -H "Idempotency-Key: order-20261021-0001" \
@@ -199,7 +227,6 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
   { "code_bank": "014", "name_bank": "BCA" }
 ]</code></pre>
 
-        <div class="callout"><strong>Migrasi dari v1:</strong> endpoint lama <code>POST /v1/validate/bank-account</code>, <code>/ewallet</code>, <code>/whatsapp</code>, dan <code>/pln</code> sudah tidak tersedia. Semuanya menjawab <strong>410 Gone</strong> dengan arahan ke <code>/api/v3/validate</code>. Satu endpoint v3 melayani semua produk lewat <code>code</code>: kode bank 3 digit, slug e-wallet (<code>dana</code>, <code>gopay</code>, <code>gopay_driver</code>, <code>ovo</code>, <code>shopeepay</code>, <code>linkaja</code>, <code>astrapay</code>, <code>isaku</code>, <code>kaspro</code>), <code>pln</code>, atau <code>whatsapp</code>. Nomornya selalu di <code>accountNumber</code>.</div>
 
         <h2 id="validasi-bank">Validasi rekening <span class="method get">GET</span> <span class="method post">POST</span> <span class="endpoint-path">/api/v3/validate</span></h2>
         <table>
@@ -238,9 +265,9 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
           <tr><td><code>accountNumber</code></td><td>Ya</td><td>Nomor akun/nomor HP e-wallet 6–32 karakter.</td></tr>
         </table>
         <p>Kode e-wallet yang didukung: <code>dana</code>, <code>gopay</code>, <code>gopay_driver</code>, <code>ovo</code>, <code>shopeepay</code>, <code>linkaja</code>, <code>astrapay</code>, <code>isaku</code>, <code>kaspro</code>.</p>
-        <pre><code>curl "https://rajacek.com/api/v3/validate?code=gopay&accountNumber=081234567890&api_key=rc_CONTOH"</code></pre>
+        <pre><code>curl "https://www.rajacek.com/api/v3/validate?code=gopay&accountNumber=081234567890&api_key=rc_CONTOH"</code></pre>
         <p>Atau POST dengan <code>Idempotency-Key</code>:</p>
-        <pre><code>curl -X POST https://rajacek.com/api/v3/validate \
+        <pre><code>curl -X POST https://www.rajacek.com/api/v3/validate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: rc_CONTOH" \
   -H "Idempotency-Key: topup-20261021-0007" \
@@ -275,9 +302,9 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
           <tr><td><code>code</code></td><td>Ya</td><td>Isi <code>whatsapp</code>.</td></tr>
           <tr><td><code>accountNumber</code></td><td>Ya</td><td>Nomor format internasional (<code>+628...</code>) atau lokal (<code>08...</code>).</td></tr>
         </table>
-        <pre><code>curl "https://rajacek.com/api/v3/validate?code=whatsapp&accountNumber=081234567890&api_key=rc_CONTOH"</code></pre>
+        <pre><code>curl "https://www.rajacek.com/api/v3/validate?code=whatsapp&accountNumber=081234567890&api_key=rc_CONTOH"</code></pre>
         <p>Atau POST dengan <code>Idempotency-Key</code>:</p>
-        <pre><code>curl -X POST https://rajacek.com/api/v3/validate \
+        <pre><code>curl -X POST https://www.rajacek.com/api/v3/validate \
   -H "Content-Type: application/json" \
   -H "X-API-Key: rc_CONTOH" \
   -H "Idempotency-Key: wa-20261021-0003" \
@@ -308,7 +335,7 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
 
         <h2 id="validasi-pln">Validasi PLN <span class="method get">GET</span> <span class="method post">POST</span> <span class="endpoint-path">/api/v3/validate</span></h2>
         <p>Produk <code>pln</code> memeriksa <strong>ID pelanggan PLN</strong> (11–12 digit numerik). Di portal member, pilih tab <strong>PLN</strong> di <strong>Coba Cek Live</strong> lalu masukkan ID pelanggan. Lewat API, pakai <code>code=pln</code> dan <code>accountNumber</code> berisi ID pelanggan. Scope: <code>validate:pln</code> (atau <code>validate:*</code>).</p>
-        <pre><code>curl "https://rajacek.com/api/v3/validate?code=pln&accountNumber=123456789012&api_key=rc_CONTOH"</code></pre>
+        <pre><code>curl "https://www.rajacek.com/api/v3/validate?code=pln&accountNumber=123456789012&api_key=rc_CONTOH"</code></pre>
         <p>Hasil valid (HTTP 200) menampilkan nama pelanggan (<code>account_name</code>, selalu huruf besar semua). Bila tersedia, tampil juga <code>tarif</code> dan <code>daya</code>:</p>
         <pre><code>{
   "status": "valid",
@@ -350,7 +377,6 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
           <tr><td>402</td><td><code>quota_exhausted</code></td><td>Kuota paket Anda habis. Beli paket di portal member untuk menambah kuota.</td></tr>
           <tr><td>403</td><td><code>forbidden</code></td><td>API key Anda tidak punya izin (scope) untuk produk ini.</td></tr>
           <tr><td>409</td><td><code>conflict</code></td><td>Idempotency-Key yang sama sudah dipakai dengan isi berbeda, atau request sebelumnya masih diproses. Untuk operasi baru, pakai kunci baru.</td></tr>
-          <tr><td>410</td><td><code>gone</code></td><td>Endpoint v1 sudah tidak tersedia. Pindah ke <code>/api/v3/validate</code>.</td></tr>
           <tr><td>429</td><td><code>rate_limited</code></td><td>Anda terlalu cepat (rate limit) atau antrean sedang penuh. Tunggu sesuai header <code>Retry-After</code>, lalu coba lagi.</td></tr>
           <tr><td>502</td><td><code>provider_error</code></td><td>Layanan pemeriksa memberi respons yang tidak bisa diproses. Aman diulang dengan Idempotency-Key yang sama.</td></tr>
           <tr><td>503</td><td><code>service_unavailable</code></td><td>Layanan pemeriksa sedang tidak tersedia, atau produk ini belum aktif. Coba lagi beberapa saat.</td></tr>
@@ -374,5 +400,46 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
         <p style="margin-top:2.5rem;color:var(--muted);font-size:.9rem;">Rajacek API · Dokumentasi member · Terakhir diselaraskan dengan kontrak API pada 29 Oktober 2026.</p>
       </main>
     </div>
+      <script>
+      /* Menu mobile docs: daftar isi disalin dari sidebar desktop (satu sumber),
+         jadi keduanya selalu sinkron. Tutup saat item dipilih, klik di luar, atau Escape. */
+      (function () {
+        var toc = document.querySelector('.docs-toc');
+        var menu = document.getElementById('docsMobileMenu');
+        var btn = document.getElementById('docsMenuBtn');
+        if (!toc || !menu || !btn) return;
+        Array.prototype.forEach.call(toc.childNodes, function (node) {
+          if (node.nodeType !== 1) return;
+          if (node.tagName === 'P') {
+            var p = document.createElement('p');
+            p.textContent = node.textContent;
+            menu.appendChild(p);
+          } else if (node.tagName === 'A') {
+            var a = document.createElement('a');
+            a.textContent = node.textContent;
+            a.setAttribute('href', node.getAttribute('href'));
+            menu.appendChild(a);
+          }
+        });
+        function setOpen(open) {
+          btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+          menu.classList.toggle('open', open);
+        }
+        btn.addEventListener('click', function (ev) {
+          ev.stopPropagation();
+          setOpen(btn.getAttribute('aria-expanded') !== 'true');
+        });
+        menu.addEventListener('click', function (ev) {
+          if (ev.target && ev.target.tagName === 'A') setOpen(false);
+        });
+        document.addEventListener('click', function (ev) {
+          if (!menu.classList.contains('open')) return;
+          if (!btn.contains(ev.target) && !menu.contains(ev.target)) setOpen(false);
+        });
+        document.addEventListener('keydown', function (ev) {
+          if (ev.key === 'Escape') setOpen(false);
+        });
+      })();
+    </script>
   </body>
 </html>

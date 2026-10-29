@@ -26,7 +26,7 @@ promo, expiry) dihitung dalam WIB (UTC+7 tetap).
 
 ## 1. FLOW VALIDASI (API member)
 
-Endpoint: `GET/POST /api/v3/validate` (bank / e-wallet / WhatsApp / PLN; satu endpoint, produk dipilih lewat `code`). Endpoint v1 (`POST /v1/validate/...`) sudah tidak tersedia (410 Gone).
+Endpoint: `GET/POST /api/v3/validate` (bank / e-wallet / WhatsApp / PLN; satu endpoint, produk dipilih lewat `code`).
 Auth: header `x-api-key` atau `Authorization: Bearer`, atau `api_key` lewat query (GET) / field body (POST); bila lebih dari satu sumber ada dan nilainya berbeda → 401.
 
 ```
