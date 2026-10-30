@@ -29,7 +29,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/landing.css?v=20261030-1" />
+    <link rel="stylesheet" href="/landing.css?v=20261028-4" />
     <style>
       .article { width:min(760px,calc(100% - 40px)); margin:auto; padding:48px 0 72px; }
       .article h1 { color:var(--navy); font-size:clamp(30px,4vw,44px); line-height:1.15; letter-spacing:-1.8px; margin-bottom:10px; }
@@ -47,12 +47,7 @@
       .article .faq-item p { margin:0; font-size:15px; }
       .article .cta { margin-top:40px; display:flex; flex-wrap:wrap; gap:12px; }
       @media (max-width:480px) { .article { width:calc(100% - 28px); padding:36px 0 56px; } }
-    
-      /* Peacock Feather (2026-10-30): band header gradasi artikel. */
-      .article-hero { background:linear-gradient(180deg,#4D52B4,#4E9CE8,#70D6C5,#CAE5BC,#E1EDD4); border-radius:22px; padding:32px 28px; margin-bottom:28px; }
-      .article-hero h1 { color:#fff; }
-      .article-hero .meta { color:#E1EDD4; }
-</style>
+    </style>
     <script type="application/ld+json">
       {"@context":"https://schema.org","@graph":[{"@type":"Article","headline":"Validasi PLN Kini Tersedia di Rajacek","description":"Rajacek kini memvalidasi ID pelanggan PLN: masukkan ID 11–12 digit untuk memastikan nama pemilik dan info tarif/daya sebelum transaksi.","datePublished":"2026-10-27","author":{"@type":"Organization","name":"Rajacek","url":"https://www.rajacek.com/"},"mainEntityOfPage":{"@type":"WebPage","@id":"https://www.rajacek.com/blog/validasi-pln.html"},"inLanguage":"id-ID","image":"https://www.rajacek.com/blog/images/validasi-pln.jpg"},{"@type":"FAQPage","mainEntity":[{"@type":"Question","name":"Apa yang dibutuhkan untuk cek PLN?","acceptedAnswer":{"@type":"Answer","text":"ID pelanggan PLN sepanjang 11–12 digit. Masukkan ID tersebut di portal member atau lewat API, dan hasilnya menampilkan nama pemilik bila ID valid."}},{"@type":"Question","name":"Apa yang saya dapat dari hasil cek PLN?","acceptedAnswer":{"@type":"Answer","text":"Nama pemilik ID pelanggan, serta info tarif dan daya bila tersedia. Bila ID tidak cocok, hasilnya dinyatakan tidak valid."}},{"@type":"Question","name":"Apakah cek PLN bisa lewat API?","acceptedAnswer":{"@type":"Answer","text":"Ya. Kirim ID pelanggan lewat endpoint validasi PLN dan lihat detailnya di dokumentasi Rajacek."}}]},{"@type":"BreadcrumbList","itemListElement":[{"@type":"ListItem","position":1,"name":"Beranda","item":"https://www.rajacek.com/"},{"@type":"ListItem","position":2,"name":"Blog","item":"https://www.rajacek.com/blog/"},{"@type":"ListItem","position":3,"name":"Validasi PLN Kini Tersedia di Rajacek","item":"https://www.rajacek.com/blog/validasi-pln.html"}]}]}
     </script>
@@ -66,10 +61,8 @@
     </header>
     <main id="content">
       <article class="article">
-        <div class="article-hero">
-          <h1>Validasi PLN Kini Tersedia di Rajacek</h1>
-          <p class="meta">27 Oktober 2026 · Rajacek</p>
-        </div>
+        <h1>Validasi PLN Kini Tersedia di Rajacek</h1>
+        <p class="meta">27 Oktober 2026 · Rajacek</p>
         <p>Rajacek kini memvalidasi empat produk lewat satu layanan: rekening bank, e-wallet, WhatsApp, dan ID pelanggan PLN. Validasi PLN melengkapi rangkaian cek yang selama ini tersedia, sehingga kebutuhan memastikan identitas sebelum transaksi kini mencakup tagihan listrik juga.</p>
 
         <figure>
