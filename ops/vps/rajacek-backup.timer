@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Rajacek database backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+RandomizedDelaySec=10m
+Unit=rajacek-backup.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,23 @@
+[Unit]
+Description=Rajacek Rust API
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=rajacek
+Group=rajacek
+WorkingDirectory=/opt/rajacek/repo/source
+EnvironmentFile=/opt/rajacek/.env
+ExecStart=/opt/rajacek/repo/source/target/release/rajacek-api
+Restart=on-failure
+RestartSec=5
+MemoryMax=350M
+MemorySwapMax=100M
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

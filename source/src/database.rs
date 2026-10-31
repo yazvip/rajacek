@@ -23,12 +23,12 @@ const PERSIST_VALIDATION_REQUEST_SQL: &str = r#"
             INSERT IGNORE INTO validation_requests (
                 id, request_id, event_id, api_key_prefix, product_code, outcome,
                 target_fingerprint, target_masked, target_raw, account_name,
-                provider_reference, provider_endpoint_id, provider_latency_ms,
+                provider_reference, provider_endpoint_id, provider_hint, provider_latency_ms,
                 rajacek_processing_ms, total_latency_ms, attempts,
                 occurred_at, channel
             ) VALUES (
                 UUID_TO_BIN(?), ?, UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?,
-                CASE WHEN ? IS NULL THEN NULL ELSE UUID_TO_BIN(?) END,
+                CASE WHEN ? IS NULL THEN NULL ELSE UUID_TO_BIN(?) END, ?,
                 ?, ?, ?, ?, ?, ?
             )
             "#;
@@ -117,6 +117,7 @@ impl Database {
             .bind(&event.provider_reference)
             .bind(&provider_endpoint_id)
             .bind(&provider_endpoint_id)
+            .bind(&event.provider_hint)
             .bind(event.provider_latency_ms)
             .bind(event.rajacek_processing_ms)
             .bind(event.total_latency_ms)
@@ -191,6 +192,6 @@ mod persist_sql_tests {
         // bind di persist_usage_event.
         assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("provider_endpoint_id"));
         let placeholders = PERSIST_VALIDATION_REQUEST_SQL.matches('?').count();
-        assert_eq!(placeholders, 19, "bind dan placeholder tidak seimbang");
+        assert_eq!(placeholders, 20, "bind dan placeholder tidak seimbang");
     }
 }

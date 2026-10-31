@@ -269,6 +269,8 @@ pub struct UsageEvent {
     /// supaya event yang diantre binary lama tetap ter-parse (None).
     #[serde(default)]
     pub provider_endpoint_id: Option<Uuid>,
+    #[serde(default)]
+    pub provider_hint: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     /// Internal processing time and end-to-end total for this check, plus how
@@ -332,6 +334,8 @@ pub struct ValidationHistoryItem {
     /// as `target_raw` / `account_name` above.
     #[serde(skip_serializing)]
     pub provider_endpoint_name: Option<String>,
+    #[serde(skip_serializing)]
+    pub provider_hint_display: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     /// Latency breakdown for the admin history view; None for rows recorded
@@ -343,6 +347,23 @@ pub struct ValidationHistoryItem {
     /// "api" | "portal" — where the check was made (default "api").
     #[serde(default = "default_channel")]
     pub channel: String,
+}
+
+/// Public bank/e-wallet label for admin-only history; never expose upstream IDs.
+pub fn provider_hint_display(product: ValidationProduct, hint: Option<&str>) -> Option<String> {
+    let hint = hint?.trim();
+    if hint.is_empty() {
+        return None;
+    }
+    match product {
+        ValidationProduct::BankAccount => crate::bank_codes::bank_name(hint)
+            .map(|name| format!("{hint} · {name}")),
+        ValidationProduct::Ewallet => crate::ewallet_codes::list()
+            .iter()
+            .find(|(slug, _)| *slug == hint)
+            .map(|(_, name)| format!("{hint} · {name}")),
+        _ => None,
+    }
 }
 
 /// Admin-only serialization of [`ValidationHistoryItem`]: identical
@@ -364,6 +385,7 @@ pub struct AdminValidationHistoryItem {
     /// Nama endpoint sumber jawaban (migration 0033), admin only. Hanya
     /// NAMA yang dikirim — tidak pernah URL, host, kunci, atau kredensial.
     pub provider_endpoint_name: Option<String>,
+    pub provider_hint_display: Option<String>,
     pub provider_reference: Option<String>,
     pub provider_latency_ms: u64,
     pub rajacek_processing_ms: Option<u64>,
@@ -385,6 +407,7 @@ impl From<&ValidationHistoryItem> for AdminValidationHistoryItem {
             target_raw: item.target_raw.clone(),
             account_name: item.account_name.clone(),
             provider_endpoint_name: item.provider_endpoint_name.clone(),
+            provider_hint_display: item.provider_hint_display.clone(),
             provider_reference: item.provider_reference.clone(),
             provider_latency_ms: item.provider_latency_ms,
             rajacek_processing_ms: item.rajacek_processing_ms,
@@ -1799,6 +1822,7 @@ mod history_filter_tests {
             target_raw: None,
             account_name: None,
             provider_endpoint_name: None,
+            provider_hint_display: None,
             provider_reference: None,
             provider_latency_ms: 0,
             rajacek_processing_ms: None,
@@ -1918,6 +1942,7 @@ mod admin_history_fields_tests {
             target_raw: Some("1234567890".to_owned()),
             account_name: Some("Andrias Se****an Su****o".to_owned()),
             provider_endpoint_name: None,
+            provider_hint_display: None,
             provider_reference: None,
             provider_latency_ms: 10,
             rajacek_processing_ms: None,
