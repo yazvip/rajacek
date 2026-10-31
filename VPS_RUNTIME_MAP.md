@@ -37,7 +37,9 @@ Important Go caveat: during this audit, public 8090 was an orphan process in a l
 4. Database migration: `AUTO_MIGRATE=false` is intentional. The imported DB records migration 38, but historical migration 5 checksum differs from the checked-out source. Never edit `_sqlx_migrations` checksums or turn auto-migrate on blindly. Compare schema and migration history, then apply a reviewed forward-only migration with an explicit DB backup/restore plan.
 5. Install staged source/binaries atomically, verify ownership/modes, run `nginx -t`, and restart only `rajacek-api` / `rajacek-worker` when their artifacts or config changed. Nginx reload only if its config changed.
 6. Verify both units active, logs clean, `https://www.rajacek.com/health/live`, `/health/ready`, `/v1/status`, one public page, MySQL/Redis connectivity, then verify Go health at `https://app.apivalidasi.my.id/`.
-7. If health regresses, stop the failed worker/API, restore the recorded binaries/source and `.env` backup, restart the Rust units, and verify Go again. Do not restore an old DB backup over live data without an explicit recovery decision.
+7. Bila health regress, hentikan worker/API yang gagal, pulihkan source dan binary yang hash-nya dicatat, restart unit Rust, lalu cek Go lagi. Jangan restore dump DB lama di atas database live tanpa keputusan pemulihan eksplisit.
+8. Setelah deploy VPS berhasil dan smoke test lulus, commit lalu push perubahan source dan template operasional yang memang perlu dipelihara ke `yazvip/rajacek`. Verifikasi SHA commit remote sama dengan commit lokal. Jangan push secret, `.env`, database dump, backup, build artifacts, atau helper yang berisi kredensial. Jika deploy gagal, rollback dahulu; jangan menandai perubahan sebagai rilis berhasil.
+
 
 Rust unit controls:
 
