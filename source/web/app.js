@@ -1858,7 +1858,7 @@
     const data = state.analytics;
     if (!data) return;
     const meta = $("#analytics-meta");
-    if (meta) meta.textContent = `${data.days} hari · ${data.cached ? "cache 60 detik" : "data baru"}${data.database ? "" : " · tanpa database"}`;
+    if (meta) meta.textContent = `${data.alltime ? "Sepanjang masa" : `${data.days} hari`} · ${data.cached ? "cache 60 detik" : "data baru"}${data.database ? "" : " · tanpa database"}`;
     const note = $("#analytics-note");
     if (note) note.textContent = data.database
       ? "Pendapatan = order paid + granted dalam rentang ini. Success rate = valid + belum KYC dibanding hasil final."
@@ -1895,6 +1895,30 @@
       const total = row.bank_account + row.ewallet + row.whatsapp + row.pln;
       return `<tr><td>${escapeHtml(day)}</td><td>${formatNumber(row.bank_account)}</td><td>${formatNumber(row.ewallet)}</td><td>${formatNumber(row.whatsapp)}</td><td>${formatNumber(row.pln)}</td><td><strong>${formatNumber(total)}</strong></td></tr>`;
     }).join("") || `<tr><td colspan="6" class="empty-state">Belum ada data.</td></tr>`;
+    const memberTable = $("#analytics-member-table");
+    if (memberTable) {
+      memberTable.innerHTML = (data.per_member || []).map((member) => `<tr>
+      <td data-label="Kode member"><strong>${escapeHtml(member.member_code || "Tanpa member")}</strong></td>
+      <td data-label="Email">${escapeHtml(member.email || "—")}</td>
+      <td data-label="Total hit">${formatNumber(member.total_hits)}</td>
+      <td data-label="Sukses">${formatNumber(member.success_hits)}</td>
+      <td data-label="Success rate">${member.success_rate_percent == null ? "—" : `${Number(member.success_rate_percent).toLocaleString("id-ID", { maximumFractionDigits: 1 })}%`}</td>
+      <td data-label="Rata-rata latensi">${member.avg_latency_ms == null ? "—" : `${formatNumber(member.avg_latency_ms)} ms`}</td>
+      <td data-label="Order lunas">${formatNumber(member.total_orders)}</td>
+      <td data-label="Pendapatan">${formatRupiah(member.revenue_idr)}</td>
+    </tr>`).join("") || `<tr><td colspan="8" class="empty-state">Belum ada data.</td></tr>`;
+    }
+    const endpointTable = $("#analytics-endpoint-table");
+    if (endpointTable) {
+      endpointTable.innerHTML = (data.per_endpoint || []).map((endpoint) => `<tr>
+      <td data-label="Server"><strong>${escapeHtml(endpoint.endpoint_name || "Tidak tercatat")}</strong></td>
+      <td data-label="Produk">${escapeHtml(endpoint.product_label === endpoint.product ? productLabel(endpoint.product) : endpoint.product_label)}</td>
+      <td data-label="Total hit">${formatNumber(endpoint.total_hits)}</td>
+      <td data-label="Sukses">${formatNumber(endpoint.success_hits)}</td>
+      <td data-label="Success rate">${endpoint.success_rate_percent == null ? "—" : `${Number(endpoint.success_rate_percent).toLocaleString("id-ID", { maximumFractionDigits: 1 })}%`}</td>
+      <td data-label="Rata-rata latensi">${endpoint.avg_latency_ms == null ? "—" : `${formatNumber(endpoint.avg_latency_ms)} ms`}</td>
+    </tr>`).join("") || `<tr><td colspan="6" class="empty-state">Belum ada data.</td></tr>`;
+    }
   }
 
   // AREA 2: kesehatan rute — selalu live (breaker tidak di-cache).
@@ -3360,7 +3384,8 @@
     });
     $("#analytics-range-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
-      state.analyticsDays = Number($("#analytics-days").value) || 30;
+      const daysValue = Number($("#analytics-days").value);
+      state.analyticsDays = Number.isFinite(daysValue) ? daysValue : 30;
       loadAnalytics().catch(handleApiError);
     });
     // Tab Analitik: hanya show/hide seksi (tanpa reload data, tanpa hash).

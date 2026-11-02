@@ -7,8 +7,10 @@
 //!   dengan id internal + label yang dikonfigurasi admin sendiri; kolom
 //!   `base_url` tidak pernah disalin ke DTO kesehatan.
 //! - Semua query bertanggal dan berbatas: rentang analitik di-clamp
-//!   (default 30 hari, maks 90), jendela kesehatan 24 jam terakhir,
-//!   sampel latensi per produk dibatasi 5.000 baris terbaru.
+//!   (default 30 hari, maks 90; `days=0` = sepanjang masa, pengecualian
+//!   eksplisit yang dipilih user — agregasi penuh atas tabel yang ada,
+//!   di-cache 60 detik seperti rentang lain), jendela kesehatan 24 jam
+//!   terakhir, sampel latensi per produk dibatasi 5.000 baris terbaru.
 //!
 //! Definisi pendapatan (didokumentasikan, bukan ditebak):
 //! `total_idr` analitik = SUM(amount_idr) order berstatus `paid` atau
@@ -86,10 +88,15 @@ pub fn is_revenue_status(status: &str) -> bool {
     REVENUE_STATUSES.contains(&status)
 }
 
-/// Clamp rentang analitik: kosong -> default, di bawah 1 -> 1,
+/// Clamp rentang analitik: kosong -> default, `0` -> sepanjang masa
+/// (tanpa filter tanggal, dipilih eksplisit oleh user), di bawah 0 -> 1,
 /// di atas maksimum -> maksimum.
 pub fn clamp_analytics_days(days: Option<i64>) -> i64 {
-    days.unwrap_or(ANALYTICS_DEFAULT_DAYS).clamp(1, ANALYTICS_MAX_DAYS)
+    match days {
+        None => ANALYTICS_DEFAULT_DAYS,
+        Some(0) => 0,
+        Some(days) => days.clamp(1, ANALYTICS_MAX_DAYS),
+    }
 }
 
 /// Success rate (persen) dari hitungan sukses vs total final.
@@ -134,11 +141,45 @@ fn window_start_utc(days: i64) -> chrono::NaiveDateTime {
     let wib = FixedOffset::east_opt(7 * 3600).expect("offset WIB valid");
     let today = Utc::now().with_timezone(&wib).date_naive();
     let first_day = today - chrono::Duration::days(days - 1);
-    let midnight_wib = first_day
-        .and_hms_opt(0, 0, 0)
-        .expect("tengah malam valid");
+    window_start_utc_for_day(first_day)
+}
+
+/// Tengah malam WIB suatu hari, dikonversi ke UTC (batas bawah jendela
+/// untuk hari itu).
+fn window_start_utc_for_day(day: NaiveDate) -> chrono::NaiveDateTime {
+    let midnight_wib = day.and_hms_opt(0, 0, 0).expect("tengah malam valid");
     // WIB = UTC+7, jadi UTC = WIB - 7 jam.
     midnight_wib - chrono::Duration::hours(7)
+}
+
+/// Daftar hari WIB dari `first` sampai hari ini (inklusif), untuk
+/// zero-fill rentang sepanjang masa.
+fn wib_day_list_from(first: NaiveDate) -> Vec<NaiveDate> {
+    let wib = FixedOffset::east_opt(7 * 3600).expect("offset WIB valid");
+    let today = Utc::now().with_timezone(&wib).date_naive();
+    let mut days = Vec::new();
+    let mut day = first;
+    while day <= today {
+        days.push(day);
+        day += chrono::Duration::days(1);
+    }
+    days
+}
+
+/// Hari WIB pertama yang punya data (validasi atau order lunas),
+/// untuk jendela sepanjang masa. `None` bila kedua tabel kosong.
+async fn first_data_day(pool: &MySqlPool) -> Option<NaiveDate> {
+    let day: Option<String> = sqlx::query_scalar(
+        "SELECT MIN(d) FROM ( \
+         SELECT DATE(CONVERT_TZ(occurred_at, '+00:00', '+07:00')) AS d FROM validation_requests \
+         UNION ALL \
+         SELECT DATE(CONVERT_TZ(COALESCE(paid_at, created_at), '+00:00', '+07:00')) FROM package_orders WHERE status IN ('paid', 'granted') \
+         ) t",
+    )
+    .fetch_one(pool)
+    .await
+    .ok()?;
+    day.and_then(|d| NaiveDate::parse_from_str(&d, "%Y-%m-%d").ok())
 }
 
 /// Daftar hari WIB (NaiveDate) dalam jendela, untuk zero-fill di Rust.
@@ -200,8 +241,43 @@ pub struct DailyHits {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct MemberAnalytics {
+    pub member_code: Option<String>,
+    pub email: Option<String>,
+    pub total_hits: u64,
+    pub success_hits: u64,
+    pub final_hits: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_rate_percent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_latency_ms: Option<u64>,
+    pub total_orders: u64,
+    pub revenue_idr: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct EndpointAnalytics {
+    /// Id endpoint (hex) atau null untuk hit tanpa endpoint tercatat.
+    pub endpoint_id: Option<String>,
+    /// Nama server dari konfigurasi admin; null = tidak tercatat.
+    pub endpoint_name: Option<String>,
+    pub product: String,
+    pub product_label: String,
+    pub total_hits: u64,
+    pub success_hits: u64,
+    pub final_hits: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub success_rate_percent: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avg_latency_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct AnalyticsResponse {
     pub days: i64,
+    /// `true` bila `days` yang diminta adalah 0 (sepanjang masa); `days`
+    /// pada respons ini adalah rentang hari aktual sejak data pertama.
+    pub alltime: bool,
     pub generated_at: chrono::DateTime<Utc>,
     /// `true` bila respons ini dari cache 60 detik (bukan query baru).
     pub cached: bool,
@@ -211,6 +287,8 @@ pub struct AnalyticsResponse {
     pub revenue: RevenueAnalytics,
     pub products: Vec<ProductAnalytics>,
     pub hits_per_day: Vec<DailyHits>,
+    pub per_member: Vec<MemberAnalytics>,
+    pub per_endpoint: Vec<EndpointAnalytics>,
 }
 
 impl AnalyticsResponse {
@@ -243,6 +321,7 @@ impl AnalyticsResponse {
             .collect();
         AnalyticsResponse {
             days,
+            alltime: days == 0,
             generated_at: Utc::now(),
             cached: false,
             database: false,
@@ -261,6 +340,8 @@ impl AnalyticsResponse {
             },
             products,
             hits_per_day,
+            per_member: Vec::new(),
+            per_endpoint: Vec::new(),
         }
     }
 }
@@ -395,12 +476,126 @@ fn build_product_analytics(
         .collect()
 }
 
+/// Gabung hit + pendapatan per member. Kunci: member_id (`None` =
+/// kunci tanpa member terikat, satu baris). Member yang hanya punya
+/// order (tanpa hit) tetap muncul dengan hit 0. Urut hit terbanyak.
+fn build_member_analytics(
+    hit_rows: Vec<(Option<String>, Option<String>, Option<String>, i64, i64, i64, f64)>,
+    revenue_rows: Vec<(String, Option<String>, Option<String>, i64, u64)>,
+) -> Vec<MemberAnalytics> {
+    // (kode, email, total, sukses, final, rata-rata, order, pendapatan)
+    type Row = (
+        Option<String>,
+        Option<String>,
+        u64,
+        u64,
+        u64,
+        Option<u64>,
+        u64,
+        u64,
+    );
+    let mut by_member: HashMap<Option<String>, Row> = HashMap::new();
+    for (id, code, email, total, success, final_hits, avg) in hit_rows {
+        by_member.insert(
+            id,
+            (
+                code,
+                email,
+                total.max(0) as u64,
+                success.max(0) as u64,
+                final_hits.max(0) as u64,
+                if total > 0 {
+                    Some(avg.max(0.0) as u64)
+                } else {
+                    None
+                },
+                0,
+                0,
+            ),
+        );
+    }
+    for (id, code, email, orders, revenue) in revenue_rows {
+        let entry = by_member.entry(Some(id)).or_insert((code, email, 0, 0, 0, None, 0, 0));
+        entry.6 = orders.max(0) as u64;
+        entry.7 = revenue;
+    }
+    let mut out: Vec<MemberAnalytics> = by_member
+        .into_iter()
+        .map(|(_, (code, email, total, success, final_hits, avg, orders, revenue))| {
+            MemberAnalytics {
+                member_code: code,
+                email,
+                total_hits: total,
+                success_hits: success,
+                final_hits,
+                success_rate_percent: success_rate_percent(success, final_hits),
+                avg_latency_ms: avg,
+                total_orders: orders,
+                revenue_idr: revenue,
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.total_hits
+            .cmp(&a.total_hits)
+            .then_with(|| a.member_code.cmp(&b.member_code))
+    });
+    out
+}
+
+/// Agregat per server endpoint (+ produk). Endpoint null = hit tanpa
+/// endpoint tercatat. Urut hit terbanyak.
+fn build_endpoint_analytics(
+    rows: Vec<(Option<String>, Option<String>, String, i64, i64, i64, f64)>,
+) -> Vec<EndpointAnalytics> {
+    let mut out: Vec<EndpointAnalytics> = rows
+        .into_iter()
+        .map(|(id, name, product, total, success, final_hits, avg)| {
+            let total = total.max(0) as u64;
+            let success = success.max(0) as u64;
+            let final_hits = final_hits.max(0) as u64;
+            EndpointAnalytics {
+                endpoint_id: id,
+                endpoint_name: name,
+                product_label: product_label_for(&product),
+                product,
+                total_hits: total,
+                success_hits: success,
+                final_hits,
+                success_rate_percent: success_rate_percent(success, final_hits),
+                avg_latency_ms: if total > 0 {
+                    Some(avg.max(0.0) as u64)
+                } else {
+                    None
+                },
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.total_hits.cmp(&a.total_hits));
+    out
+}
+
 /// Agregasi analitik dari database. `None` bila ada query yang gagal
 /// (pemanggil mengembalikan error, bukan angka parsial yang menyesatkan).
 pub async fn analytics_from_db(pool: &MySqlPool, days: i64) -> Option<AnalyticsResponse> {
     let days = clamp_analytics_days(Some(days));
-    let start = window_start_utc(days);
-    let day_list = wib_day_list(days);
+    let alltime = days == 0;
+    // Jendela sepanjang masa = hari data pertama (WIB) sampai hari ini;
+    // tanpa data sama sekali, jendela = hari ini saja. Query di bawah
+    // tidak berubah: `start` = tengah malam hari pertama jendela.
+    let (start, day_list) = if alltime {
+        match first_data_day(pool).await {
+            Some(first) => (window_start_utc_for_day(first), wib_day_list_from(first)),
+            None => (window_start_utc(1), wib_day_list(1)),
+        }
+    } else {
+        (window_start_utc(days), wib_day_list(days))
+    };
+    let response_days = if alltime {
+        day_list.len() as i64
+    } else {
+        days
+    };
 
     // Pendapatan per hari (WIB) dari order lunas/ter-grant saja.
     // COALESCE(paid_at, created_at): order `paid`/`granted` selalu punya
@@ -450,14 +645,64 @@ pub async fn analytics_from_db(pool: &MySqlPool, days: i64) -> Option<AnalyticsR
     .ok()?;
     let products = build_product_analytics(product_rows);
 
+    // Agregat per member: hit dari validation_requests (prefix kunci ->
+    // member) + pendapatan dari package_orders lunas/ter-grant.
+    // Kunci tanpa member terikat mengumpul di baris (None, None, None).
+    let member_hit_rows: Vec<(Option<String>, Option<String>, Option<String>, i64, i64, i64, f64)> = sqlx::query_as(
+        "SELECT m.id, m.member_code, m.email, COUNT(*), \
+         CAST(COALESCE(SUM(outcome IN ('valid', 'not_kyc')), 0) AS SIGNED), \
+         CAST(COALESCE(SUM(outcome IN ('valid', 'invalid', 'not_found', 'not_kyc')), 0) AS SIGNED), \
+         CAST(COALESCE(AVG(provider_latency_ms), 0) AS DOUBLE) \
+         FROM validation_requests vr \
+         LEFT JOIN admin_api_keys k ON k.prefix = vr.api_key_prefix \
+         LEFT JOIN members m ON m.id = k.member_id \
+         WHERE vr.occurred_at >= ? GROUP BY m.id, m.member_code, m.email ORDER BY COUNT(*) DESC",
+    )
+    .bind(start)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    let member_revenue_rows: Vec<(String, Option<String>, Option<String>, i64, u64)> = sqlx::query_as(
+        "SELECT m.id, m.member_code, m.email, COUNT(*), CAST(COALESCE(SUM(o.amount_idr), 0) AS UNSIGNED) \
+         FROM package_orders o JOIN members m ON m.id = o.member_id \
+         WHERE o.status IN ('paid', 'granted') AND COALESCE(o.paid_at, o.created_at) >= ? \
+         GROUP BY m.id, m.member_code, m.email",
+    )
+    .bind(start)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    let per_member = build_member_analytics(member_hit_rows, member_revenue_rows);
+
+    // Agregat per server endpoint: hanya nama server dari konfigurasi
+    // admin (bukan URL/nama vendor). Hit tanpa endpoint (baris lama)
+    // mengumpul di baris endpoint null.
+    let endpoint_rows: Vec<(Option<String>, Option<String>, String, i64, i64, i64, f64)> = sqlx::query_as(
+        "SELECT HEX(vr.provider_endpoint_id), te.name, vr.product_code, COUNT(*), \
+         CAST(COALESCE(SUM(outcome IN ('valid', 'not_kyc')), 0) AS SIGNED), \
+         CAST(COALESCE(SUM(outcome IN ('valid', 'invalid', 'not_found', 'not_kyc')), 0) AS SIGNED), \
+         CAST(COALESCE(AVG(provider_latency_ms), 0) AS DOUBLE) \
+         FROM validation_requests vr \
+         LEFT JOIN third_party_endpoints te ON te.id = vr.provider_endpoint_id \
+         WHERE vr.occurred_at >= ? GROUP BY vr.provider_endpoint_id, te.name, vr.product_code ORDER BY COUNT(*) DESC",
+    )
+    .bind(start)
+    .fetch_all(pool)
+    .await
+    .ok()?;
+    let per_endpoint = build_endpoint_analytics(endpoint_rows);
+
     Some(AnalyticsResponse {
-        days,
+        days: response_days,
+        alltime,
         generated_at: Utc::now(),
         cached: false,
         database: true,
         revenue,
         products,
         hits_per_day,
+        per_member,
+        per_endpoint,
     })
 }
 
@@ -669,18 +914,115 @@ pub async fn providers_health(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_hits_per_day, build_product_analytics, build_revenue, build_route_health,
-        clamp_analytics_days, initial_product_health, is_revenue_status, latency_summary,
-        percentile_sorted, product_label_for, success_rate_percent, wib_day_list,
-        ANALYTICS_DEFAULT_DAYS, ANALYTICS_MAX_DAYS,
+        build_endpoint_analytics, build_hits_per_day, build_member_analytics,
+        build_product_analytics, build_revenue, build_route_health, clamp_analytics_days,
+        initial_product_health, is_revenue_status, latency_summary, percentile_sorted,
+        product_label_for, success_rate_percent, wib_day_list, wib_day_list_from,
+        window_start_utc_for_day, ANALYTICS_DEFAULT_DAYS, ANALYTICS_MAX_DAYS,
     };
 
     use crate::{
         models::{ProviderEndpoint, ProviderRequestMode, ProviderResponseMapping, ValidationProduct},
         provider_guard::GuardEndpointStatus,
     };
-    use chrono::Utc;
+    use chrono::{NaiveDate, Utc};
     use uuid::Uuid;
+
+    #[test]
+    fn member_analytics_merges_hits_and_revenue() {
+        let hits = vec![
+            (
+                Some("m1".to_owned()),
+                Some("RC000001".to_owned()),
+                Some("a@contoh.id".to_owned()),
+                10,
+                8,
+                10,
+                120.0,
+            ),
+            (None, None, None, 3, 1, 2, 50.0),
+        ];
+        let revenue = vec![
+            (
+                "m1".to_owned(),
+                Some("RC000001".to_owned()),
+                Some("a@contoh.id".to_owned()),
+                2,
+                150_000,
+            ),
+            (
+                "m2".to_owned(),
+                Some("RC000002".to_owned()),
+                Some("b@contoh.id".to_owned()),
+                1,
+                50_000,
+            ),
+        ];
+        let out = build_member_analytics(hits, revenue);
+        assert_eq!(out.len(), 3);
+        // Urut hit terbanyak: RC000001 (10) dulu.
+        assert_eq!(out[0].member_code.as_deref(), Some("RC000001"));
+        assert_eq!(out[0].total_hits, 10);
+        assert_eq!(out[0].total_orders, 2);
+        assert_eq!(out[0].revenue_idr, 150_000);
+        let rate = out[0].success_rate_percent.expect("rate");
+        assert!((rate - 80.0).abs() < 0.01);
+        assert_eq!(out[0].avg_latency_ms, Some(120));
+        // Member tanpa hit tetap muncul.
+        let order_only = out
+            .iter()
+            .find(|m| m.member_code.as_deref() == Some("RC000002"))
+            .expect("order-only member");
+        assert_eq!(order_only.total_hits, 0);
+        assert_eq!(order_only.total_orders, 1);
+        assert_eq!(order_only.success_rate_percent, None);
+        assert_eq!(order_only.avg_latency_ms, None);
+        // Kunci tanpa member: kode + email null.
+        let unlinked = out
+            .iter()
+            .find(|m| m.member_code.is_none())
+            .expect("unlinked");
+        assert_eq!(unlinked.total_hits, 3);
+    }
+
+    #[test]
+    fn endpoint_analytics_keeps_unrecorded_rows_and_sorts() {
+        let rows = vec![
+            (None, None, "bank_account".to_owned(), 5, 5, 5, 90.0),
+            (
+                Some("aabbcc".to_owned()),
+                Some("Server Satu".to_owned()),
+                "ewallet".to_owned(),
+                20,
+                10,
+                20,
+                200.0,
+            ),
+        ];
+        let out = build_endpoint_analytics(rows);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].endpoint_name.as_deref(), Some("Server Satu"));
+        assert_eq!(out[0].total_hits, 20);
+        let rate = out[0].success_rate_percent.expect("rate");
+        assert!((rate - 50.0).abs() < 0.01);
+        assert_eq!(out[1].endpoint_id, None);
+        assert_eq!(out[1].endpoint_name, None);
+        assert_eq!(out[1].success_rate_percent, Some(100.0));
+    }
+
+    #[test]
+    fn alltime_window_helpers_convert_wib_midnight() {
+        let day = NaiveDate::from_ymd_opt(2026, 11, 2).expect("valid date");
+        let start = window_start_utc_for_day(day);
+        // Tengah malam WIB 2 Nov = 1 Nov 17:00 UTC.
+        assert_eq!(start.format("%Y-%m-%d %H:%M").to_string(), "2026-11-01 17:00");
+        let list = wib_day_list_from(day);
+        assert_eq!(list.first(), Some(&day));
+        assert_eq!(
+            list.last().map(|d| d.format("%Y-%m-%d").to_string()),
+            Some(Utc::now().format("%Y-%m-%d").to_string())
+        );
+    }
 
     #[test]
     fn revenue_statuses_only_paid_and_granted() {
@@ -701,7 +1043,7 @@ mod tests {
     #[test]
     fn analytics_days_are_clamped() {
         assert_eq!(clamp_analytics_days(None), ANALYTICS_DEFAULT_DAYS);
-        assert_eq!(clamp_analytics_days(Some(0)), 1);
+        assert_eq!(clamp_analytics_days(Some(0)), 0);
         assert_eq!(clamp_analytics_days(Some(-5)), 1);
         assert_eq!(clamp_analytics_days(Some(7)), 7);
         assert_eq!(clamp_analytics_days(Some(ANALYTICS_MAX_DAYS + 500)), ANALYTICS_MAX_DAYS);
