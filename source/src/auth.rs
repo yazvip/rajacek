@@ -413,7 +413,10 @@ pub(crate) async fn fetch_google_user(
     let token = token_response
         .json::<GoogleTokenResponse>()
         .await
-        .map_err(|_| AppError::unauthorized("Respons login Google tidak valid"))?;
+        .map_err(|_| {
+            tracing::warn!("Respons token Google tidak dapat dibaca");
+            AppError::unauthorized("Respons login Google tidak valid")
+        })?;
 
     let user = http
         .get("https://openidconnect.googleapis.com/v1/userinfo")
@@ -426,6 +429,7 @@ pub(crate) async fn fetch_google_user(
         })?;
 
     if !user.status().is_success() {
+        tracing::warn!(status = %user.status(), "Userinfo Google menolak permintaan");
         return Err(AppError::unauthorized(
             "Profil Google tidak dapat diverifikasi",
         ));
@@ -434,12 +438,16 @@ pub(crate) async fn fetch_google_user(
     let user = user
         .json::<GoogleUserInfo>()
         .await
-        .map_err(|_| AppError::unauthorized("Profil Google tidak valid"))?;
+        .map_err(|_| {
+            tracing::warn!("Respons userinfo Google tidak dapat dibaca");
+            AppError::unauthorized("Profil Google tidak valid")
+        })?;
 
     if user.sub.trim().is_empty()
         || user.email.trim().is_empty()
         || user.email_verified != Some(true)
     {
+        tracing::warn!("Profil Google ditolak: sub/email kosong atau email belum terverifikasi");
         return Err(AppError::forbidden(
             "Akun Google harus memiliki alamat email yang terverifikasi",
         ));
@@ -1207,7 +1215,6 @@ mod oauth_binding_and_session_gate_tests {
             development_admin_token: None,
             demo_api_key: None,
             allowed_dashboard_origin: None,
-            qris_base_url: "https://example.invalid".to_owned(),
         }
     }
 

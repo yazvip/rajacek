@@ -1241,6 +1241,103 @@ pub async fn prune_old_raw_targets(
     Ok(result.rows_affected())
 }
 
+    /// Waktu cek untuk satu request_id (tab Logs: membedakan "belum ada
+    /// log" vs "log sudah di-prune"). None bila tidak ada database /
+    /// baris tidak ditemukan.
+    pub async fn validation_request_occurred_at(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<chrono::DateTime<chrono::Utc>>, AppError> {
+        let Some(pool) = self.pool() else {
+            return Ok(None);
+        };
+        let row: Option<(chrono::NaiveDateTime,)> = sqlx::query_as(
+            "SELECT occurred_at FROM validation_requests \
+             WHERE request_id = ? ORDER BY occurred_at DESC LIMIT 1",
+        )
+        .bind(request_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| AppError::internal("Lookup waktu cek gagal"))?;
+        Ok(row.map(|(naive,)| naive.and_utc()))
+    }
+
+    /// Baris log provider untuk satu request_id, terurut kronologis
+    /// (created_at, lalu id). Kosong bila tidak ada database / baris.
+    pub async fn validation_request_logs(
+        &self,
+        request_id: &str,
+    ) -> Result<Vec<crate::models::ProviderRequestLogItem>, AppError> {
+        let Some(pool) = self.pool() else {
+            return Ok(Vec::new());
+        };
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Option<u16>,
+            Option<String>,
+            bool,
+            u64,
+            chrono::NaiveDateTime,
+        )> = sqlx::query_as(
+            "SELECT endpoint_name, method, request_redacted, response_status, \
+             response_body, truncated, latency_ms, created_at \
+             FROM provider_request_logs WHERE request_id = ? \
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(request_id)
+        .fetch_all(&pool)
+        .await
+        .map_err(|_| AppError::internal("Baca log provider gagal"))?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    endpoint_name,
+                    method,
+                    request_redacted,
+                    response_status,
+                    response_body,
+                    truncated,
+                    latency_ms,
+                    created_at,
+                )| crate::models::ProviderRequestLogItem {
+                    endpoint_name,
+                    method,
+                    request_redacted,
+                    response_status,
+                    response_body,
+                    truncated,
+                    latency_ms,
+                    created_at: created_at.and_utc(),
+                },
+            )
+            .collect())
+    }
+
+    /// Prune retensi Logs 48 jam (migrasi 0040): hapus permanen baris
+    /// yang lebih tua dari 48 jam, berbatas satu batch LIMIT (dipanggil
+    /// berulang oleh worker sampai satu batch mengembalikan < limit).
+    /// Yang dihapus HANYA Logs; baris riwayat cek tidak disentuh.
+    /// SQL disimpan sebagai konstanta agar tes mengunci intervalnya
+    /// (sqlx `query` tidak dicek saat compile).
+    const PRUNE_PROVIDER_REQUEST_LOGS_SQL: &str = "DELETE FROM provider_request_logs \
+         WHERE created_at < UTC_TIMESTAMP(6) - INTERVAL 48 HOUR \
+         ORDER BY created_at ASC LIMIT ?";
+
+    pub async fn prune_provider_request_logs(
+        pool: &sqlx::MySqlPool,
+        batch_limit: u64,
+    ) -> Result<u64, AppError> {
+        let result = sqlx::query(Self::PRUNE_PROVIDER_REQUEST_LOGS_SQL)
+        .bind(batch_limit)
+        .execute(pool)
+        .await
+        .map_err(|_| AppError::internal("Prune log provider gagal"))?;
+        Ok(result.rows_affected())
+    }
+
     async fn persist_key_quota_direct(
         &self,
         prefix: &str,
@@ -6980,5 +7077,25 @@ mod trial_antifarm_tests {
         let stats = aggregate_trial_monitor(&rows, 5, now);
         assert_eq!(stats.ips_at_limit_24h, 1);
         assert!(stats.alert);
+    }
+}
+
+#[cfg(test)]
+mod provider_request_logs_tests {
+    use super::AdminStore;
+
+    #[test]
+    fn prune_sql_deletes_only_logs_older_than_48h() {
+        let sql = AdminStore::PRUNE_PROVIDER_REQUEST_LOGS_SQL;
+        assert!(sql.contains("provider_request_logs"), "tabel salah");
+        assert!(
+            sql.contains("INTERVAL 48 HOUR"),
+            "retensi harus 48 jam, bukan: {sql}"
+        );
+        assert!(
+            !sql.contains("validation_requests"),
+            "prune TIDAK BOLEH menyentuh riwayat cek: {sql}"
+        );
+        assert!(sql.contains("LIMIT ?"), "prune harus berbatas batch");
     }
 }

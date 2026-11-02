@@ -111,6 +111,48 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Retensi Logs provider 48 jam (migrasi 0040) — sekali saat startup,
+    // lalu tiap jam. Tick per jam (bukan 24 jam seperti K48) agar janji
+    // 48 jam dipenuhi ketat: baris hidup 48–49 jam, bukan 48–72 jam.
+    // Batch 1.000, maks 10 batch per tick, log tiap tick (termasuk 0
+    // baris) agar tick yang berjalan bisa dibedakan dari job yang mati.
+    // Yang dihapus HANYA provider_request_logs; riwayat cek tidak
+    // disentuh. Job ini jalan di proses WORKER saja, bukan API.
+    let logs_prune_pool = database.pool().clone();
+    tokio::spawn(async move {
+        loop {
+            let mut tick_pruned = 0u64;
+            for _ in 0..10 {
+                match rajacek_api::store::AdminStore::prune_provider_request_logs(
+                    &logs_prune_pool,
+                    1_000,
+                )
+                .await
+                {
+                    Ok(0) => break,
+                    Ok(pruned) => {
+                        tick_pruned += pruned;
+                        if pruned < 1_000 {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            ?error,
+                            "Prune log provider 48 jam gagal; dicoba lagi pada tick berikutnya"
+                        );
+                        break;
+                    }
+                }
+            }
+            tracing::info!(
+                pruned = tick_pruned,
+                "Prune log provider 48 jam selesai (tick 1 jam)"
+            );
+            sleep(Duration::from_secs(3_600)).await;
+        }
+    });
+
     // Notifikasi paket hampir kedaluwarsa (24 jam) — sekali saat
     // startup, lalu tiap 6 jam. Anti-spam lewat kolom
     // quota_buckets.expiry_notified_at: hanya bucket yang kirimnya

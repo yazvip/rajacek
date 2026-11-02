@@ -286,6 +286,57 @@ pub struct UsageEvent {
     /// sandbox). Defaults to "api" for events queued before this field.
     #[serde(default = "default_channel")]
     pub channel: String,
+    /// Per-attempt provider traffic captured in-memory by the provider
+    /// layer (migration 0040): one entry per actual HTTP dispatch
+    /// (winner, losers, retries, transport errors). The worker persists
+    /// these to `provider_request_logs`; the member response never sees
+    /// them. Defaulted so events queued by older binaries still
+    /// deserialize, and old workers ignore the unknown field.
+    #[serde(default)]
+    pub provider_attempt_logs: Vec<ProviderAttemptLog>,
+}
+
+/// One provider attempt, as captured in-memory during validation and
+/// persisted by the worker for the admin Logs tab (migration 0040).
+/// The request representation NEVER carries the upstream host/URL or any
+/// credential: query/body values under credential names are masked and
+/// known secret values are scrubbed before this struct is built (see
+/// `provider::redact_*`). Only the admin-configured endpoint NAME is
+/// stored, never the host.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ProviderAttemptLog {
+    pub endpoint_name: String,
+    /// "GET" or "POST" — the HTTP method actually dispatched.
+    pub method: String,
+    /// Redacted request: the query string for GET, the JSON body for
+    /// POST. Credential values are replaced with "***".
+    pub request_redacted: String,
+    /// HTTP status of the upstream response; None when no response was
+    /// received at all (transport failure before dispatch completed).
+    pub response_status: Option<u16>,
+    /// Upstream response body, capped at 64 KiB with `truncated` set;
+    /// None when no response was received. Credential values scrubbed.
+    pub response_body: Option<String>,
+    #[serde(default)]
+    pub truncated: bool,
+    /// Per-dispatch latency in milliseconds (single HTTP call, not the
+    /// whole endpoint attempt loop with retries/backoff).
+    pub latency_ms: u64,
+}
+
+/// One persisted provider-attempt log row, as returned by the admin Logs
+/// endpoint. Same fields as [`ProviderAttemptLog`] plus the row's
+/// `created_at` (the check's `occurred_at`, set by the worker).
+#[derive(Clone, Debug, Serialize)]
+pub struct ProviderRequestLogItem {
+    pub endpoint_name: String,
+    pub method: String,
+    pub request_redacted: String,
+    pub response_status: Option<u16>,
+    pub response_body: Option<String>,
+    pub truncated: bool,
+    pub latency_ms: u64,
+    pub created_at: DateTime<Utc>,
 }
 
 /// One recorded member validation, as shown in the admin history view. Mirrors
@@ -2052,5 +2103,52 @@ mod admin_history_fields_tests {
         assert!(!serialized.contains("member_code"));
         assert!(!serialized.contains("RC000042"));
         assert!(serialized.contains("member-tes@example.test"));
+    }
+}
+
+#[cfg(test)]
+mod provider_attempt_log_tests {
+    use super::*;
+
+    fn old_event_json() -> &'static str {
+        r#"{
+            "event_id": "0199a5a5-0000-7000-8000-000000000001",
+            "request_id": "Ab3dE9kLm2",
+            "api_key_prefix": "rv_live_01a161564f",
+            "product": "bank_account",
+            "status": "valid",
+            "occurred_at": "2026-10-31T10:00:00Z",
+            "target_fingerprint": "fp",
+            "target_masked": "123****890",
+            "provider_latency_ms": 120
+        }"#
+    }
+
+    #[test]
+    fn old_events_without_logs_deserialize_with_empty_logs() {
+        let event: UsageEvent =
+            serde_json::from_str(old_event_json()).expect("event lama harus ter-parse");
+        assert!(event.provider_attempt_logs.is_empty());
+        assert!(event.charged, "charged default lama tetap true");
+    }
+
+    #[test]
+    fn events_with_logs_round_trip() {
+        let mut event: UsageEvent =
+            serde_json::from_str(old_event_json()).expect("event lama harus ter-parse");
+        event.provider_attempt_logs.push(ProviderAttemptLog {
+            endpoint_name: "Server Uji".to_owned(),
+            method: "POST".to_owned(),
+            request_redacted: "{\"target\":\"123\"}".to_owned(),
+            response_status: Some(200),
+            response_body: Some("{\"ok\":true}".to_owned()),
+            truncated: false,
+            latency_ms: 95,
+        });
+        let text = serde_json::to_string(&event).expect("serialisasi event");
+        let parsed: UsageEvent = serde_json::from_str(&text).expect("round-trip");
+        assert_eq!(parsed.provider_attempt_logs.len(), 1);
+        assert_eq!(parsed.provider_attempt_logs[0].endpoint_name, "Server Uji");
+        assert_eq!(parsed.provider_attempt_logs[0].response_status, Some(200));
     }
 }

@@ -48,7 +48,7 @@ pub const EXPIRY_JOB_INTERVAL_SECS: u64 = 6 * 3_600;
 
 /// Ambang order macet B1: order `paid` yang belum grant setelah sekian
 /// menit sejak lunas (paid_at, atau updated_at bila paid_at kosong —
-/// parsing paid_at Cutiezy bisa gagal, lihat K26).
+/// parsing paid_at bisa gagal).
 pub const STUCK_PAID_MINUTES: i64 = 15;
 
 /// Interval job order macet di worker.
@@ -808,23 +808,6 @@ pub fn stuck_order_message(
     ("Order Macet".to_owned(), admin_message_text("🚨", "Order Macet", &detail))
 }
 
-/// Pesan alert QR yatim B3. QR yatim tercatat saat cancel QR gagal
-/// (create parsial / balapan guard / insert gagal): QR sudah terbit di
-/// Cutiezy tanpa baris order, sehingga berisiko dibayar tanpa order.
-/// Pesan TIDAK memuat token QR (itu kredensial pembayaran).
-pub fn orphan_qr_message(member_code: &str, amount_idr: u64, now: NaiveDateTime) -> (String, String) {
-    let detail = format!(
-        "🆔 Kode member: {}\n💰 Nominal: Rp {}\n⚠️ Status: QR yatim — cancel gagal, berisiko dibayar tanpa order\n🕐 Sejak: {}",
-        escape_html(member_code),
-        format_idr(amount_idr),
-        format_wib_naive(now),
-    );
-    (
-        "QR Yatim".to_owned(),
-        admin_message_text("🚨", "Order Macet", &detail),
-    )
-}
-
 #[derive(sqlx::FromRow)]
 struct StuckOrderCandidate {
     id: String,
@@ -1103,17 +1086,6 @@ mod tests {
         assert!(text.contains("RC000001"));
         assert!(text.contains("Rp 50.000"));
         assert!(text.contains("Dibayar tapi belum grant"));
-    }
-
-    #[test]
-    fn orphan_qr_message_has_no_token_content() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 28, 10, 0, 0)
-            .unwrap()
-            .naive_utc();
-        let (_, text) = orphan_qr_message("RC000001", 75000, now);
-        assert!(text.contains("QR yatim"));
-        assert!(text.contains("Rp 75.000"));
-        assert!(!text.contains("qris_token"));
     }
 
     #[test]

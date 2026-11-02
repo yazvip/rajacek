@@ -8,11 +8,34 @@ use sqlx::{
 
 use crate::models::UsageEvent;
 
-/// INSERT for `validation_requests`, kept as a named constant so tests
-/// can assert the column list and placeholder count stay in lockstep
-/// with the binds in [`Database::persist_usage_event`] (sqlx `query`
-/// is not compile-time checked, so a forgotten column/bind here would
-/// otherwise surface only at runtime against a live database).
+/// INSERT for `provider_request_logs` (migration 0040), kept as a named
+/// constant for the same lockstep test as the history INSERT above.
+/// Idempotency: the id is derived deterministically from
+/// (event_id, attempt index) — a redelivered event re-inserts the exact
+/// same rows, and INSERT IGNORE drops the duplicates (same pattern as
+/// the history/ledger inserts above).
+const PERSIST_PROVIDER_REQUEST_LOG_SQL: &str = r#"
+            INSERT IGNORE INTO provider_request_logs (
+                id, request_id, endpoint_name, method, request_redacted,
+                response_status, response_body, truncated, latency_ms, created_at
+            ) VALUES (
+                UUID_TO_BIN(?), ?, ?, ?, ?, ?, ?, ?, ?, ?
+            )
+"#;
+
+/// Deterministic log-row id: SHA-256(event_id || index), first 16 bytes
+/// as a UUID. Stable across redeliveries, distinct per attempt index.
+fn provider_request_log_id(event_id: &uuid::Uuid, index: usize) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(event_id.as_bytes());
+    hasher.update((index as u64).to_le_bytes());
+    let digest = hasher.finalize();
+    let bytes: [u8; 16] = digest[..16]
+        .try_into()
+        .expect("SHA-256 selalu >= 16 byte");
+    uuid::Uuid::from_bytes(bytes).to_string()
+}
 /// Columns target_raw + account_name come from migration 0024 and are
 /// admin-history only; member responses never read them. Column
 /// provider_endpoint_id comes from migration 0033 (winning endpoint id,
@@ -128,6 +151,39 @@ impl Database {
             .await
             .context("Gagal menyimpan audit validasi")?;
 
+        // Tab Logs admin (migrasi 0040): traffic provider per percobaan
+        // dari event yang sama, dalam transaksi yang sama dengan riwayat
+        // (atomik: tidak ada riwayat tanpa log-nya, dan sebaliknya).
+        // DIAGNOSTIK, bukan billing: gagal tulis log (mis. tabel belum
+        // ter-migrasi saat swap) HANYA diperingatkan lalu dilewati —
+        // tidak pernah menggagalkan riwayat/ledger. Event tanpa log
+        // (demo, event lama, replay) tidak menambah query sama sekali.
+        if !event.provider_attempt_logs.is_empty() {
+            for (index, log) in event.provider_attempt_logs.iter().enumerate() {
+                if let Err(error) = sqlx::query(PERSIST_PROVIDER_REQUEST_LOG_SQL)
+                    .bind(provider_request_log_id(&event.event_id, index))
+                    .bind(&event.request_id)
+                    .bind(&log.endpoint_name)
+                    .bind(&log.method)
+                    .bind(&log.request_redacted)
+                    .bind(log.response_status)
+                    .bind(&log.response_body)
+                    .bind(log.truncated)
+                    .bind(log.latency_ms)
+                    .bind(event.occurred_at)
+                    .execute(&mut *transaction)
+                    .await
+                {
+                    tracing::warn!(
+                        request_id = %event.request_id,
+                        error = ?error,
+                        "Log provider gagal disimpan; riwayat/ledger tetap dikomit (diagnostik saja)"
+                    );
+                    break;
+                }
+            }
+        }
+
         // Billing rule 2026-10-25: only actually-charged validations create
         // a ledger 'charge' row. Free-pool invalid results (charged=false)
         // and pre-`charged` events (default true) keep the old behavior via
@@ -182,6 +238,50 @@ mod persist_sql_tests {
         assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("target_raw"));
         assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("account_name"));
         assert!(PERSIST_VALIDATION_REQUEST_SQL.contains("target_masked"));
+    }
+
+    #[test]
+    fn provider_request_log_insert_matches_migration_0040() {
+        assert!(PERSIST_PROVIDER_REQUEST_LOG_SQL.contains("provider_request_logs"));
+        for column in [
+            "endpoint_name",
+            "method",
+            "request_redacted",
+            "response_status",
+            "response_body",
+            "truncated",
+            "latency_ms",
+            "created_at",
+        ] {
+            assert!(
+                PERSIST_PROVIDER_REQUEST_LOG_SQL.contains(column),
+                "kolom {column} hilang dari INSERT log"
+            );
+        }
+        assert_eq!(
+            PERSIST_PROVIDER_REQUEST_LOG_SQL.matches('?').count(),
+            10,
+            "bind dan placeholder tidak seimbang"
+        );
+    }
+
+    #[test]
+    fn provider_request_log_id_is_deterministic_per_attempt() {
+        let event_id = uuid::Uuid::parse_str("0199a5a5-0000-7000-8000-000000000001").unwrap();
+        let first = provider_request_log_id(&event_id, 0);
+        assert_eq!(first, provider_request_log_id(&event_id, 0));
+        assert_ne!(first, provider_request_log_id(&event_id, 1));
+        assert_ne!(
+            first,
+            provider_request_log_id(
+                &uuid::Uuid::parse_str("0199a5a5-0000-7000-8000-000000000002").unwrap(),
+                0
+            )
+        );
+        // Bentuk UUID valid (36 karakter dengan strip) agar UUID_TO_BIN
+        // tidak pernah menolaknya.
+        assert_eq!(first.len(), 36);
+        assert!(uuid::Uuid::parse_str(&first).is_ok());
     }
 
     #[test]

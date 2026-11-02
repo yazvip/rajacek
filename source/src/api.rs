@@ -67,16 +67,11 @@ pub struct AppState {
     pub event_sink: Arc<dyn UsageEventSink>,
     pub oauth_states: Arc<OAuthStateStore>,
     pub session_revocation: Arc<crate::session_revocation::SessionRevocation>,
-    /// Cache secret webhook QRIS yang sudah didekripsi (K24): jalur ack
-    /// webhook TIDAK BOLEH menyentuh DB — verifikasi HMAC harus murni
-    /// in-memory agar ack <= 5 detik terjamin walau DB lambat. Diisi
-    /// saat webhook pertama (cold path) dan dikosongkan setiap kali
-    /// pengaturan QRIS disimpan lewat panel (lihat update_qris_settings);
-    /// restart proses juga mengosongkannya. Bila HMAC gagal dengan
-    /// secret cache, handler memuat ulang sekali dari DB (rotasi secret
-    /// di luar panel) sebelum menolak — verifikasi tetap gerbangnya,
-    /// tidak ada 200 untuk webhook tak terverifikasi.
-    pub webhook_secret_cache: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// Cache secret webhook Gobiz (pola K24 yang sama, cache terpisah
+    /// karena secret-nya berbeda; dikosongkan bersamaan saat pengaturan
+    /// QRIS disimpan).
+    pub gobiz_webhook_secret_cache: Arc<std::sync::RwLock<Option<String>>>,
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -156,6 +151,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/v1/admin/validation-history",
             get(admin_validation_history),
+        )
+        .route(
+            "/v1/admin/validation-history/:request_id/logs",
+            get(admin_validation_logs),
         )
         .route(
             "/v1/admin/rate-limit-default",
@@ -274,12 +273,16 @@ pub fn build_router(state: AppState) -> Router {
             post(crate::member::cancel_order),
         )
         .route("/v1/member/orders/:id/qr", get(crate::member::order_qr))
-        .route("/v1/payments/qris/webhook", post(qris_webhook))
+        .route(
+            "/v1/payments/qris/webhook/gobiz",
+            post(gobiz_qris_webhook),
+        )
         .route("/v1/telegram/webhook", post(telegram_webhook))
         .route(
             "/v1/admin/qris/settings",
             get(get_qris_settings).put(update_qris_settings),
         )
+        .route("/v1/admin/qris/gobiz/test", post(test_gobiz_qris))
         .route("/v1/admin/orders", get(list_admin_orders))
         .route("/v1/admin/export/:kind", get(export_admin_csv))
         .route(
@@ -299,11 +302,6 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/admin/orders/:id/refunds",
             get(list_order_refunds),
         )
-        .route("/v1/admin/orphan-qr", get(list_orphan_qrs))
-        .route(
-            "/v1/admin/orphan-qr/:id/resolve",
-            post(resolve_orphan_qr_order),
-        )
         .route("/v1/admin/alerts/status", get(get_alert_status))
         // B22/B26 (Fase 3): kesehatan stream + perkakas DLQ untuk panel
         // monitor — operator tidak lagi bergantung pada Telegram
@@ -315,11 +313,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/admin/dlq/replay-all", post(replay_all_dlq_entries))
         .route("/v1/admin/dlq/:id/replay", post(replay_dlq_entry))
         .route("/", get(public_landing))
+        .route("/member", get(member_page))
         .with_state(state.clone());
 
     let router = Router::new()
         .merge(api)
-        .route("/member", get(member_page))
         .route("/blog", get(crate::blog::blog_list))
         .route("/blog/", get(crate::blog::blog_list))
         .route("/blog/:slug", get(crate::blog::blog_article))
@@ -376,11 +374,20 @@ pub fn build_router(state: AppState) -> Router {
     }
 }
 
-async fn member_page() -> Response {
+async fn member_page(State(state): State<AppState>) -> Response {
     // Portal member bersifat dinamis & per sesi: jangan biarkan peramban
     // menyajikan HTML basi dari cache (pernah membuat desain baru tak
     // tampak di layar user). no-cache = selalu revalidasi ke server.
-    let mut res = Html(include_str!("../web/member.html")).into_response();
+    // Tagline trial dirender dari setingan live yang sama dengan jalur
+    // grant, agar klaimnya tidak pernah drift dari yang benar-benar
+    // didapat member baru.
+    let (trial_hits, trial_days) = crate::member::trial_settings(&state).await;
+    let html = crate::member::apply_trial_placeholders(
+        include_str!("../web/member.html"),
+        trial_hits,
+        trial_days,
+    );
+    let mut res = Html(html).into_response();
     res.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("no-cache"),
@@ -410,7 +417,10 @@ async fn public_landing(State(state): State<AppState>) -> Html<String> {
         .into_iter()
         .filter(|package| package.active && crate::models::effective_price(package, now) > 0)
         .collect();
-    Html(render_landing(&packages, valid_days))
+    // Trial numbers come from the same live settings the grant path uses,
+    // so the landing can never drift from what new members actually get.
+    let (trial_hits, trial_days) = crate::member::trial_settings(&state).await;
+    Html(render_landing(&packages, valid_days, trial_hits, trial_days))
 }
 
 /// The landing page template carries placeholders for the pricing cards and
@@ -431,7 +441,12 @@ fn format_id_date(moment: chrono::DateTime<Utc>) -> String {
     )
 }
 
-fn render_landing(packages: &[crate::models::AdminPackage], valid_days: i64) -> String {
+fn render_landing(
+    packages: &[crate::models::AdminPackage],
+    valid_days: i64,
+    trial_hits: u64,
+    trial_days: i64,
+) -> String {
     let now = Utc::now();
     let mut cards = String::new();
     for package in packages {
@@ -487,7 +502,7 @@ fn render_landing(packages: &[crate::models::AdminPackage], valid_days: i64) -> 
         .map(|package| crate::models::effective_price(package, now))
         .max()
         .unwrap_or(0);
-    include_str!("../web/landing.html")
+    let rendered = include_str!("../web/landing.html")
         .replace("<!--PRICING_CARDS-->", &cards)
         .replace("{{LOW_PRICE}}", &low.to_string())
         .replace("{{HIGH_PRICE}}", &high.to_string())
@@ -498,7 +513,10 @@ fn render_landing(packages: &[crate::models::AdminPackage], valid_days: i64) -> 
         .replace(
             "Semua paket berlaku <strong>30 hari</strong>",
             &format!("Semua paket berlaku <strong>{valid_days} hari</strong>"),
-        )
+        );
+    // Trial numbers render from the same live settings the grant path
+    // uses, so the landing can never drift from what new members get.
+    crate::member::apply_trial_placeholders(&rendered, trial_hits, trial_days)
 }
 
 /// Indonesian thousand grouping: 10000 -> "10.000".
@@ -579,11 +597,28 @@ mod package_products_label_tests {
     }
 }
 
-async fn public_docs() -> Html<&'static str> {
-    Html(include_str!("../web/docs.html"))
+async fn public_docs(State(state): State<AppState>) -> Response {
+    // Angka trial di docs dirender dari setingan live yang sama dengan
+    // jalur grant, agar dokumentasi tidak pernah drift dari yang
+    // benar-benar didapat pendaftar baru.
+    // Docs bersifat dinamis (trial + gaya kartu tabel): jangan biarkan
+    // peramban menyajikan HTML basi dari cache (pola yang sama dengan
+    // portal member). no-cache = selalu revalidasi ke server.
+    let (trial_hits, trial_days) = crate::member::trial_settings(&state).await;
+    let html = crate::member::apply_trial_placeholders(
+        include_str!("../web/docs.html"),
+        trial_hits,
+        trial_days,
+    );
+    let mut res = Html(html).into_response();
+    res.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+    res
 }
 
-/// Halaman Kontak: statis dan tertanam di binary seperti landing dan docs,
+/// Halaman Kontak: statis dan tertanam di binary,
 /// sehingga satu-satunya sumber kebenaran adalah tree repo yang ter-deploy
 /// (bukan file disk yang bisa drift). Isinya hanya kontak yang sudah
 /// dipublikasikan; tidak ada formulir karena tidak ada backend pengiriman.
@@ -678,6 +713,15 @@ async fn serve_static_file(method: &Method, raw_path: &str) -> Option<Response> 
     {
         return None;
     }
+    // Tiga template halaman (landing/docs/member) TIDAK BOLEH disajikan
+    // mentah dari disk: sejak 31 Okt 2026 ketiganya membawa placeholder
+    // {{TRIAL_HITS}}/{{TRIAL_DAYS}} yang hanya diganti oleh handler
+    // render-nya (public_landing/public_docs/member_page). Menyajikan
+    // file mentahnya akan membocorkan placeholder ke pengunjung.
+    // URL kanonisnya adalah /, /docs, dan /member.
+    if matches!(relative, "landing.html" | "docs.html" | "member.html") {
+        return None;
+    }
     let mut path = std::path::PathBuf::from("web");
     path.push(relative);
     if path.is_dir() {
@@ -720,6 +764,28 @@ async fn serve_static_file(method: &Method, raw_path: &str) -> Option<Response> 
         );
     }
     Some(response)
+}
+
+#[cfg(test)]
+mod trial_template_static_guard_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fallback_never_serves_raw_trial_templates() {
+        // Template landing/docs/member membawa placeholder trial yang
+        // hanya diganti handler render-nya; fallback file statis tidak
+        // boleh menyajikan file mentahnya (placeholder bocor).
+        for path in ["/landing.html", "/docs.html", "/member.html"] {
+            assert!(
+                serve_static_file(&Method::GET, path).await.is_none(),
+                "{path} must not be served raw by the static fallback"
+            );
+        }
+        // Kontrol positif: aset biasa tetap tersaji.
+        assert!(serve_static_file(&Method::GET, "/robots.txt")
+            .await
+            .is_some());
+    }
 }
 
 fn percent_decode(input: &str) -> String {
@@ -2113,8 +2179,8 @@ pub(crate) async fn execute_validation(
             }
         };
 
-    let outcome = match state.provider.validate(request.clone()).await {
-        Ok(outcome) => outcome,
+    let (outcome, attempt_logs) = match state.provider.validate(request.clone()).await {
+        Ok((outcome, logs)) => (outcome, logs),
         Err(error) => {
             state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
             state
@@ -2250,6 +2316,10 @@ pub(crate) async fn execute_validation(
         total_latency_ms,
         attempts: outcome.attempts,
         channel: channel.to_owned(),
+        // Traffic provider in-memory dari balapan (nol I/O baru di sini:
+        // vec ini hanya menumpang enqueue yang sudah ada; worker yang
+        // menulisnya ke provider_request_logs, migrasi 0040).
+        provider_attempt_logs: attempt_logs,
     };
 
     let history_item = ValidationHistoryItem {
@@ -3023,6 +3093,74 @@ async fn admin_validation_history(
             hits_last_60s: page.hits_last_60s,
             hits_last_3600s: page.hits_last_3600s,
         },
+    }))
+}
+
+/// Tab Logs di detail riwayat (migrasi 0040): traffic provider per
+/// percobaan untuk satu request_id. Admin-only (Viewer, sama seperti
+/// daftar riwayat); tidak pernah membawa kredensial atau host mentah
+/// (sudah teredaksi saat capture di provider.rs).
+#[derive(Serialize)]
+struct AdminValidationLogsResponse {
+    request_id: String,
+    /// "available" = ada baris log; "not_available" = cek berusia < 48
+    /// jam tapi belum ada log (cek dibuat sebelum fitur ini);
+    /// "expired" = cek berusia >= 48 jam dan log sudah di-prune.
+    state: &'static str,
+    logs: Vec<crate::models::ProviderRequestLogItem>,
+}
+
+async fn admin_validation_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+) -> Result<Json<AdminValidationLogsResponse>, AppError> {
+    require_admin_role(&state, &headers, Role::Viewer).await?;
+    let request_id = request_id.trim().to_owned();
+    if request_id.is_empty() {
+        return Err(AppError::not_found("Riwayat validasi tidak ditemukan"));
+    }
+    // Waktu cek: database dulu; bila tidak ada database / baris tidak
+    // ada, fallback ke riwayat memori (proses ini saja). Tidak ditemukan
+    // di keduanya -> 404 (request_id tak dikenal).
+    let occurred_at = match state
+        .store
+        .validation_request_occurred_at(&request_id)
+        .await?
+    {
+        Some(ts) => ts,
+        None => {
+            let filters = ValidationHistoryFilters {
+                product: None,
+                outcome: None,
+                api_key_prefix: None,
+                api_key_prefixes: None,
+                q: Some(request_id.clone()),
+                from: None,
+                to_exclusive: None,
+            };
+            let (items, _, _) = state.store.validation_history(&filters, 10, 0).await;
+            match items.iter().find(|item| item.request_id == request_id) {
+                Some(item) => item.occurred_at,
+                None => {
+                    return Err(AppError::not_found("Riwayat validasi tidak ditemukan"));
+                }
+            }
+        }
+    };
+    let logs = state.store.validation_request_logs(&request_id).await?;
+    let age_hours = Utc::now().signed_duration_since(occurred_at).num_hours();
+    let state_str = if !logs.is_empty() {
+        "available"
+    } else if age_hours < 48 {
+        "not_available"
+    } else {
+        "expired"
+    };
+    Ok(Json(AdminValidationLogsResponse {
+        request_id,
+        state: state_str,
+        logs,
     }))
 }
 
@@ -4537,20 +4675,9 @@ struct TrialSettings {
 }
 
 async fn load_trial_settings(state: &AppState) -> TrialSettings {
-    let quota_hits = state
-        .provider_configs
-        .load_runtime_setting("trial.quota_hits")
-        .await
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| (1..=100_000).contains(value))
-        .unwrap_or(10);
-    let valid_days = state
-        .provider_configs
-        .load_runtime_setting("trial.valid_days")
-        .await
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|value| (1..=90).contains(value))
-        .unwrap_or(7);
+    // Satu sumber kebenaran dengan jalur grant (member::trial_settings):
+    // panel admin, landing, docs, dan portal membaca angka yang sama.
+    let (quota_hits, valid_days) = crate::member::trial_settings(state).await;
     TrialSettings {
         quota_hits,
         valid_days,
@@ -5659,7 +5786,7 @@ fn provider_mode_label(config: &AppConfig) -> &'static str {
 }
 
 // ---------------------------------------------------------------------------
-// Pembelian paket QRIS: pengaturan + order admin + webhook Cutiezy
+// Pembelian paket QRIS: pengaturan + order admin + webhook Gobiz
 // ---------------------------------------------------------------------------
 
 async fn qris_pool(state: &AppState) -> Result<sqlx::MySqlPool, AppError> {
@@ -5689,7 +5816,7 @@ async fn update_qris_settings(
     );
     // Audit flow B6: never encrypt a NEW QRIS secret under the fallback
     // development key. Saves that carry no new secret (toggles, expiry,
-    // valid_days, source_id) are still allowed — they touch no
+    // valid_days) are still allowed — they touch no
     // ciphertext, so blocking them would also block the kill switch
     // (disabling QRIS) exactly when it is most needed. Production
     // startup validation (config.rs) additionally refuses to start
@@ -5698,11 +5825,11 @@ async fn update_qris_settings(
     // (webhook secret, cancel) are untouched: they must keep reading
     // secrets that were encrypted earlier.
     let carries_new_secret = input
-        .api_key
-        .as_deref()
-        .is_some_and(|value| !value.trim().is_empty())
+            .gobiz_api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
         || input
-            .webhook_secret
+            .gobiz_webhook_secret
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty());
     if carries_new_secret && cipher.is_fallback() {
@@ -5714,7 +5841,7 @@ async fn update_qris_settings(
     // K24: pengaturan QRIS berubah -> secret webhook cache basi. Kosongkan
     // agar webhook berikutnya memuat ulang dari DB (cold path sekali),
     // bukan memverifikasi dengan secret lama selamanya.
-    if let Ok(mut guard) = state.webhook_secret_cache.write() {
+    if let Ok(mut guard) = state.gobiz_webhook_secret_cache.write() {
         *guard = None;
     }
     record_admin_activity(
@@ -5740,14 +5867,14 @@ async fn update_qris_settings(
     // jalan lewat portal member yang membaca `enabled` ini.
     if !view.enabled {
         let (canceled, skipped) =
-            crate::qris::cancel_all_waiting_orders(&pool, &state.config, &cipher).await;
+            crate::qris::cancel_all_waiting_orders(&pool, &state.config).await;
         if canceled > 0 || skipped > 0 {
             record_admin_activity(
                 &state,
                 &principal,
                 "Order waiting dibatalkan kill switch",
                 format!(
-                    "QRIS dinonaktifkan: {canceled} order waiting belum dibayar dibatalkan (QR Cutiezy dibatalkan best-effort), {skipped} terlewat karena balapan status — gerbang verify menangkap sisanya. Order yang sudah terbayar tidak dibatalkan."
+                    "QRIS dinonaktifkan: {canceled} order waiting belum dibayar dibatalkan (tagihan provider dibatalkan best-effort), {skipped} terlewat karena balapan status — gerbang verify menangkap sisanya. Order yang sudah terbayar tidak dibatalkan."
                 ),
             )
             .await;
@@ -6592,75 +6719,6 @@ async fn list_order_refunds(
     ))
 }
 
-/// QR yatim (K26): daftar untuk panel admin. Peran: Viewer (read-only).
-async fn list_orphan_qrs(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Json<Vec<crate::qris::OrphanQrView>>, AppError> {
-    require_admin_role(&state, &headers, Role::Viewer).await?;
-    let pool = qris_pool(&state).await?;
-    Ok(Json(crate::qris::list_orphan_qrs(&pool).await?))
-}
-
-#[derive(serde::Deserialize)]
-struct ResolveOrphanQrRequest {
-    package_id: String,
-    /// RRN mutasi dari dashboard Cutiezy (opsional, tapi dianjurkan).
-    mutation_ref: Option<String>,
-}
-
-/// Resolve-berbukti QR yatim (K26): admin memilih paket + RRN, server
-/// memverifikasi Paid + nominal + RRN lewat check-status sebelum grant.
-/// Respons membawa `outcome` eksplisit (granted/already_granted/
-/// needs_review/rejected) + order bila ada — pemanggil panel WAJIB
-/// menampilkan outcome itu, bukan menebak dari status HTTP.
-/// Peran: Support (sama seperti resolve order).
-#[derive(serde::Serialize)]
-struct ResolveOrphanQrResponse {
-    outcome: crate::qris::VerifyOutcome,
-    order: Option<crate::qris::MemberOrderView>,
-}
-
-async fn resolve_orphan_qr_order(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(orphan_id): Path<String>,
-    Json(input): Json<ResolveOrphanQrRequest>,
-) -> Result<Json<ResolveOrphanQrResponse>, AppError> {
-    let principal = require_admin_role(&state, &headers, Role::Support).await?;
-    let orphan_uuid =
-        Uuid::parse_str(&orphan_id).map_err(|_| AppError::bad_request("ID QR yatim tidak valid"))?;
-    let package_uuid =
-        Uuid::parse_str(&input.package_id).map_err(|_| AppError::bad_request("ID paket tidak valid"))?;
-    let (order, outcome) = crate::qris::resolve_orphan_qr(
-        &state.store,
-        &state.config,
-        orphan_uuid,
-        package_uuid,
-        input.mutation_ref.as_deref(),
-    )
-    .await?;
-    let detail = match outcome {
-        crate::qris::VerifyOutcome::Granted => {
-            format!("QR yatim {orphan_uuid} di-resolve: kuota di-grant.")
-        }
-        crate::qris::VerifyOutcome::AlreadyGranted => {
-            format!("QR yatim {orphan_uuid} sudah ter-grant sebelumnya.")
-        }
-        crate::qris::VerifyOutcome::NeedsReview => {
-            format!("QR yatim {orphan_uuid} DITAHAN (needs_review) — grant belum terjadi; lanjutkan lewat order tertaut.")
-        }
-        crate::qris::VerifyOutcome::Rejected => {
-            format!("QR yatim {orphan_uuid} DITOLAK — check-status membuktikan belum lunas.")
-        }
-        other => {
-            format!("QR yatim {orphan_uuid} di-resolve (hasil: {other:?}).")
-        }
-    };
-    record_admin_activity(&state, &principal, "Resolve QR yatim", detail).await;
-    Ok(Json(ResolveOrphanQrResponse { outcome, order }))
-}
-
 // Peran: Viewer (ditegakkan server-side via require_admin_role).
 // Status alert (K35, Fase 3): BUKAN lagi sekadar "env ter-set" —
 // lihat `alerts::AlertStatus`: enabled + delivery_state (never_
@@ -7274,57 +7332,32 @@ async fn resolve_admin_order(
     Ok(Json(ResolveOrderResponse { outcome, view }))
 }
 
-/// Payload webhook mutasi Cutiezy (docs /docs/webhook): event +
-/// data.reference (RRN bank) + data.amount + data.status. TIDAK ADA
-/// token order QR dinamis di payload ini — jadi webhook tidak pernah
-/// dipakai untuk mencocokkan satu order.
-#[derive(Deserialize)]
-struct QrisWebhookPayload {
-    event: Option<String>,
-    data: Option<QrisWebhookPaymentData>,
-}
-
-#[derive(Deserialize)]
-struct QrisWebhookPaymentData {
-    reference: Option<String>,
-    amount: Option<u64>,
-    status: Option<String>,
-}
-
+/// Ack webhook (`{"received": true}`) — dipakai handler Gobiz.
 #[derive(Serialize)]
 struct QrisWebhookAck {
     received: bool,
 }
 
-/// Webhook Cutiezy sebagai PEMICU sweep, bukan bukti bayar:
-/// 1. Signature HMAC diverifikasi dulu (fail closed: tanpa secret
-///    terkonfigurasi -> 503, signature salah -> 401).
-/// 2. Event pembayaran (`qris.payment`, plus `qris.payment.success`
-///    dari halaman QRIS yang penamaannya berbeda) hanya membangunkan
-///    sweep order terbuka di background — grant tetap diputuskan
-///    verify_and_grant lewat check-status + cocok nominal.
-/// 3. Balas 200 `{"received": true}` SEGERA (docs menuntut <= 5 detik);
-///    kegagalan transient di dalam sweep ditanggung sweep rutin tiap
-///    menit, bukan retry Cutiezy.
-/// Sengaja TIDAK memeriksa qris_enabled: kill switch mematikan
-/// pembelian baru, tapi order yang sudah dibayar harus tetap bisa
-/// grant — sama seperti janji sweep rutin.
-async fn qris_webhook(
+/// Webhook Gobiz (endpoint TERPISAH agar
+/// tidak ada dispatch berdasarkan header yang bisa salah kirim).
+/// Auth = HMAC-SHA256 atas raw body, header `X-Webhook-Signature`
+/// (hex lalu base64, constant-time — `gobiz::verify_webhook_signature`,
+/// persis `verifySignature` AI Gateway).
+/// Fail-closed LEBIH KETAT dari AI Gateway (yang melewati verifikasi
+/// bila secret kosong): secret Gobiz wajib terisi, else 503; signature
+/// hilang/salah -> 401. Hanya event `payment.paid` yang memicu sweep;
+/// event lain di-ack 200 tanpa sweep. Payload gagal parsing -> ack 200
+/// toleran (signature sudah terverifikasi sehingga bodi
+/// malformasi bukan serangan, dan sweep rutin tetap menjadi backstop).
+/// Webhook TIDAK PERNAH grant langsung — sweep yang re-verifikasi via
+/// GetStatus + cocokkan expected_amount.
+async fn gobiz_qris_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<QrisWebhookAck>, AppError> {
-    // K24: ack <= 5 detik DIJAMIN di jalur panas — verifikasi HMAC dulu
-    // (cepat, in-memory), balas 200, lalu proses di background (sweep
-    // di bawah, spawn tanpa ditunggu). TIDAK ADA pekerjaan DB di jalur
-    // ack bila secret sudah ter-cache: dulu handler memuat settings +
-    // mendekripsi secret dari DB SEBELUM membalas, sehingga DB lambat
-    // membuat ack melebihi 5 detik. HMAC gagal tetap 401 — tidak ada
-    // 200 untuk webhook tak terverifikasi — dan pemrosesan background
-    // tetap lewat sweep + verify idempoten yang sudah ada, jadi tidak
-    // ada grant ganda dari pemrosesan background ini.
     let signature = headers
-        .get("x-cutiezy-signature")
+        .get("x-webhook-signature")
         .and_then(|value| value.to_str().ok())
         .ok_or_else(|| AppError::unauthorized("Signature webhook tidak ada"))?;
     let load_secret_from_db = || async {
@@ -7334,13 +7367,13 @@ async fn qris_webhook(
             state.config.api_key_encryption_key.as_deref(),
         );
         settings
-            .webhook_secret_ciphertext
+            .gobiz_webhook_secret_ciphertext
             .as_deref()
             .and_then(|ciphertext| cipher.decrypt(ciphertext).ok())
             .ok_or_else(|| AppError::service_unavailable("Webhook QRIS belum dikonfigurasi."))
     };
     let cached = state
-        .webhook_secret_cache
+        .gobiz_webhook_secret_cache
         .read()
         .ok()
         .and_then(|guard| guard.clone());
@@ -7348,50 +7381,129 @@ async fn qris_webhook(
         Some(secret) => secret,
         None => {
             let secret = load_secret_from_db().await?;
-            if let Ok(mut guard) = state.webhook_secret_cache.write() {
+            if let Ok(mut guard) = state.gobiz_webhook_secret_cache.write() {
                 *guard = Some(secret.clone());
             }
             secret
         }
     };
-    if !crate::qris::verify_webhook_signature(&secret, &body, signature) {
+    if !crate::gobiz::verify_webhook_signature(&secret, &body, signature) {
         // Secret mungkin dirotasi di luar panel (cache basi): muat ulang
-        // sekali dari DB dan verifikasi ulang sebelum menolak. Bila
-        // tetap gagal, tolak — tidak ada ack untuk signature tak valid.
+        // sekali dari DB dan verifikasi ulang sebelum menolak.
         let fresh = load_secret_from_db().await.ok();
         let verified = match fresh {
             Some(fresh) => {
-                if let Ok(mut guard) = state.webhook_secret_cache.write() {
+                if let Ok(mut guard) = state.gobiz_webhook_secret_cache.write() {
                     *guard = Some(fresh.clone());
                 }
-                crate::qris::verify_webhook_signature(&fresh, &body, signature)
+                crate::gobiz::verify_webhook_signature(&fresh, &body, signature)
             }
             None => false,
         };
         if !verified {
-            tracing::warn!("Signature webhook QRIS tidak valid");
+            tracing::warn!("Signature webhook Gobiz tidak valid");
             return Err(AppError::unauthorized("Signature webhook tidak valid"));
         }
     }
-    let payload: QrisWebhookPayload = serde_json::from_slice(&body).unwrap_or(QrisWebhookPayload {
-        event: None,
-        data: None,
-    });
-    if crate::qris::is_payment_event(payload.event.as_deref()) {
+    let payload: crate::gobiz::GobizWebhookPayload =
+        serde_json::from_slice(&body).unwrap_or_default();
+    if payload.event.as_deref() == Some("payment.paid") {
         if let Some(data) = &payload.data {
             tracing::info!(
-                reference = data.reference.as_deref().unwrap_or("-"),
-                amount = data.amount.unwrap_or(0),
-                status = data.status.as_deref().unwrap_or("-"),
-                "Webhook pembayaran QRIS diterima; memicu sweep order terbuka",
+                payment_id = data.id.as_deref().unwrap_or("-"),
+                order_id = data.order_id.as_deref().unwrap_or("-"),
+                tx_id = data.tx_id.as_deref().unwrap_or("-"),
+                "Webhook pembayaran Gobiz diterima; memicu sweep order terbuka",
             );
         }
-        // K25: spawn sweep ter-dedup (maks satu berjalan); banjir
-        // webhook tidak menumpuk sweep bersamaan. Sweep rutin tiap
-        // 60 detik tetap menjadi backstop dan tidak ikut dedup ini.
+        // K25: spawn sweep ter-dedup (maks satu berjalan); sweep rutin
+        // tiap 60 detik tetap menjadi backstop.
         crate::qris::spawn_webhook_sweep(state.store.clone(), state.config.clone());
     }
     Ok(Json(QrisWebhookAck { received: true }))
+}
+
+/// Hasil tes kredensial Gobiz (admin-only; TIDAK PERNAH berisi secret,
+/// token member, atau data order). `qris_string` tampil di panel dalam
+/// `<details>` admin-only (bukan gambar QR — panel tidak punya renderer
+/// QR dan tidak boleh menambah dependensi render ke panel).
+#[derive(serde::Serialize)]
+struct GobizTestResult {
+    ok: bool,
+    payment_id: String,
+    status: String,
+    expected_amount: u64,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    qris_string: String,
+    cancelled: bool,
+}
+
+/// Tes kredensial Gobiz (tombol tes panel admin; peran Manager, sama
+/// seperti PUT settings). Membuat SATU invoice QRIS TES (order_id
+/// `TEST-GOBIZ-<uuid>`, nominal `GOBIZ_TEST_AMOUNT` = Rp5.000) lalu
+/// membatalkannya best-effort via cancel Gobiz (gagal cancel TIDAK
+/// menggagalkan tes; invoice dibiarkan kedaluwarsa, flag `cancelled`
+/// memberi tahu admin).
+/// TIDAK: membuat baris package_orders, grant paket/kuota, menggerakkan
+/// uang, menyentuh last_error, atau memakai
+/// kuota member. TIDAK memeriksa `settings.enabled` (tes memverifikasi
+/// kredensial, bukan pembelian) dan TIDAK memakai webhook secret
+/// (create hanya memakai API key).
+/// Gagal -> pesan error Gobiz apa adanya (admin-only) dengan status 502.
+async fn test_gobiz_qris(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<GobizTestResult>, AppError> {
+    require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = qris_pool(&state).await?;
+    let settings = crate::qris::load_qris_settings(&pool).await?;
+    let cipher = crate::provider_config::CredentialCipher::new(
+        state.config.api_key_encryption_key.as_deref(),
+    );
+    let api_key = settings
+        .gobiz_api_key_ciphertext
+        .as_deref()
+        .and_then(|ciphertext| cipher.decrypt(ciphertext).ok())
+        .ok_or_else(|| {
+            AppError::service_unavailable(
+                "Kredensial Gobiz belum lengkap (isi dan simpan base URL + API key dulu).",
+            )
+        })?;
+    let client = crate::gobiz::GobizClient::new(&settings.gobiz_base_url_effective())?;
+    let test_order_id = format!(
+        "{}{}",
+        crate::gobiz::GOBIZ_TEST_ORDER_PREFIX,
+        uuid::Uuid::now_v7()
+    );
+    let invoice = client
+        .create(
+            &api_key,
+            crate::gobiz::GOBIZ_TEST_AMOUNT,
+            &test_order_id,
+            &settings.gobiz_callback_url_effective(),
+            settings.expiry_minutes * 60,
+        )
+        .await
+        .map_err(|error| {
+            AppError::new(
+                axum::http::StatusCode::BAD_GATEWAY,
+                "gobiz_test_failed",
+                format!("Tes Gobiz gagal: {}", error.admin_message()),
+            )
+        })?;
+    let cancelled = client.cancel(&api_key, &invoice.id).await.is_ok();
+    if !cancelled {
+        tracing::warn!(payment_id = %invoice.id, "Cancel invoice tes Gobiz gagal (best-effort); invoice dibiarkan kedaluwarsa");
+    }
+    Ok(Json(GobizTestResult {
+        ok: true,
+        payment_id: invoice.id,
+        status: invoice.status,
+        expected_amount: invoice.expected_amount,
+        expires_at: invoice.expires_at,
+        qris_string: invoice.qris_string,
+        cancelled,
+    }))
 }
 
 #[cfg(test)]
@@ -8051,7 +8163,6 @@ mod site_status_tests {
                 "rv_demo_0123456789abcdef0123456789abcdef".to_owned(),
             ),
             allowed_dashboard_origin: None,
-            qris_base_url: "https://example.invalid".to_owned(),
         });
         let provider_configs = crate::provider_config::ProviderConfigStore::build(&config)
             .await
@@ -8084,7 +8195,7 @@ mod site_status_tests {
             .await
             .expect("event sink lokal"),
             oauth_states: Arc::new(crate::auth::OAuthStateStore::new()),
-            webhook_secret_cache: Arc::new(std::sync::RwLock::new(None)),
+            gobiz_webhook_secret_cache: Arc::new(std::sync::RwLock::new(None)),
             session_revocation: Arc::new(
                 crate::session_revocation::SessionRevocation::new(None).await,
             ),
@@ -8345,6 +8456,90 @@ mod site_status_tests {
             .expect("PUT site-settings");
         assert_eq!(put.status(), 401);
     }
+
+    fn history_item_fixture(
+        request_id: &str,
+        occurred_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::models::ValidationHistoryItem {
+        crate::models::ValidationHistoryItem {
+            request_id: request_id.to_owned(),
+            api_key_prefix: "rv_live_01a161564f".to_owned(),
+            product: crate::models::ValidationProduct::BankAccount,
+            outcome: "valid".to_owned(),
+            target_masked: "123****890".to_owned(),
+            member_code: None,
+            target_raw: Some("1234567890".to_owned()),
+            account_name: Some("NAMA UJI".to_owned()),
+            provider_endpoint_name: None,
+            provider_hint_display: None,
+            provider_reference: None,
+            provider_latency_ms: 100,
+            rajacek_processing_ms: Some(10),
+            total_latency_ms: Some(110),
+            attempts: Some(1),
+            occurred_at,
+            channel: "api".to_owned(),
+        }
+    }
+
+    async fn serve_logs_test_app() -> String {
+        let mut state = test_app_state(None).await;
+        let mut config = (*state.config).clone();
+        config.development_admin_token = Some("token-uji-admin".to_owned());
+        state.config = Arc::new(config);
+        state
+            .store
+            .push_validation_history(history_item_fixture("LOGTEST0001", chrono::Utc::now()))
+            .await;
+        state
+            .store
+            .push_validation_history(history_item_fixture(
+                "LOGTEST0002",
+                chrono::Utc::now() - chrono::Duration::hours(49),
+            ))
+            .await;
+        serve_test_app(state).await
+    }
+
+    #[tokio::test]
+    async fn admin_validation_logs_requires_session_and_distinguishes_states() {
+        let base = serve_logs_test_app().await;
+        let client = reqwest::Client::new();
+        // Tanpa sesi admin -> 401 (gerbang yang sama dengan daftar riwayat).
+        let denied = client
+            .get(format!("{base}/v1/admin/validation-history/LOGTEST0001/logs"))
+            .send()
+            .await
+            .expect("GET logs tanpa sesi");
+        assert_eq!(denied.status(), 401);
+        // request_id tak dikenal -> 404.
+        let missing = client
+            .get(format!("{base}/v1/admin/validation-history/TIDAKADA000/logs"))
+            .header("x-admin-token", "token-uji-admin")
+            .send()
+            .await
+            .expect("GET logs tak dikenal");
+        assert_eq!(missing.status(), 404);
+        // Cek baru tanpa log (tanpa database, jadi tidak ada baris log)
+        // -> not_available; cek 49 jam tanpa log -> expired.
+        for (id, expected) in [("LOGTEST0001", "not_available"), ("LOGTEST0002", "expired")] {
+            let response = client
+                .get(format!("{base}/v1/admin/validation-history/{id}/logs"))
+                .header("x-admin-token", "token-uji-admin")
+                .send()
+                .await
+                .expect("GET logs");
+            assert_eq!(response.status(), 200, "id {id}");
+            let text = response.text().await.expect("body logs");
+            let body: serde_json::Value = serde_json::from_str(&text).expect("JSON logs");
+            assert_eq!(body["state"], expected, "id {id}");
+            assert_eq!(body["request_id"], id);
+            assert!(
+                body["logs"].as_array().expect("array logs").is_empty(),
+                "tanpa database tidak ada baris log"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -8438,6 +8633,10 @@ mod admin_export_tests {
             last_error: Some("FAKE-PROVIDER-ERROR".to_owned()),
             created_at: naive_at(20),
             updated_at: naive_at(22),
+            // Identifier pembayaran Gobiz juga tidak boleh bocor ke CSV
+            // (sama seperti token pembayaran di atas).
+            provider_order_id: Some("pay_FAKE-GOBIZ-ID-12345".to_owned()),
+            expected_amount: Some(50458),
         };
         let document = csv_document(
             &["id", "member_email", "paket", "nominal", "status", "dibuat", "dibayar", "granted"],
@@ -8447,6 +8646,7 @@ mod admin_export_tests {
         assert!(!document.contains(fake_key_id), "key_id bocor ke CSV");
         assert!(!document.contains("FAKE-MUTATION-REF"));
         assert!(!document.contains("FAKE-PROVIDER-ERROR"));
+        assert!(!document.contains("pay_FAKE-GOBIZ-ID-12345"), "id pembayaran Gobiz bocor ke CSV");
         assert!(document.contains("0199a5a5-0000-7000-8000-000000000099"));
         assert!(document.contains("\"member, \"\"test\"\"@contoh.id\""));
         assert!(document.contains("\"Paket, Premium\""));
@@ -8623,7 +8823,6 @@ mod admin_export_tests {
             development_admin_token: None,
             demo_api_key: None,
             allowed_dashboard_origin: None,
-            qris_base_url: "https://example.invalid".to_owned(),
         };
         let error = crate::auth::require_admin(&config, &HeaderMap::new()).unwrap_err();
         assert_eq!(error.status, StatusCode::UNAUTHORIZED);

@@ -83,9 +83,6 @@ pub struct AppConfig {
     pub development_admin_token: Option<String>,
     pub demo_api_key: Option<String>,
     pub allowed_dashboard_origin: Option<String>,
-    /// Base URL Cutiezy untuk pembayaran QRIS. Default produksi; env ini
-    /// hanya untuk pengujian (mock lokal) dan tidak dipakai member.
-    pub qris_base_url: String,
 }
 
 impl AppConfig {
@@ -137,8 +134,6 @@ impl AppConfig {
             development_admin_token: read_env("DEVELOPMENT_ADMIN_TOKEN"),
             demo_api_key: read_env("DEMO_API_KEY"),
             allowed_dashboard_origin: read_env("ALLOWED_DASHBOARD_ORIGIN"),
-            qris_base_url: read_env("CUTIEZY_QRIS_BASE_URL")
-                .unwrap_or_else(|| "https://api.cutiezy.id".to_owned()),
         };
 
         config.validate()?;
@@ -249,7 +244,7 @@ impl AppConfig {
             // missing, so production must refuse to start without a real
             // one. (The variable is currently set in production, so this
             // validation changes nothing live — it guards the next
-            // rebuild/rotation against silently re-encrypting Cutiezy
+            // rebuild/rotation against silently re-encrypting QRIS
             // secrets under the fallback key. Member keys are untouched
             // by this path: they already fail closed to hash-only when
             // the cipher is absent.)

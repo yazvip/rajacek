@@ -20,8 +20,8 @@ use crate::{
     error::AppError,
     ewallet_codes,
     models::{
-        ProviderRequestMode, ProviderValidationRequest, ValidationProduct, ValidationResultData,
-        ValidationStatus,
+        ProviderAttemptLog, ProviderRequestMode, ProviderValidationRequest, ValidationProduct,
+        ValidationResultData, ValidationStatus,
     },
     provider_config::ProviderConfigStore,
     provider_guard::ProviderGuard,
@@ -61,10 +61,14 @@ pub struct ProviderValidationOutcome {
 
 #[async_trait]
 pub trait ProviderAdapter: Send + Sync {
+    /// Public validation: the outcome plus the per-dispatch provider
+    /// traffic captured in-memory for the admin Logs tab (migration
+    /// 0040). The vec is empty for adapters without upstream calls
+    /// (demo) and carries one entry per HTTP dispatch for HTTP.
     async fn validate(
         &self,
         request: ProviderValidationRequest,
-    ) -> Result<ProviderValidationOutcome, AppError>;
+    ) -> Result<(ProviderValidationOutcome, Vec<ProviderAttemptLog>), AppError>;
 
     /// Only the authenticated admin tester calls this. Never use it for public validation.
     async fn validate_for_admin(
@@ -109,7 +113,7 @@ impl ProviderAdapter for DemoProvider {
     async fn validate(
         &self,
         request: ProviderValidationRequest,
-    ) -> Result<ProviderValidationOutcome, AppError> {
+    ) -> Result<(ProviderValidationOutcome, Vec<ProviderAttemptLog>), AppError> {
         let started = Instant::now();
         let digest = <sha2::Sha256 as sha2::Digest>::digest(
             format!("{}:{}", request.product.as_str(), request.target).as_bytes(),
@@ -156,17 +160,22 @@ impl ProviderAdapter for DemoProvider {
             _ => None,
         };
 
-        Ok(ProviderValidationOutcome {
-            status,
-            message: message.to_owned(),
-            result,
-            provider_name: self.name().to_owned(),
-            // Adapter demo tidak punya baris endpoint: tidak ada sumber
-            // yang bisa ditampilkan di Detail validasi.
-            provider_endpoint_id: None,
-            provider_latency_ms: started.elapsed().as_millis() as u64,
-            attempts: 1,
-        })
+        Ok((
+            ProviderValidationOutcome {
+                status,
+                message: message.to_owned(),
+                result,
+                provider_name: self.name().to_owned(),
+                // Adapter demo tidak punya baris endpoint: tidak ada sumber
+                // yang bisa ditampilkan di Detail validasi.
+                provider_endpoint_id: None,
+                provider_latency_ms: started.elapsed().as_millis() as u64,
+                attempts: 1,
+            },
+            // Demo tidak pernah memanggil provider: tidak ada traffic
+            // untuk tab Logs (bukan kegagalan capture).
+            Vec::new(),
+        ))
     }
 
     fn name(&self) -> &str {
@@ -274,7 +283,14 @@ impl HttpProvider {
         &self,
         request: ProviderValidationRequest,
         capture_raw: bool,
-    ) -> Result<(ProviderValidationOutcome, Option<RawProviderResponse>), AppError> {
+    ) -> Result<
+        (
+            ProviderValidationOutcome,
+            Option<RawProviderResponse>,
+            Vec<ProviderAttemptLog>,
+        ),
+        AppError,
+    > {
         self.validate_upstream_race(request, capture_raw).await
     }
 
@@ -312,7 +328,9 @@ impl HttpProvider {
             .guard
             .acquire(product, &endpoint.id.to_string(), endpoint.force_on)
             .await?;
-        let (result, provider_failure) = self
+        // Tester tidak menulis tab Logs: traffic attempt dibuang di sini
+        // (tester sudah menampilkan raw live-nya sendiri).
+        let (result, provider_failure, _attempt_logs) = self
             .validate_upstream_endpoint(&endpoint, request, true)
             .await;
         self.record_outcome(&ticket, &result, provider_failure)
@@ -366,7 +384,14 @@ impl HttpProvider {
         &self,
         request: ProviderValidationRequest,
         capture_raw: bool,
-    ) -> Result<(ProviderValidationOutcome, Option<RawProviderResponse>), AppError> {
+    ) -> Result<
+        (
+            ProviderValidationOutcome,
+            Option<RawProviderResponse>,
+            Vec<ProviderAttemptLog>,
+        ),
+        AppError,
+    > {
         let endpoints = self.provider_configs.resolve_all(request.product).await;
         if endpoints.is_empty() {
             return Err(AppError::service_unavailable(
@@ -437,27 +462,34 @@ impl HttpProvider {
         }
         if admitted.len() == 1 {
             let (endpoint, ticket) = admitted.pop().expect("one admitted endpoint");
-            let (result, failure) = self
+            let (result, failure, logs) = self
                 .validate_upstream_endpoint(&endpoint, request, capture_raw)
                 .await;
             self.record_outcome(&ticket, &result, failure).await;
-            return result;
+            return result.map(|(outcome, raw)| (outcome, raw, logs));
         }
         use futures::stream::{FuturesUnordered, StreamExt};
         let mut futures = FuturesUnordered::new();
         for (endpoint, ticket) in admitted {
             let endpoint_request = request.clone();
             futures.push(async move {
-                let (result, failure) = self
+                let (result, failure, logs) = self
                     .validate_upstream_endpoint(&endpoint, endpoint_request, capture_raw)
                     .await;
                 self.record_outcome(&ticket, &result, failure).await;
-                result
+                (result, logs)
             });
         }
         let mut fallback: Option<(ProviderValidationOutcome, Option<RawProviderResponse>)> = None;
         let mut errors: Vec<AppError> = Vec::new();
-        while let Some(result) = futures.next().await {
+        // Traffic attempt dari leg yang SUDAH selesai saat pemenang
+        // ditemukan ikut terbawa; leg yang masih berjalan saat early
+        // Valid di-drop (batas K5 yang sama dengan pencatatan breaker:
+        // future yang di-drop tidak pernah menyelesaikan catatannya).
+        // Pada jalur fallback semua leg selesai, jadi semua log terbawa.
+        let mut attempt_logs: Vec<ProviderAttemptLog> = Vec::new();
+        while let Some((result, logs)) = futures.next().await {
+            attempt_logs.extend(logs);
             match result {
                 Ok(pair) => {
                     if pair.0.status == ValidationStatus::Valid {
@@ -473,7 +505,9 @@ impl HttpProvider {
                         // bounded 120 s probe delay, and semaphore permits
                         // are still released by Drop. Do not "fix" this
                         // speculatively without that guard plumbing.
-                        return Ok(pair);
+                        // Batas yang sama berlaku untuk tab Logs: leg yang
+                        // di-drop tidak menghasilkan baris log.
+                        return Ok((pair.0, pair.1, attempt_logs));
                     }
                     let better = match &fallback {
                         None => true,
@@ -489,7 +523,7 @@ impl HttpProvider {
             }
         }
         if let Some(pair) = fallback {
-            return Ok(pair);
+            return Ok((pair.0, pair.1, attempt_logs));
         }
         match errors.into_iter().next() {
             Some(error) => Err(error),
@@ -510,6 +544,7 @@ impl HttpProvider {
     ) -> (
         Result<(ProviderValidationOutcome, Option<RawProviderResponse>), AppError>,
         bool,
+        Vec<ProviderAttemptLog>,
     ) {
         let mut provider_failure = false;
         if endpoint.request_mode == ProviderRequestMode::Cutiezy
@@ -526,8 +561,10 @@ impl HttpProvider {
                     "Provider validasi sedang tidak tersedia. Silakan ulangi beberapa saat lagi.",
                 )),
                 false,
+                Vec::new(),
             );
         }
+        let mut attempt_logs: Vec<ProviderAttemptLog> = Vec::new();
         let result = async {
             self.provider_configs
                 .verify_destination(&endpoint.base_url)
@@ -635,7 +672,7 @@ impl HttpProvider {
                 }
                 pace_wait += pace_started.elapsed();
 
-                match self
+                let (call_result, call_log) = self
                     .call_provider(
                         endpoint,
                         auth_header.as_ref(),
@@ -644,8 +681,14 @@ impl HttpProvider {
                         &prepared,
                         capture_raw,
                     )
-                    .await
-                {
+                    .await;
+                // Hanya dispatch HTTP yang menghasilkan baris log:
+                // kegagalan pra-kirim (mis. URL tidak valid) mengembalikan
+                // None dan tidak tercatat sebagai traffic provider.
+                if let Some(log) = call_log {
+                    attempt_logs.push(log);
+                }
+                match call_result {
                     Ok((mut outcome, raw)) => {
                         if let Some(result) = &mut outcome.result {
                             let (account_number, phone_number) =
@@ -691,7 +734,7 @@ impl HttpProvider {
             }
         }
         .await;
-        (result, provider_failure)
+        (result, provider_failure, attempt_logs)
     }
     async fn call_provider(
         &self,
@@ -701,9 +744,66 @@ impl HttpProvider {
         request: &ProviderValidationRequest,
         prepared: &PreparedCall,
         capture_raw: bool,
-    ) -> Result<(ProviderValidationOutcome, Option<RawProviderResponse>), AttemptError> {
+    ) -> (
+        Result<(ProviderValidationOutcome, Option<RawProviderResponse>), AttemptError>,
+        // Some(log) hanya bila dispatch HTTP benar-benar terjadi
+        // (terkirim maupun gagal transport); None untuk kegagalan
+        // pra-kirim (URL tidak valid) yang tidak menghasilkan traffic.
+        Option<ProviderAttemptLog>,
+    ) {
         let timeout = Duration::from_millis(u64::from(endpoint.timeout_ms));
-        let response = match prepared {
+        let call_started = Instant::now();
+        // Nilai kredensial yang harus disikat dari SEMUA representasi
+        // log (query, body, gema respons). Header auth tidak pernah
+        // masuk log sama sekali; menyikat nilai kuncinya menutup juga
+        // gema "Bearer <kunci>" bila provider meng-echo header.
+        let secrets: Vec<&str> = if endpoint.api_key.trim().is_empty() {
+            Vec::new()
+        } else {
+            vec![endpoint.api_key.as_str()]
+        };
+        // Representasi request TEREDAKSI, dibangun SEBELUM dispatch dari
+        // komponen yang sama dengan request asli — tanpa host/URL mentah,
+        // tanpa nilai kredensial. Generic GET dibangun dua kali (murni +
+        // murah); bila base URL tidak valid, representasi kosong dan
+        // pengiriman di bawah gagal dengan cara yang sama (tanpa baris).
+        // Nilai GET ditampilkan ter-decode (bukan bentuk persen-encode
+        // di kabel) agar mudah dibaca admin; isinya identik.
+        let (method, request_redacted): (&str, String) = match prepared {
+            PreparedCall::Json(body) => ("POST", redact_json_request(body, &secrets)),
+            PreparedCall::GenericGet => (
+                "GET",
+                build_generic_get_url(
+                    &endpoint.base_url,
+                    request.product,
+                    &request.target,
+                    request.provider_hint.as_deref(),
+                    &endpoint.service_code_mapping,
+                    &endpoint.code_param,
+                    &endpoint.number_param,
+                    endpoint.key_param.as_deref(),
+                    &endpoint.api_key,
+                )
+                .ok()
+                .and_then(|url| url.query().map(redact_query_string))
+                .unwrap_or_default(),
+            ),
+            PreparedCall::CutiezyGet => {
+                let key_param = match request.product {
+                    ValidationProduct::Ewallet => "service",
+                    _ => "code",
+                };
+                let hint = request.provider_hint.as_deref().unwrap_or_default();
+                (
+                    "GET",
+                    format!(
+                        "{}={}&user_id={}&apikey=***",
+                        key_param, hint, request.target
+                    ),
+                )
+            }
+        };
+        let send_result = match prepared {
             PreparedCall::Json(body) => {
                 let mut request_builder = self.client.post(&endpoint.base_url).timeout(timeout);
                 if let (Some(header), Some(value)) = (auth_header, auth_value) {
@@ -718,7 +818,7 @@ impl HttpProvider {
                 // header (unless the endpoint opts out with an empty
                 // header, B5) and, only when key_param is set,
                 // additionally as a query param.
-                let url = build_generic_get_url(
+                let url = match build_generic_get_url(
                     &endpoint.base_url,
                     request.product,
                     &request.target,
@@ -728,12 +828,19 @@ impl HttpProvider {
                     &endpoint.number_param,
                     endpoint.key_param.as_deref(),
                     &endpoint.api_key,
-                )
-                .map_err(|error| AttemptError {
-                    error,
-                    provider_failure: false,
-                    retryable: false,
-                })?;
+                ) {
+                    Ok(url) => url,
+                    Err(error) => {
+                        return (
+                            Err(AttemptError {
+                                error,
+                                provider_failure: false,
+                                retryable: false,
+                            }),
+                            None,
+                        );
+                    }
+                };
                 let mut request_builder = self.client.get(url).timeout(timeout);
                 if let (Some(header), Some(value)) = (auth_header, auth_value) {
                     request_builder = request_builder.header(header.clone(), value.clone());
@@ -746,11 +853,21 @@ impl HttpProvider {
                 // header, no body. Bank (…/cek_bank): code = public 3-digit
                 // bank code. E-wallet (…/api/check/ewallet): service =
                 // wallet slug. user_id is the account number / phone.
-                let mut url = Url::parse(&endpoint.base_url).map_err(|_| AttemptError {
-                    error: AppError::service_unavailable("URL endpoint provider tidak valid"),
-                    provider_failure: false,
-                    retryable: false,
-                })?;
+                let mut url = match Url::parse(&endpoint.base_url) {
+                    Ok(url) => url,
+                    Err(_) => {
+                        return (
+                            Err(AttemptError {
+                                error: AppError::service_unavailable(
+                                    "URL endpoint provider tidak valid",
+                                ),
+                                provider_failure: false,
+                                retryable: false,
+                            }),
+                            None,
+                        );
+                    }
+                };
                 let hint = request.provider_hint.as_deref().unwrap_or_default();
                 let key_param = match request.product {
                     ValidationProduct::Ewallet => "service",
@@ -793,58 +910,169 @@ impl HttpProvider {
                 provider_failure: true,
                 retryable: true,
             }
-        })?;
+        });
+        let response = match send_result {
+            Ok(response) => response,
+            Err(error) => {
+                return (
+                    Err(error),
+                    Some(finish_attempt_log(
+                        endpoint.name.as_str(),
+                        method,
+                        &request_redacted,
+                        None,
+                        None,
+                        false,
+                        call_started,
+                    )),
+                );
+            }
+        };
 
         let status = response.status();
-        let (payload, raw) = if capture_raw {
+        let (payload, raw, log_body, log_truncated) = if capture_raw {
             let mut raw = match read_raw_response(response).await {
                 Ok(raw) => raw,
                 Err(error) => {
-                    return Err(AttemptError {
-                        error,
-                        provider_failure: true,
-                        retryable: true,
-                    });
+                    return (
+                        Err(AttemptError {
+                            error,
+                            provider_failure: true,
+                            retryable: true,
+                        }),
+                        Some(finish_attempt_log(
+                            endpoint.name.as_str(),
+                            method,
+                            &request_redacted,
+                            Some(status.as_u16()),
+                            None,
+                            false,
+                            call_started,
+                        )),
+                    );
                 }
             };
             raw.server_name = endpoint.name.clone();
             let parsed = if status.is_success() {
-                Some(
-                    serde_json::from_str::<Value>(&raw.body).map_err(|_| AttemptError {
-                        error: with_raw_error(
-                            AppError::service_unavailable(
-                                "Respons provider validasi tidak dapat diproses",
-                            ),
-                            &raw,
-                        ),
-                        provider_failure: true,
-                        retryable: true,
-                    })?,
-                )
+                match serde_json::from_str::<Value>(&raw.body) {
+                    Ok(parsed) => Some(parsed),
+                    Err(_) => {
+                        return (
+                            Err(AttemptError {
+                                error: with_raw_error(
+                                    AppError::service_unavailable(
+                                        "Respons provider validasi tidak dapat diproses",
+                                    ),
+                                    &raw,
+                                ),
+                                provider_failure: true,
+                                retryable: true,
+                            }),
+                            Some(finish_attempt_log(
+                                endpoint.name.as_str(),
+                                method,
+                                &request_redacted,
+                                Some(status.as_u16()),
+                                Some(scrub_secrets(&raw.body, &secrets)),
+                                raw.truncated,
+                                call_started,
+                            )),
+                        );
+                    }
+                }
             } else {
                 None
             };
-            (parsed, Some(raw))
+            let log_body = scrub_secrets(&raw.body, &secrets);
+            let log_truncated = raw.truncated;
+            (parsed, Some(raw), Some(log_body), log_truncated)
         } else if status.is_success() {
-            let payload = response.json::<Value>().await.map_err(|error| {
-                // Same B2 rule as the transport log: no Debug of the error
-                // (a decode error can also carry the request URL).
-                tracing::warn!(
-                    kind = transport_error_kind(&error),
-                    host = %endpoint_host(endpoint),
-                    "Respons provider bukan JSON yang valid"
-                );
-                AttemptError {
-                    error: AppError::service_unavailable(
-                        "Respons provider validasi tidak dapat diproses",
-                    ),
-                    provider_failure: true,
-                    retryable: true,
+            // Jalur publik membaca body penuh lalu parse — byte yang
+            // sama dengan yang dibaca `response.json()` sebelumnya, jadi
+            // semantik parse tidak berubah; yang bertambah hanya salinan
+            // 64 KiB pertama untuk log (in-memory, tanpa I/O baru).
+            let bytes = match response.bytes().await {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    tracing::warn!(
+                        kind = transport_error_kind(&error),
+                        host = %endpoint_host(endpoint),
+                        "Respons provider tidak dapat dibaca"
+                    );
+                    return (
+                        Err(AttemptError {
+                            error: AppError::service_unavailable(
+                                "Respons provider validasi tidak dapat diproses",
+                            ),
+                            provider_failure: true,
+                            retryable: true,
+                        }),
+                        Some(finish_attempt_log(
+                            endpoint.name.as_str(),
+                            method,
+                            &request_redacted,
+                            Some(status.as_u16()),
+                            None,
+                            false,
+                            call_started,
+                        )),
+                    );
                 }
-            })?;
-            (Some(payload), None)
+            };
+            let payload = match serde_json::from_slice::<Value>(&bytes) {
+                Ok(payload) => payload,
+                Err(_) => {
+                    // B2: tidak ada Debug error di sini — error parse
+                    // serde_json tidak membawa URL, tapi pesannya tetap
+                    // tidak pernah dicetak mentah ke log.
+                    tracing::warn!(
+                        host = %endpoint_host(endpoint),
+                        "Respons provider bukan JSON yang valid"
+                    );
+                    let (capped, truncated) =
+                        cap_log_body(&String::from_utf8_lossy(&bytes));
+                    return (
+                        Err(AttemptError {
+                            error: AppError::service_unavailable(
+                                "Respons provider validasi tidak dapat diproses",
+                            ),
+                            provider_failure: true,
+                            retryable: true,
+                        }),
+                        Some(finish_attempt_log(
+                            endpoint.name.as_str(),
+                            method,
+                            &request_redacted,
+                            Some(status.as_u16()),
+                            Some(scrub_secrets(&capped, &secrets)),
+                            truncated,
+                            call_started,
+                        )),
+                    );
+                }
+            };
+            let (capped, truncated) = cap_log_body(&String::from_utf8_lossy(&bytes));
+            (
+                Some(payload),
+                None,
+                Some(scrub_secrets(&capped, &secrets)),
+                truncated,
+            )
         } else {
-            (None, None)
+            // Non-success tanpa capture: body dibaca best-effort HANYA
+            // untuk log — gagal baca tidak pernah mengubah pemetaan
+            // error di bawah (map_provider_http_error(status)).
+            let (body, truncated) = match read_raw_response(response).await {
+                Ok(raw) => {
+                    let (capped, capped_truncated) = cap_log_body(&raw.body);
+                    (
+                        Some(scrub_secrets(&capped, &secrets)),
+                        capped_truncated || raw.truncated,
+                    )
+                }
+                Err(_) => (None, false),
+            };
+            (None, None, body, truncated)
         };
 
         if !status.is_success() {
@@ -870,11 +1098,22 @@ impl HttpProvider {
                 Some(raw) => with_raw_error(error, raw),
                 None => error,
             };
-            return Err(AttemptError {
-                error,
-                provider_failure,
-                retryable: provider_failure,
-            });
+            return (
+                Err(AttemptError {
+                    error,
+                    provider_failure,
+                    retryable: provider_failure,
+                }),
+                Some(finish_attempt_log(
+                    endpoint.name.as_str(),
+                    method,
+                    &request_redacted,
+                    Some(status.as_u16()),
+                    log_body,
+                    log_truncated,
+                    call_started,
+                )),
+            );
         }
 
         // PLN has exactly one known upstream contract (Chikamm, flat JSON
@@ -896,42 +1135,66 @@ impl HttpProvider {
         // validate_for_admin / validate_for_admin_at); the public/member
         // path always passes false. It doubles as the verbatim-message
         // flag: upstream wording reaches the tester only, never members.
-        let (normalized_status, message, result) = normalize_provider_payload(
+        let (normalized_status, message, result) = match normalize_provider_payload(
             request.product,
             &payload.expect("successful response has parsed payload"),
             &effective_mapping,
             &request.target,
             capture_raw,
-        )
-        .map_err(|error| {
-            let error = match raw.as_ref() {
-                Some(raw) => with_raw_error(error, raw),
-                None => error,
-            };
-            AttemptError {
-                error,
-                provider_failure: true,
-                retryable: true,
+        ) {
+            Ok(triple) => triple,
+            Err(error) => {
+                let error = match raw.as_ref() {
+                    Some(raw) => with_raw_error(error, raw),
+                    None => error,
+                };
+                return (
+                    Err(AttemptError {
+                        error,
+                        provider_failure: true,
+                        retryable: true,
+                    }),
+                    Some(finish_attempt_log(
+                        endpoint.name.as_str(),
+                        method,
+                        &request_redacted,
+                        Some(status.as_u16()),
+                        log_body,
+                        log_truncated,
+                        call_started,
+                    )),
+                );
             }
-        })?;
+        };
 
-        Ok((
-            ProviderValidationOutcome {
-                status: normalized_status,
-                message,
-                result,
-                provider_name: endpoint.name.clone(),
-                // Stempel sumber di titik ini (bukan di balapan): setiap
-                // outcome attempt HTTP membawa id endpointnya sendiri,
-                // sehingga pemenang balapan — jalur apa pun — teridentifikasi
-                // tanpa mengubah seleksi balapan.
-                provider_endpoint_id: Some(endpoint.id),
-                // Both set by the attempt loop, which times the whole sequence.
-                provider_latency_ms: 0,
-                attempts: 1,
-            },
-            raw,
-        ))
+        (
+            Ok((
+                ProviderValidationOutcome {
+                    status: normalized_status,
+                    message,
+                    result,
+                    provider_name: endpoint.name.clone(),
+                    // Stempel sumber di titik ini (bukan di balapan): setiap
+                    // outcome attempt HTTP membawa id endpointnya sendiri,
+                    // sehingga pemenang balapan — jalur apa pun — teridentifikasi
+                    // tanpa mengubah seleksi balapan.
+                    provider_endpoint_id: Some(endpoint.id),
+                    // Both set by the attempt loop, which times the whole sequence.
+                    provider_latency_ms: 0,
+                    attempts: 1,
+                },
+                raw,
+            )),
+            Some(finish_attempt_log(
+                endpoint.name.as_str(),
+                method,
+                &request_redacted,
+                Some(status.as_u16()),
+                log_body,
+                log_truncated,
+                call_started,
+            )),
+        )
     }
 }
 
@@ -1003,6 +1266,144 @@ async fn read_raw_response(
 
 fn with_raw_error(error: AppError, raw: &RawProviderResponse) -> AppError {
     error.with_details(serde_json::json!({ "upstream_response": raw }))
+}
+
+/// Tab Logs admin (migrasi 0040): redaksi SEBELUM data keluar dari
+/// provider.rs. Aturan fail-closed — lebih baik satu field ikut
+/// ter-mask daripada satu nilai kredensial lolos ke event/Redis/DB.
+///
+/// * Nama parameter/body yang terlihat seperti kredensial selalu
+///   di-mask, apa pun nilainya (B2: kredensial provider memang
+///   bepergian sebagai query param di Cutiezy/Generic GET).
+/// * Nilai kredensial yang diketahui (api_key endpoint) disikat
+///   harfiah dari teks apa pun, termasuk gema di body respons.
+/// * Host/URL mentah tidak pernah masuk log: yang disimpan hanya nama
+///   endpoint + method + parameter/body teredaksi.
+fn is_credential_key(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "apikey"
+            | "api_key"
+            | "api-key"
+            | "key"
+            | "token"
+            | "access_token"
+            | "secret"
+            | "client_secret"
+            | "auth"
+            | "authorization"
+            | "password"
+            | "passwd"
+    ) || lower.ends_with("_key")
+        || lower.ends_with("_token")
+        || lower.ends_with("_secret")
+        || lower.ends_with("-key")
+        || lower.ends_with("-token")
+        || lower.ends_with("-secret")
+}
+
+/// Mask nilai di bawah kunci berkredensial, rekursif. Nilai lain
+/// (termasuk target/nomor rekening) dipertahankan apa adanya.
+fn redact_json_value(value: Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.into_iter()
+                .map(|(key, val)| {
+                    if is_credential_key(&key) {
+                        (key, Value::String("***".to_owned()))
+                    } else {
+                        (key, redact_json_value(val))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(redact_json_value).collect())
+        }
+        other => other,
+    }
+}
+
+/// Representasi body POST teredaksi untuk log: mask struktural +
+/// sikat harfiah nilai kredensial yang diketahui.
+fn redact_json_request(body: &Value, secrets: &[&str]) -> String {
+    let masked = redact_json_value(body.clone());
+    let text = serde_json::to_string(&masked).unwrap_or_default();
+    scrub_secrets(&text, secrets)
+}
+
+/// Representasi query GET teredaksi: nilai di bawah nama parameter
+/// berkredensial di-mask; parameter lain dipertahankan (termasuk
+/// target — admin sudah melihat target_raw di riwayat).
+fn redact_query_string(query: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        if is_credential_key(&key) {
+            serializer.append_pair(&key, "***");
+        } else {
+            serializer.append_pair(&key, &value);
+        }
+    }
+    serializer.finish()
+}
+
+/// Sikat harfiah nilai rahasia dari teks: bentuk mentah + bentuk
+/// persen-encode (gema query). Nilai kosong diabaikan; rahasia
+/// terpanjang dulu agar tidak ada sisa parsial.
+fn scrub_secrets(text: &str, secrets: &[&str]) -> String {
+    let mut cleaned = text.to_owned();
+    let mut ordered: Vec<&str> = secrets
+        .iter()
+        .copied()
+        .filter(|secret| !secret.is_empty())
+        .collect();
+    ordered.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    for secret in ordered {
+        if cleaned.contains(secret) {
+            cleaned = cleaned.replace(secret, "***");
+        }
+        let encoded: String =
+            url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+        if encoded != secret && cleaned.contains(encoded.as_str()) {
+            cleaned = cleaned.replace(encoded.as_str(), "***");
+        }
+    }
+    cleaned
+}
+
+/// Cap body log pada 64 KiB yang sama dengan `MAX_RAW_RESPONSE_BYTES`
+/// (batas Tester), dipotong di batas karakter UTF-8 agar tidak ada
+/// karakter terbelah.
+fn cap_log_body(body: &str) -> (String, bool) {
+    if body.len() <= MAX_RAW_RESPONSE_BYTES {
+        return (body.to_owned(), false);
+    }
+    let mut end = MAX_RAW_RESPONSE_BYTES;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    (body[..end].to_owned(), true)
+}
+
+fn finish_attempt_log(
+    endpoint_name: &str,
+    method: &str,
+    request_redacted: &str,
+    response_status: Option<u16>,
+    response_body: Option<String>,
+    truncated: bool,
+    call_started: Instant,
+) -> ProviderAttemptLog {
+    ProviderAttemptLog {
+        endpoint_name: endpoint_name.to_owned(),
+        method: method.to_owned(),
+        request_redacted: request_redacted.to_owned(),
+        response_status,
+        response_body,
+        truncated,
+        latency_ms: call_started.elapsed().as_millis() as u64,
+    }
 }
 
 #[derive(Serialize)]
@@ -1207,17 +1608,17 @@ impl ProviderAdapter for HttpProvider {
     async fn validate(
         &self,
         request: ProviderValidationRequest,
-    ) -> Result<ProviderValidationOutcome, AppError> {
+    ) -> Result<(ProviderValidationOutcome, Vec<ProviderAttemptLog>), AppError> {
         self.validate_internal(request, false)
             .await
-            .map(|(outcome, _)| outcome)
+            .map(|(outcome, _, logs)| (outcome, logs))
     }
 
     async fn validate_for_admin(
         &self,
         request: ProviderValidationRequest,
     ) -> Result<(ProviderValidationOutcome, RawProviderResponse), AppError> {
-        let (outcome, raw) = self.validate_internal(request, true).await?;
+        let (outcome, raw, _) = self.validate_internal(request, true).await?;
         Ok((
             outcome,
             raw.expect("admin HTTP call captures upstream response"),
@@ -2228,7 +2629,6 @@ mod mode_rejection_tests {
             development_admin_token: None,
             demo_api_key: None,
             allowed_dashboard_origin: None,
-            qris_base_url: "https://example.invalid".to_owned(),
         };
         let configs = ProviderConfigStore::build(&config)
             .await
@@ -2252,7 +2652,7 @@ mod mode_rejection_tests {
             number_param: "number".to_owned(),
             key_param: None,
         };
-        let (result, provider_failure) = provider
+        let (result, provider_failure, _logs) = provider
             .validate_upstream_endpoint(
                 &endpoint,
                 ProviderValidationRequest {
@@ -2544,7 +2944,6 @@ mod pacer_failure_tests {
             development_admin_token: None,
             demo_api_key: None,
             allowed_dashboard_origin: None,
-            qris_base_url: "https://example.invalid".to_owned(),
         }
     }
 
@@ -2642,7 +3041,7 @@ mod pacer_failure_tests {
         };
         // Attempt 1: HTTP 500 (provider_failure=true, retryable).
         // Attempt 2: pacer menolak -> error 429 internal.
-        let (result, provider_failure) = provider
+        let (result, provider_failure, _logs) = provider
             .validate_upstream_endpoint(&endpoint, request, false)
             .await;
         let error = result.expect_err("pacer attempt 2 harus menggagalkan");
@@ -2708,7 +3107,6 @@ mod endpoint_source_tests {
             development_admin_token: None,
             demo_api_key: None,
             allowed_dashboard_origin: None,
-            qris_base_url: "https://example.invalid".to_owned(),
         }
     }
 
@@ -2820,7 +3218,7 @@ mod endpoint_source_tests {
             r#"{"status":"valid","result":{"account_name":"NAMA UJI","reference":"ref-1"}}"#,
         );
         let endpoint = create_endpoint(provider_store(&provider), port, "Endpoint Uji").await;
-        let (outcome, _) = provider
+        let (outcome, _, _) = provider
             .validate_upstream_race(bank_request(), false)
             .await
             .expect("balapan satu endpoint sukses");
@@ -2840,7 +3238,7 @@ mod endpoint_source_tests {
         let invalid = create_endpoint(store, invalid_port, "Endpoint Invalid").await;
         let valid = create_endpoint(store, valid_port, "Endpoint Valid").await;
         let _ = invalid;
-        let (outcome, _) = provider
+        let (outcome, _, _) = provider
             .validate_upstream_race(bank_request(), false)
             .await
             .expect("balapan dua leg sukses");
@@ -2861,7 +3259,7 @@ mod endpoint_source_tests {
         let not_found_port = serve_one_json(r#"{"status":"not_found","result":{}}"#);
         let invalid = create_endpoint(store, invalid_port, "Endpoint Invalid").await;
         let _not_found = create_endpoint(store, not_found_port, "Endpoint NotFound").await;
-        let (outcome, _) = provider
+        let (outcome, _, _) = provider
             .validate_upstream_race(bank_request(), false)
             .await
             .expect("balapan fallback sukses");
@@ -3043,7 +3441,7 @@ mod demo_provider_tests {
         ] {
             for wanted in [1_u32, 3, 4] {
                 let target = target_for_selector(product, wanted);
-                let outcome = provider
+                let (outcome, logs) = provider
                     .validate(ProviderValidationRequest {
                         product,
                         provider_hint: Some(hint.to_owned()),
@@ -3051,6 +3449,10 @@ mod demo_provider_tests {
                     })
                     .await
                     .expect("validasi demo berhasil");
+                assert!(
+                    logs.is_empty(),
+                    "demo tidak memanggil provider: tab Logs harus kosong"
+                );
                 let result = outcome
                     .result
                     .expect("outcome demo membawa result");
@@ -3243,5 +3645,121 @@ mod pln_tests {
             assert!(!serialized.contains("tarif"));
             assert!(!serialized.contains("daya"));
         }
+    }
+}
+
+#[cfg(test)]
+mod provider_attempt_log_tests {
+    use super::{
+        cap_log_body, finish_attempt_log, is_credential_key, redact_json_request,
+        redact_query_string, scrub_secrets, MAX_RAW_RESPONSE_BYTES,
+    };
+    use tokio::time::Instant;
+
+    // Fixture kredensial PALSU untuk tes — bukan kunci nyata mana pun.
+    const FIXTURE_KEY: &str = "kunci-uji-123";
+
+    #[test]
+    fn credential_key_names_match_case_insensitively() {
+        for name in [
+            "apikey",
+            "APIKEY",
+            "Api_Key",
+            "api-key",
+            "token",
+            "access_token",
+            "x-token",
+            "client_secret",
+            "Authorization",
+            "password",
+        ] {
+            assert!(is_credential_key(name), "{name} harus dikenali kredensial");
+        }
+        for name in ["code", "target", "user_id", "service", "account_number", "type"] {
+            assert!(!is_credential_key(name), "{name} bukan kredensial");
+        }
+    }
+
+    #[test]
+    fn query_redaction_masks_credentials_but_keeps_business_params() {
+        let redacted = redact_query_string(
+            "code=014&target=081234567890&apikey=kunci-uji-123&token=abc&user_id=081234567890",
+        );
+        assert!(!redacted.contains("kunci-uji-123"), "nilai apikey bocor: {redacted}");
+        assert!(!redacted.contains("token=abc"), "nilai token bocor: {redacted}");
+        assert!(redacted.contains("code=014"), "param bisnis hilang: {redacted}");
+        assert!(redacted.contains("target=081234567890"), "target hilang: {redacted}");
+        assert!(redacted.contains("apikey=***"), "apikey harus ter-mask: {redacted}");
+    }
+
+    #[test]
+    fn json_body_redaction_masks_nested_credentials() {
+        let body = serde_json::json!({
+            "product": "bank_account",
+            "target": "1234567890",
+            "api_key": FIXTURE_KEY,
+            "auth": { "token": "token-rahasia", "mode": "live" },
+        });
+        let redacted = redact_json_request(&body, &[FIXTURE_KEY]);
+        assert!(!redacted.contains(FIXTURE_KEY), "kunci bocor: {redacted}");
+        assert!(!redacted.contains("token-rahasia"), "token bocor: {redacted}");
+        assert!(redacted.contains("1234567890"), "target hilang: {redacted}");
+        assert!(redacted.contains("\"api_key\":\"***\""), "api_key harus ter-mask: {redacted}");
+    }
+
+    #[test]
+    fn scrub_removes_secret_and_its_encoded_form() {
+        let text = format!("Bearer {FIXTURE_KEY} dan query apikey=kunci-uji-123");
+        let cleaned = scrub_secrets(&text, &[FIXTURE_KEY]);
+        assert!(!cleaned.contains(FIXTURE_KEY), "kunci mentah bocor: {cleaned}");
+        assert!(cleaned.contains("Bearer ***"), "gema Bearer harus tersikat: {cleaned}");
+        let encoded_query = "apikey=kunci%2Fuji+123";
+        assert!(
+            !scrub_secrets(encoded_query, &["kunci/uji 123"]).contains("kunci"),
+            "bentuk persen-encode bocor"
+        );
+        // Header Authorization tidak pernah masuk log: representasi
+        // request hanya berisi body/query, jadi nilai header tidak ada
+        // di sini secara konstruksi — tes ini mengunci bahwa sikat
+        // harfiah pun menghapusnya bila provider meng-echo header.
+        let echoed = format!("{{\"echoed_auth\": \"Bearer {FIXTURE_KEY}\"}}");
+        assert!(!scrub_secrets(&echoed, &[FIXTURE_KEY]).contains(FIXTURE_KEY));
+    }
+
+    #[test]
+    fn log_body_cap_is_64kib_and_char_boundary_safe() {
+        let exact = "x".repeat(MAX_RAW_RESPONSE_BYTES);
+        let (body, truncated) = cap_log_body(&exact);
+        assert!(!truncated);
+        assert_eq!(body.len(), MAX_RAW_RESPONSE_BYTES);
+        let over = "x".repeat(MAX_RAW_RESPONSE_BYTES + 1);
+        let (body, truncated) = cap_log_body(&over);
+        assert!(truncated);
+        assert_eq!(body.len(), MAX_RAW_RESPONSE_BYTES);
+        // Karakter multibyte yang mengangkangi batas tidak boleh
+        // membuat panic atau string tidak valid.
+        let mut wide = "é".repeat(MAX_RAW_RESPONSE_BYTES / 2 + 10);
+        wide.push_str("tail");
+        let (body, truncated) = cap_log_body(&wide);
+        assert!(truncated);
+        assert!(body.len() <= MAX_RAW_RESPONSE_BYTES);
+        assert!(std::str::from_utf8(body.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn finish_attempt_log_carries_fields_and_latency() {
+        let log = finish_attempt_log(
+            "Server Uji",
+            "POST",
+            "{\"target\":\"123\"}",
+            Some(200),
+            Some("{\"ok\":true}".to_owned()),
+            false,
+            Instant::now(),
+        );
+        assert_eq!(log.endpoint_name, "Server Uji");
+        assert_eq!(log.method, "POST");
+        assert_eq!(log.response_status, Some(200));
+        assert!(!log.truncated);
     }
 }

@@ -1205,6 +1205,11 @@
   function openHistoryDetail(requestId) {
     const item = state.history.items.find((entry) => String(entry.request_id) === String(requestId));
     if (!item) return;
+    // Tab Logs selalu mulai dari Detail tiap pembukaan modal; Logs
+    // di-fetch ulang per requestId saat tab diklik.
+    state.historyDetailRequestId = requestId;
+    state.historyDetailLogsState = null;
+    switchHistoryDetailTab("detail");
     const occurred = formatHistoryDateTime(item.occurred_at);
     const target = item.target_raw != null && item.target_raw !== "" ? item.target_raw : item.target_masked;
     const accountName = item.account_name != null && item.account_name !== "" ? item.account_name : "—";
@@ -1242,6 +1247,96 @@
       + testerRow("Latensi", latencyDetail)
       + testerRow("Request ID", String(item.request_id));
     openModal("history-detail-modal");
+  }
+
+  function switchHistoryDetailTab(tab) {
+    document.querySelectorAll("[data-history-detail-tab]").forEach((button) => {
+      const active = button.getAttribute("data-history-detail-tab") === tab;
+      button.classList.toggle("is-active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    const detailPanel = $("#history-detail-panel-detail");
+    const logsPanel = $("#history-detail-panel-logs");
+    if (detailPanel) detailPanel.hidden = tab !== "detail";
+    if (logsPanel) logsPanel.hidden = tab !== "logs";
+    if (tab === "logs") loadHistoryDetailLogs();
+  }
+
+  async function loadHistoryDetailLogs() {
+    const requestId = state.historyDetailRequestId;
+    const box = $("#history-detail-logs");
+    if (!requestId || !box) return;
+    // Satu requestId hanya di-fetch sekali per pembukaan modal; gagal
+    // fetch tidak menandai selesai, jadi klik tab berikutnya mencoba lagi.
+    if (state.historyDetailLogsState === requestId) return;
+    box.textContent = "Memuat Logs…";
+    try {
+      const data = await api(`/v1/admin/validation-history/${encodeURIComponent(requestId)}/logs`);
+      state.historyDetailLogsState = requestId;
+      renderHistoryDetailLogs(box, data);
+    } catch (error) {
+      box.textContent = "Gagal memuat Logs. Klik tab Logs lagi untuk mencoba.";
+    }
+  }
+
+  function renderHistoryDetailLogs(box, data) {
+    // SEMUA nilai dinamis lewat textContent (bukan innerHTML): body
+    // respons provider tidak pernah menjadi markup.
+    box.replaceChildren();
+    if (!data || typeof data !== "object") {
+      box.textContent = "Logs tidak tersedia.";
+      return;
+    }
+    if (data.state === "not_available" || data.state === "expired") {
+      const empty = document.createElement("p");
+      empty.className = "history-logs-empty";
+      empty.textContent = data.state === "expired"
+        ? "Log cek ini sudah dihapus (retensi 48 jam)."
+        : "Belum ada log untuk cek ini (cek dibuat sebelum fitur Logs tersedia).";
+      box.appendChild(empty);
+      return;
+    }
+    const logs = Array.isArray(data.logs) ? data.logs : [];
+    if (logs.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "history-logs-empty";
+      empty.textContent = "Tidak ada percobaan provider yang tercatat untuk cek ini.";
+      box.appendChild(empty);
+      return;
+    }
+    for (const log of logs) {
+      const card = document.createElement("div");
+      card.className = "history-log-card";
+      const head = document.createElement("div");
+      head.className = "history-log-head";
+      const title = document.createElement("span");
+      title.textContent = `${log.endpoint_name || "—"} · ${log.method || "—"}`;
+      head.appendChild(title);
+      const status = document.createElement("span");
+      status.className = "history-log-status";
+      status.textContent = log.response_status != null
+        ? `HTTP ${log.response_status} · ${log.latency_ms ?? 0} ms${log.truncated ? " · dipotong 64 KiB" : ""}`
+        : `Tanpa respons · ${log.latency_ms ?? 0} ms`;
+      head.appendChild(status);
+      card.appendChild(head);
+      const reqLabel = document.createElement("div");
+      reqLabel.className = "history-log-label";
+      reqLabel.textContent = "Permintaan terkirim (teredaksi)";
+      card.appendChild(reqLabel);
+      const reqPre = document.createElement("pre");
+      reqPre.textContent = log.request_redacted || "—";
+      card.appendChild(reqPre);
+      const resLabel = document.createElement("div");
+      resLabel.className = "history-log-label";
+      resLabel.textContent = "Respons provider";
+      card.appendChild(resLabel);
+      const resPre = document.createElement("pre");
+      resPre.textContent = log.response_body != null && log.response_body !== ""
+        ? log.response_body
+        : "Tidak ada respons (gagal transport).";
+      card.appendChild(resPre);
+      box.appendChild(card);
+    }
   }
 
   async function loadMembers() {
@@ -1410,76 +1505,6 @@
     renderOrders();
     loadRecon().catch(() => {});
     loadAlertStatus().catch(() => {});
-    loadOrphanQr().catch(() => {});
-  }
-
-  // K26: daftar QR yatim (QR Cutiezy berbayar tanpa baris order) +
-  // form resolve-berbukti (pilih paket + RRN dashboard). QR yatim yang
-  // gagal dibatalkan dulu hanya meninggalkan log; kini admin bisa
-  // meng-grant-nya dari panel bila check-status membuktikan lunas.
-  async function loadOrphanQr() {
-    const box = $("#orphan-qr-box");
-    if (!box) return;
-    try {
-      const items = await api("/v1/admin/orphan-qr");
-      if (!items.length) {
-        box.innerHTML = "";
-        return;
-      }
-      if (!state.packages.length) {
-        try { state.packages = await api("/v1/admin/packages"); } catch (_) { /* dropdown paket diisi seadanya */ }
-      }
-      const pkgOptions = state.packages.length
-        ? state.packages.map((pkg) => `<option value="${escapeHtml(pkg.id)}">${escapeHtml(pkg.name)} — ${formatNumber(pkg.included_hits)} hit</option>`).join("")
-        : `<option value="">(paket belum dimuat)</option>`;
-      box.innerHTML = `<div class="order-section"><h3 class="order-section-title">QR yatim (belum punya order)</h3>
-        <p class="tester-audit-note">QR yang sudah terbit di Cutiezy tapi gagal dibatalkan saat create gagal. Bila member membayar QR ini, resolve-berbukti di bawah (cocokkan RRN + nominal lewat check-status) akan membuat order + grant — tanpa ini uangnya menggantung.</p>
-        ${items.map((item) => `<article class="order-card" data-orphan="${escapeHtml(item.id)}">
-          <div><strong>${escapeHtml(item.member_email || "—")}</strong> · ${formatRupiah(item.amount_idr)} · status: ${escapeHtml(item.status)}${item.resolved_order_id ? ` · order tertaut: <code>${escapeHtml(item.resolved_order_id)}</code>` : ""} · ${escapeHtml(formatDate(item.created_at))}</div>
-          <form class="form-grid orphan-resolve-form">
-            <label>Paket yang di-grant<select class="orphan-package" required>${pkgOptions}</select></label>
-            <label>RRN mutasi (dashboard Cutiezy)<input class="orphan-rrn" maxlength="191" placeholder="opsional, dianjurkan"></label>
-            <div class="form-actions"><button class="button button-primary" type="submit">Resolve &amp; grant</button><span class="order-resolve-msg orphan-msg"></span></div>
-          </form>
-        </article>`).join("")}</div>`;
-      $$("#orphan-qr-box .orphan-resolve-form").forEach((form) => {
-        form.addEventListener("submit", async (event) => {
-          event.preventDefault();
-          const card = form.closest("[data-orphan]");
-          const orphanId = card.dataset.orphan;
-          const btn = form.querySelector('button[type="submit"]');
-          const msg = form.querySelector(".orphan-msg");
-          if (btn) btn.disabled = true;
-          if (msg) msg.textContent = "Memproses…";
-          try {
-            const result = await api(`/v1/admin/orphan-qr/${orphanId}/resolve`, {
-              method: "POST",
-              body: {
-                package_id: form.querySelector(".orphan-package").value,
-                mutation_ref: form.querySelector(".orphan-rrn").value || null,
-              },
-            });
-            // Kontrak resolve-berbukti: outcome eksplisit WAJIB
-            // ditampilkan apa adanya — jangan menebak dari HTTP 200.
-            const outcome = typeof result?.outcome === "string" ? result.outcome.toLowerCase() : "";
-            const texts = {
-              granted: "Kuota berhasil di-grant.",
-              already_granted: "Kuota sudah ter-grant sebelumnya.",
-              alreadygranted: "Kuota sudah ter-grant sebelumnya.",
-              needs_review: "Grant ditahan (perlu tinjauan) — lanjutkan lewat tombol Grant ulang pada order tertaut.",
-              rejected: "Ditolak — check-status membuktikan QR ini belum lunas.",
-            };
-            if (msg) msg.textContent = texts[outcome] || "Resolve selesai.";
-            await loadOrders();
-          } catch (error) {
-            if (msg) msg.textContent = error.message || "Resolve QR yatim gagal.";
-            if (btn) btn.disabled = false;
-          }
-        });
-      });
-    } catch (_) {
-      box.innerHTML = "";
-    }
   }
 
   // AREA 3: kartu ringkasan rekonsiliasi untuk rentang yang sama
@@ -1732,7 +1757,7 @@
           : resolveBtnHtml("Grant ulang");
       } else if (order.status === "expired" || order.status === "canceled") {
         // B10: tombol resolve untuk order terminal yang ternyata lunas
-        // (bayar telat) — server re-check Cutiezy dulu dan hanya
+        // (bayar telat) — server re-check Gobiz dulu dan hanya
         // meng-grant bila terbukti Paid + nominal cocok.
         heroAction = mismatch
           ? `<span class="order-resolve-msg">Penanganan manual: nominal tidak sama.</span>`
@@ -1938,18 +1963,35 @@
       : "Blokir validasi nonaktif.";
   }
 
+  // Tombol tes Gobiz aktif hanya bila kredensial TERSIMPAN lengkap
+  // (base URL + API key dari GET settings); field password yang baru
+  // diketik tapi belum disimpan TIDAK mengaktifkan tombol — tes memakai
+  // kredensial tersimpan di server, bukan isi field.
+  function updateGobizTestButton(settings) {
+    const ready = !!(settings && settings.gobiz_base_url && settings.has_gobiz_api_key);
+    const btn = $("#gobiz-test-btn");
+    if (btn) btn.disabled = !ready;
+    const note = $("#gobiz-test-note");
+    if (note) {
+      note.textContent = ready
+        ? "Tes membuat satu invoice QRIS TES (Rp5.000, order_id TEST-GOBIZ-…) lalu membatalkannya; tidak membuat order member, tidak grant kuota, tidak menggerakkan uang."
+        : "Isi dan simpan base URL + API key Gobiz dulu untuk mengaktifkan tes.";
+    }
+  }
+
   async function loadQrisSettings() {
     const settings = await api("/v1/admin/qris/settings").catch(() => null);
     if (!settings) return;
     $("#qris-enabled").checked = !!settings.enabled;
     $("#qris-expiry").value = String(settings.expiry_minutes);
     $("#qris-valid-days").value = settings.valid_days;
-    $("#qris-source-id").value = settings.source_id ?? "";
+    $("#gobiz-base-url").value = settings.gobiz_base_url || "";
+    $("#gobiz-callback-url").value = settings.gobiz_callback_url || "";
+    updateGobizTestButton(settings);
     const parts = [
-      settings.has_api_key ? "API key tersimpan" : "API key belum diisi",
-      settings.has_webhook_secret ? "webhook secret tersimpan" : "webhook secret belum diisi",
+      settings.has_gobiz_api_key ? "API key Gobiz tersimpan" : "API key Gobiz belum diisi",
+      settings.has_gobiz_webhook_secret ? "webhook secret Gobiz tersimpan" : "webhook secret Gobiz belum diisi",
     ];
-    if (settings.last_cutiezy_remaining != null) parts.push(`sisa kuota Cutiezy: ${formatNumber(settings.last_cutiezy_remaining)} hit`);
     if (settings.last_error) parts.push(`error terakhir: ${settings.last_error}`);
     $("#qris-status").textContent = parts.join(" · ");
   }
@@ -2981,23 +3023,50 @@
     $("#order-detail-close")?.addEventListener("click", () => { $("#order-detail").hidden = true; });
     $("#qris-form")?.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const sourceId = $("#qris-source-id").value.trim();
       const body = {
         enabled: $("#qris-enabled").checked,
         expiry_minutes: Number($("#qris-expiry").value),
         valid_days: Number($("#qris-valid-days").value),
-        source_id: sourceId === "" ? null : Number(sourceId),
-        api_key: $("#qris-api-key").value,
-        webhook_secret: $("#qris-webhook-secret").value,
+        gobiz_base_url: $("#gobiz-base-url").value.trim(),
+        gobiz_callback_url: $("#gobiz-callback-url").value.trim(),
+        gobiz_api_key: $("#gobiz-api-key").value,
+        gobiz_webhook_secret: $("#gobiz-webhook-secret").value,
       };
       try {
         await api("/v1/admin/qris/settings", { method: "PUT", body: JSON.stringify(body) });
-        $("#qris-api-key").value = "";
-        $("#qris-webhook-secret").value = "";
+        $("#gobiz-api-key").value = "";
+        $("#gobiz-webhook-secret").value = "";
         await loadQrisSettings();
         showToast("Pengaturan QRIS berhasil disimpan.", "success");
       } catch (error) {
         handleApiError(error);
+      }
+    });
+    $("#gobiz-test-btn")?.addEventListener("click", async () => {
+      const btn = $("#gobiz-test-btn");
+      const result = $("#gobiz-test-result");
+      if (!btn || !result) return;
+      btn.disabled = true;
+      result.hidden = false;
+      result.textContent = "Menguji kredensial Gobiz…";
+      try {
+        const data = await api("/v1/admin/qris/gobiz/test", { method: "POST" });
+        result.textContent = "";
+        const summary = document.createElement("p");
+        summary.textContent = `Tes Gobiz BERHASIL — status: ${data.status}, nominal bayar: Rp${formatNumber(data.expected_amount)}, payment: ${data.payment_id}, kedaluwarsa: ${data.expires_at || "-"}, invoice tes ${data.cancelled ? "berhasil dibatalkan" : "TIDAK berhasil dibatalkan (dibiarkan kedaluwarsa)"}.`;
+        const details = document.createElement("details");
+        const detailsSummary = document.createElement("summary");
+        detailsSummary.textContent = "QRIS string (admin-only)";
+        const qrText = document.createElement("code");
+        qrText.textContent = data.qris_string;
+        details.append(detailsSummary, qrText);
+        result.append(summary, details);
+      } catch (error) {
+        result.textContent = `Tes Gobiz GAGAL — ${error && error.message ? error.message : error}`;
+      } finally {
+        // Refresh status tombol dari kredensial tersimpan (bukan dari
+        // hasil tes — tombol tetap aktif selama kredensial lengkap).
+        await loadQrisSettings();
       }
     });
     $("#telegram-form")?.addEventListener("submit", async (event) => {
@@ -3321,6 +3390,14 @@
         document.querySelectorAll("#view-settings [role=\"tabpanel\"]").forEach((panel) => {
           panel.hidden = panel.id !== button.getAttribute("aria-controls");
         });
+      });
+    });
+    // Tab Detail/Logs di modal riwayat: hanya show/hide panel; Logs
+    // di-fetch saat tab diklik (bukan saat modal dibuka) agar daftar
+    // riwayat tidak terbebani request tambahan.
+    document.querySelectorAll("[data-history-detail-tab]").forEach((button) => {
+      button.addEventListener("click", () => {
+        switchHistoryDetailTab(button.getAttribute("data-history-detail-tab"));
       });
     });
     // Tab layanan provider: hanya show/hide panel (panel tetap di DOM;

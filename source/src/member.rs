@@ -922,7 +922,11 @@ pub async fn usage(
 // ---------------------------------------------------------------------------
 
 /// Trial parameters, admin-adjustable via runtime settings without a deploy.
-async fn trial_settings(state: &AppState) -> (u64, i64) {
+///
+/// Shared by the grant path AND the landing/docs/member render paths, so
+/// the numbers a visitor sees are always exactly what a new member gets
+/// (including the fallbacks below when the setting rows are absent).
+pub(crate) async fn trial_settings(state: &AppState) -> (u64, i64) {
     let quota = state
         .provider_configs
         .load_runtime_setting("trial.quota_hits")
@@ -938,6 +942,50 @@ async fn trial_settings(state: &AppState) -> (u64, i64) {
         .filter(|value| (1..=90).contains(value))
         .unwrap_or(7);
     (quota, days)
+}
+
+/// Render trial numbers into an embedded page template. Numbers are
+/// rendered plain (no thousand grouping) to match the historical copy
+/// style ("1000×"). Every handler that serves a template carrying
+/// {{TRIAL_HITS}}/{{TRIAL_DAYS}} must run its output through this helper
+/// (the static-file fallback in api.rs refuses to serve those templates
+/// raw, so a placeholder can never leak to a visitor).
+pub(crate) fn apply_trial_placeholders(template: &str, hits: u64, days: i64) -> String {
+    template
+        .replace("{{TRIAL_HITS}}", &hits.to_string())
+        .replace("{{TRIAL_DAYS}}", &days.to_string())
+}
+
+#[cfg(test)]
+mod trial_placeholder_tests {
+    use super::*;
+
+    #[test]
+    fn replaces_both_placeholders_with_plain_numbers() {
+        let out = apply_trial_placeholders(
+            "trial {{TRIAL_HITS}}× cek selama {{TRIAL_DAYS}} hari",
+            100,
+            7,
+        );
+        assert_eq!(out, "trial 100× cek selama 7 hari");
+    }
+
+    #[test]
+    fn replaces_every_occurrence_and_renders_large_numbers_plain() {
+        let out = apply_trial_placeholders(
+            "{{TRIAL_HITS}}× dan {{TRIAL_HITS}}× selama {{TRIAL_DAYS}} hari",
+            100_000,
+            90,
+        );
+        assert_eq!(out, "100000× dan 100000× selama 90 hari");
+        assert!(!out.contains("{{TRIAL_"));
+    }
+
+    #[test]
+    fn template_without_placeholders_is_unchanged() {
+        let template = "tanpa placeholder sama sekali";
+        assert_eq!(apply_trial_placeholders(template, 100, 7), template);
+    }
 }
 
 pub async fn google_start(
@@ -1084,7 +1132,14 @@ async fn google_callback_inner(
                         // adopt that row instead of failing the login.
                         match state.store.member_by_google_sub(&user.sub).await? {
                             Some(member) => (member, false),
-                            None => return Err(error),
+                            None => {
+                                // Observabilitas signup 2026-11-02: kegagalan
+                                // pembuatan member sebelumnya gagal diam-diam
+                                // (hanya ?auth=failed di browser) — catat
+                                // alasannya di journal agar bisa dilacak.
+                                tracing::warn!(?error, "Pembuatan member baru gagal (signup Google)");
+                                return Err(error);
+                            }
                         }
                     }
                 },
@@ -1139,7 +1194,11 @@ async fn google_callback_inner(
                 let created = state
                     .store
                     .create_member_api_key(&member, quota, Some(expires), rate_limit)
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(?error, member_id = %member.id, "Penerbitan kunci trial gagal (signup Google)");
+                        error
+                    })?;
                 // The grant insert is the atomic claim. Only a duplicate
                 // claim revokes the key just issued; a transient database
                 // error KEEPS it (audit flow K15): the next login sees
@@ -1223,7 +1282,11 @@ async fn google_callback_inner(
                         let empty = state
                             .store
                             .create_member_api_key(&member, 0, None, rate_limit)
-                            .await?;
+                            .await
+                            .map_err(|error| {
+                                tracing::warn!(?error, member_id = %member.id, "Penerbitan kunci kosong gagal (trial ditahan)");
+                                error
+                            })?;
                         reveal_token = Some(stash_key_reveal(
                             &empty.plaintext_key,
                             member.id,
@@ -1235,7 +1298,11 @@ async fn google_callback_inner(
                 let created = state
                     .store
                     .create_member_api_key(&member, 0, None, rate_limit)
-                    .await?;
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(?error, member_id = %member.id, "Penerbitan kunci kosong gagal (kunci lama dicabut)");
+                        error
+                    })?;
                 reveal_token = Some(stash_key_reveal(
                     &created.plaintext_key,
                     member.id,
@@ -1252,7 +1319,11 @@ async fn google_callback_inner(
         .await
         .map(|(summary, _)| summary.prefix)
         .unwrap_or_default();
-    let token = issue_member_session(&state, &member.id.to_string(), "google", &bound_prefix)?;
+    let token = issue_member_session(&state, &member.id.to_string(), "google", &bound_prefix)
+        .map_err(|error| {
+            tracing::warn!(?error, member_id = %member.id, "Penerbitan sesi member gagal (login Google)");
+            error
+        })?;
     // Audit login 2026-10-27 KECIL-4: the one-time reveal token NEVER
     // travels in the URL anymore (it used to be logged in the nginx
     // access log and browser history until replaceState ran). The
@@ -1747,10 +1818,10 @@ pub async fn ewallets(
 }
 
 // ---------------------------------------------------------------------------
-// Pembelian paket mandiri (QRIS Cutiezy)
+// Pembelian paket mandiri (QRIS Gobiz)
 // ---------------------------------------------------------------------------
 
-use crate::qris::{self, MemberOrderView, PackageOrderRow, QrisClient};
+use crate::qris::{self, MemberOrderView, PackageOrderRow};
 
 /// Member id pemilik order. Sesi member (Google) membawa id langsung;
 /// sesi prefix (login API key) dipetakan ke member pemilik kunci itu.
@@ -1880,7 +1951,7 @@ pub struct PurchasePreviewResponse {
 }
 
 /// Efek pembelian SEBELUM bayar (murni komputasi, tanpa memanggil
-/// Cutiezy). Member tanpa kunci melihat efek dari nol.
+/// provider). Member tanpa kunci melihat efek dari nol.
 pub async fn purchase_preview(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2069,7 +2140,7 @@ pub async fn check_order(
     Ok(Json(view))
 }
 
-/// Batalkan order waiting. Bila Cutiezy ternyata sudah lunas, batal
+/// Batalkan order waiting. Bila Gobiz ternyata sudah lunas, batal
 /// DIBATALKAN dan verify_and_grant dijalankan (uang member tidak hilang).
 pub async fn cancel_order(
     State(state): State<AppState>,
@@ -2082,70 +2153,77 @@ pub async fn cancel_order(
     }
     let pool = pool_or_unavailable(&state)?;
     let settings = qris::load_qris_settings(&pool).await?;
-    let Some(ciphertext) = settings.api_key_ciphertext else {
-        return Err(AppError::service_unavailable(
-            "Pembayaran belum dikonfigurasi admin.",
-        ));
-    };
+    // Bentuk error cancel-atas-paid Gobiz TIDAK ditebak: cancel gagal ->
+    // GetStatus dulu. Paid -> verify_and_grant; Expired/Canceled -> CAS
+    // lokal canceled (provider memastikan terminal belum bayar); selain
+    // itu -> 502.
     let cipher = crate::provider_config::CredentialCipher::new(
         state.config.api_key_encryption_key.as_deref(),
     );
-    let api_key = cipher
-        .decrypt(&ciphertext)
-        .map_err(|_| AppError::service_unavailable("Pembayaran belum dikonfigurasi admin."))?;
-    let token = row
-        .qris_token
+    let api_key = settings
+        .gobiz_api_key_ciphertext
+        .as_deref()
+        .and_then(|ciphertext| cipher.decrypt(ciphertext).ok())
+        .ok_or_else(|| {
+            AppError::service_unavailable("Pembayaran belum dikonfigurasi admin.")
+        })?;
+    let payment_id = row
+        .provider_order_id
         .clone()
-        .ok_or_else(|| AppError::internal("Order tanpa token QRIS"))?;
-    let client = QrisClient::new(&state.config.qris_base_url)?;
-    match client.cancel(&api_key, &token).await {
-        Ok(()) => {
-            // K35: hasil CAS dicek EKSPLISIT, lalu re-read menjadi
-            // otoritas hasil akhir (hasil akhir TIDAK berubah dari
-            // perilaku lama — re-read sudah menyelamatkannya — tapi
-            // polanya kini tertulis, bukan kebetulan). CAS 0 baris
-            // berarti sweep/verify sudah mengubah status di antara
-            // cancel Cutiezy dan UPDATE ini (mis. sudah ter-grant):
-            // member melihat status benar itu, bukan `canceled` palsu.
-            let changed = sqlx::query(
-                "UPDATE package_orders SET status = 'canceled', updated_at = UTC_TIMESTAMP(6) \
-                 WHERE id = ? AND status = 'waiting_payment'",
-            )
-            .bind(&row.id)
-            .execute(&pool)
-            .await
-            .map_err(|_| AppError::internal("Order tidak dapat dibatalkan"))?;
-            if changed.rows_affected() != 1 {
-                tracing::debug!(order_id = %row.id, "Cancel lokal kalah CAS; status hasil re-read yang dipakai");
+        .ok_or_else(|| AppError::internal("Order tanpa ID pembayaran Gobiz"))?;
+    let gobiz = crate::gobiz::GobizClient::new(&settings.gobiz_base_url_effective())?;
+    match gobiz.cancel(&api_key, &payment_id).await {
+        Ok(()) => {}
+        Err(cancel_error) => {
+            tracing::warn!(?cancel_error, "Cancel Gobiz gagal; cek status dulu sebelum memutuskan");
+            match gobiz.get_status(&api_key, &payment_id).await {
+                Ok(crate::qris::QrisPaymentStatus::Paid { .. }) => {
+                    let id = uuid::Uuid::parse_str(&row.id)
+                        .map_err(|_| AppError::internal("ID order tidak valid"))?;
+                    let (view, _) =
+                        qris::verify_and_grant(&state.store, &state.config, id).await?;
+                    return Ok(Json(view));
+                }
+                Ok(crate::qris::QrisPaymentStatus::Expired)
+                | Ok(crate::qris::QrisPaymentStatus::Canceled) => {}
+                _ => {
+                    tracing::warn!("Cancel Gobiz gagal dan status tidak memastikan terminal");
+                    return Err(AppError::new(
+                        StatusCode::BAD_GATEWAY,
+                        "qris_provider_error",
+                        "Pembatalan belum bisa diproses. Coba lagi.",
+                    ));
+                }
             }
-            let updated = qris::get_order(
-                &pool,
-                &uuid::Uuid::parse_str(&row.id)
-                    .map_err(|_| AppError::internal("ID order tidak valid"))?,
-            )
-            .await?
-            .unwrap_or(row);
-            Ok(Json(updated.member_view()))
-        }
-        Err(qris::QrisError::AlreadyPaid) => {
-            let id = uuid::Uuid::parse_str(&row.id)
-                .map_err(|_| AppError::internal("ID order tidak valid"))?;
-            let (view, _) = qris::verify_and_grant(&state.store, &state.config, id).await?;
-            Ok(Json(view))
-        }
-        Err(error) => {
-            tracing::warn!(?error, "Cancel QRIS gagal");
-            Err(AppError::new(
-                StatusCode::BAD_GATEWAY,
-                "qris_provider_error",
-                "Pembatalan belum bisa diproses. Coba lagi.",
-            ))
         }
     }
+    // CAS lokal + re-read (pola K35): CAS 0 baris berarti sweep/verify
+    // sudah mengubah status di antara cancel provider dan UPDATE ini —
+    // member melihat status benar itu, bukan `canceled` palsu.
+    let changed = sqlx::query(
+        "UPDATE package_orders SET status = 'canceled', updated_at = UTC_TIMESTAMP(6) \
+         WHERE id = ? AND status = 'waiting_payment'",
+    )
+    .bind(&row.id)
+    .execute(&pool)
+    .await
+    .map_err(|_| AppError::internal("Order tidak dapat dibatalkan"))?;
+    if changed.rows_affected() != 1 {
+        tracing::debug!(order_id = %row.id, "Cancel lokal kalah CAS; status hasil re-read yang dipakai");
+    }
+    let updated = qris::get_order(
+        &pool,
+        &uuid::Uuid::parse_str(&row.id)
+            .map_err(|_| AppError::internal("ID order tidak valid"))?,
+    )
+    .await?
+    .unwrap_or(row);
+    Ok(Json(updated.member_view()))
 }
 
-/// Proxy gambar QR: token/URL Cutiezy tidak pernah sampai ke browser
-/// member; server yang mengunduh dan meneruskan bytes-nya.
+/// Proxy gambar QR: token/URL provider tidak pernah sampai ke browser
+/// member; server yang me-render QR menjadi SVG dari `qris_string`
+/// (render client-side dilarang karena akan mengekspos `qris_string`).
 pub async fn order_qr(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2155,30 +2233,37 @@ pub async fn order_qr(
     if row.status != "waiting_payment" {
         return Err(AppError::not_found("QR tidak tersedia untuk order ini"));
     }
-    let image_url = row
-        .qris_image_url
+    let payload = row
+        .qris_string
         .clone()
         .ok_or_else(|| AppError::not_found("QR tidak tersedia untuk order ini"))?;
-    let client = QrisClient::new(&state.config.qris_base_url)?;
-    let (bytes, content_type) = client.fetch_qr_png(&image_url).await.map_err(|error| {
-        tracing::warn!(?error, "Proxy QR gagal");
+    let svg = render_qr_svg(&payload).map_err(|error| {
+        tracing::warn!(?error, "Render QR Gobiz gagal");
         AppError::new(
             StatusCode::BAD_GATEWAY,
             "qris_qr_unavailable",
             "Gambar QR tidak dapat dimuat. Coba lagi.",
         )
     })?;
-    let mut response = Response::new(axum::body::Body::from(bytes));
+    let mut response = Response::new(axum::body::Body::from(svg));
     response.headers_mut().insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&content_type)
-            .unwrap_or_else(|_| HeaderValue::from_static("image/png")),
+        HeaderValue::from_static("image/svg+xml"),
     );
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, no-store"),
     );
     Ok(response)
+}
+
+/// Render payload QRIS menjadi SVG (khusus Gobiz). Error correction
+/// default (M) sudah cukup untuk QRIS layar maupun cetak; versi QR
+/// dinaikkan otomatis sesuai panjang payload.
+fn render_qr_svg(payload: &str) -> Result<Vec<u8>, qrcode::types::QrError> {
+    use qrcode::render::svg;
+    let code = qrcode::QrCode::new(payload)?;
+    Ok(code.render::<svg::Color>().build().into_bytes())
 }
 
 #[cfg(test)]
@@ -2390,7 +2475,6 @@ mod resolve_session_and_reveal_audit_tests {
             development_admin_token: None,
             demo_api_key: None,
             allowed_dashboard_origin: None,
-            qris_base_url: "https://example.invalid".to_owned(),
         });
         let provider_configs = crate::provider_config::ProviderConfigStore::build(&config)
             .await
@@ -2425,7 +2509,7 @@ mod resolve_session_and_reveal_audit_tests {
             .await
             .expect("event sink lokal"),
             oauth_states: std::sync::Arc::new(crate::auth::OAuthStateStore::new()),
-            webhook_secret_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            gobiz_webhook_secret_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
             session_revocation: std::sync::Arc::new(
                 crate::session_revocation::SessionRevocation::new(None).await,
             ),

@@ -2558,3 +2558,47 @@ td.empty-state { display: table-cell; }
     background: rgba(15, 23, 42, .45);
   }
 }
+
+/* Kartu Logs di modal detail riwayat (migrasi 0040): satu kartu per
+   percobaan provider. <pre> memakai pre-wrap + anywhere agar body
+   JSON panjang tidak meluber di layar sempit; isi <pre> selalu diisi
+   lewat textContent (bukan innerHTML) supaya body provider tidak
+   pernah menjadi markup. */
+.history-log-card {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: #f8fafc;
+  font-size: 13px;
+}
+.history-log-card:first-child { margin-top: 16px; }
+.history-log-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  align-items: baseline;
+  font-weight: 700;
+}
+.history-log-head .history-log-status { color: var(--muted); font-weight: 600; }
+.history-log-label {
+  margin-top: 10px;
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  font-weight: 800;
+  color: var(--muted);
+}
+.history-log-card pre {
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.history-logs-empty { margin-top: 16px; color: var(--muted); }

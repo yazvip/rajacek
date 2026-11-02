@@ -88,6 +88,25 @@
         .docs-body pre { font-size:.8rem; padding:1rem; }
         .docs-body :not(pre) > code { overflow-wrap:anywhere; }
       }
+      /* Tabel kode error di HP: kartu, bukan tabel terjepit (2026-10-31).
+         Kolom CODE berisi token snake_case tanpa titik patah (bad_request,
+         quota_exhausted, service_unavailable); di layar sempit tabel 3 kolom
+         terjepit dan overflow-wrap:anywhere menghancurkan token per huruf.
+         Di ≤640px baris header disembunyikan, tiap baris jadi kartu: baris
+         atas menggabungkan HTTP + CODE ("403 · forbidden"), paragraf arti &
+         tindakan di bawahnya (perapian 2026-10-31, pasca-verifikasi visual). */
+      @media (max-width: 640px) {
+        .docs-body table.error-table { overflow-x:visible; }
+        .docs-body table.error-table tbody { display:block; }
+        .docs-body table.error-table tr { display:block; border:1px solid var(--line); border-radius:12px; padding:.85rem 1rem; margin:0 0 .8rem; }
+        .docs-body table.error-table tr:first-child { display:none; }
+        .docs-body table.error-table td { display:block; border:0; padding:.12rem 0; }
+        .docs-body table.error-table td[data-label="HTTP"] { display:inline-block; font-weight:800; font-size:1rem; }
+        .docs-body table.error-table td[data-label="CODE"] { display:inline-block; }
+        .docs-body table.error-table td[data-label="CODE"]::before { content:"·"; margin:0 .45rem; color:var(--muted); font-weight:800; }
+        .docs-body table.error-table td[data-label="Arti & tindakan"]::before { content:attr(data-label); display:block; font-size:.68rem; letter-spacing:.13em; text-transform:uppercase; font-weight:800; color:var(--muted); margin:.35rem 0 .1rem; }
+        .docs-body table.error-table td code { overflow-wrap:normal; white-space:nowrap; }
+      }
 </style>
   </head>
   <body>
@@ -138,12 +157,12 @@
 
         <h2 id="mulai-cepat">Mulai cepat</h2>
         <ol>
-          <li><strong>Daftar dengan akun Google</strong> di <a href="/member">portal member</a>. API key (<code>rc_...</code>) langsung terbit. Simpan baik-baik: kunci hanya ditampilkan satu kali. Pendaftar baru mendapat <strong>trial gratis 1000× cek selama 7 hari</strong>.</li>
+          <li><strong>Daftar dengan akun Google</strong> di <a href="/member">portal member</a>. API key (<code>rc_...</code>) langsung terbit. Simpan baik-baik: kunci hanya ditampilkan satu kali. Pendaftar baru mendapat <strong>trial gratis {{TRIAL_HITS}}× cek selama {{TRIAL_DAYS}} hari</strong>.</li>
           <li>Mau coba tanpa coding? Buka menu <strong>Coba Cek Live</strong> di portal. Ceknya sungguhan dan memakai kuota Anda.</li>
           <li>Untuk cek rekening, ambil dulu kode bank 3 digit dari <code>GET /v1/banks</code>.</li>
           <li>Kirim request ke endpoint validasi <code>/api/v3/validate</code>. Paling mudah: GET dengan kunci di query, atau POST dengan kunci di header. Contohnya di bawah ini.</li>
         </ol>
-        <div class="callout"><strong>Trial habis?</strong> Setelah kuota trial habis atau 7 hari berakhir, API menolak cek baru dengan kode <code>402</code>. Lanjutkan ke paket berbayar lewat portal member. Beli paket dengan QRIS dan kuota langsung aktif.</div>
+        <div class="callout"><strong>Trial habis?</strong> Setelah kuota trial habis atau {{TRIAL_DAYS}} hari berakhir, API menolak cek baru dengan kode <code>402</code>. Lanjutkan ke paket berbayar lewat portal member. Beli paket dengan QRIS dan kuota langsung aktif.</div>
         <pre><code>curl "https://www.rajacek.com/api/v3/validate?code=014&accountNumber=1234567890&api_key=rc_CONTOH"</code></pre>
         <p>Atau POST dengan kunci di header (mendukung <code>Idempotency-Key</code> — lihat <a href="#idempotensi">Idempotensi</a>):</p>
         <pre><code>curl -X POST https://www.rajacek.com/api/v3/validate \
@@ -159,7 +178,7 @@
   "product": "bank_account",
   "message": "Respons diterima dari provider validasi.",
   "result": {
-    "account_number": "1234667890",
+    "account_number": "1234567890",
     "service_code": "014",
     "bank_name": "BCA",
     "account_name": "NAMA PELANGGAN",
@@ -207,6 +226,7 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
           <li><strong>Perhatian: tanggal ini bisa maju lebih awal setelah Anda beli lagi.</strong> Contoh: paket lama masih bersisa sampai 21 Jan 2027, lalu Anda beli lagi 26 Okt (paket baru sampai 25 Nov 2026). Tanggal di <code>meta</code> jadi 25 Nov 2026 karena paket baru dipakai dulu (yang paling cepat kedaluwarsa). Setelah 25 Nov lewat, tanggal otomatis kembali ke 21 Jan 2027. Kunci tidak bisa dipakai bila <em>semua</em> paket sudah lewat masa aktifnya.</li>
           <li><strong>Satu order menunggu per member.</strong> Membuat order kedua selagi ada order menunggu akan mengembalikan order yang sama, bukan QR baru.</li>
           <li>QR berlaku sesuai masa yang ditampilkan (hitungan mundur di portal). Order yang kedaluwarsa atau dibatalkan tidak memotong apa pun.</li>
+          <li><strong>Bayar tepat sesuai nominal yang tertera di order.</strong> Nominal yang harus dibayar adalah harga paket ditambah kode unik, seperti yang tampil di portal — jangan membulatkan ke harga paket. Pembayaran dengan nominal berbeda ditahan untuk peninjauan.</li>
           <li>Pembayaran yang sudah lunas tetapi nominalnya tidak cocok, atau membernya dinonaktifkan, <strong>ditahan untuk peninjauan</strong>. Kuota tidak di-grant otomatis sampai peninjauan selesai.</li>
           <li><strong>Harga promo:</strong> jika ada promo aktif pada suatu paket, harga yang tampil di portal (harga asli dicoret + badge promo + hitung mundur) adalah harga yang benar-benar ditagih, bukan pajangan.</li>
           <li>Endpoint pembelian hanya tersedia lewat sesi portal (<code>/v1/member/packages</code>, <code>/v1/member/orders</code> dan turunannya), bukan lewat API key validasi.</li>
@@ -244,7 +264,7 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
   "product": "bank_account",
   "message": "Respons diterima dari provider validasi.",
   "result": {
-    "account_number": "1234667890",
+    "account_number": "1234567890",
     "service_code": "014",
     "bank_name": "BCA",
     "account_name": "DATA TIDAK DITEMUKAN"
@@ -372,16 +392,16 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
   "message": "Batas laju tercapai; coba lagi nanti.",
   "request_id": "Hs92kLm4Qx"
 }</code></pre>
-        <table>
+        <table class="error-table">
           <tr><th>HTTP</th><th><code>code</code></th><th>Arti &amp; tindakan</th></tr>
-          <tr><td>400</td><td><code>bad_request</code></td><td>Ada field yang hilang, formatnya salah, atau kode bank/e-wallet tidak dikenal. Periksa lagi isi request Anda.</td></tr>
-          <tr><td>401</td><td><code>unauthorized</code></td><td>Kunci tidak ada, salah, atau sudah dicabut.</td></tr>
-          <tr><td>402</td><td><code>quota_exhausted</code></td><td>Kuota paket Anda habis. Beli paket di portal member untuk menambah kuota.</td></tr>
-          <tr><td>403</td><td><code>forbidden</code></td><td>API key Anda tidak punya izin (scope) untuk produk ini.</td></tr>
-          <tr><td>409</td><td><code>conflict</code></td><td>Idempotency-Key yang sama sudah dipakai dengan isi berbeda, atau request sebelumnya masih diproses. Untuk operasi baru, pakai kunci baru.</td></tr>
-          <tr><td>429</td><td><code>rate_limited</code></td><td>Anda terlalu cepat (rate limit) atau antrean sedang penuh. Tunggu sesuai header <code>Retry-After</code>, lalu coba lagi.</td></tr>
-          <tr><td>502</td><td><code>provider_error</code></td><td>Layanan pemeriksa memberi respons yang tidak bisa diproses. Aman diulang dengan Idempotency-Key yang sama.</td></tr>
-          <tr><td>503</td><td><code>service_unavailable</code></td><td>Layanan pemeriksa sedang tidak tersedia, atau produk ini belum aktif. Coba lagi beberapa saat.</td></tr>
+          <tr><td data-label="HTTP">400</td><td data-label="CODE"><code>bad_request</code></td><td data-label="Arti &amp; tindakan">Ada field yang hilang, formatnya salah, atau kode bank/e-wallet tidak dikenal. Periksa lagi isi request Anda.</td></tr>
+          <tr><td data-label="HTTP">401</td><td data-label="CODE"><code>unauthorized</code></td><td data-label="Arti &amp; tindakan">Kunci tidak ada, salah, atau sudah dicabut.</td></tr>
+          <tr><td data-label="HTTP">402</td><td data-label="CODE"><code>quota_exhausted</code></td><td data-label="Arti &amp; tindakan">Kuota paket Anda habis. Beli paket di portal member untuk menambah kuota.</td></tr>
+          <tr><td data-label="HTTP">403</td><td data-label="CODE"><code>forbidden</code></td><td data-label="Arti &amp; tindakan">API key Anda tidak punya izin (scope) untuk produk ini.</td></tr>
+          <tr><td data-label="HTTP">409</td><td data-label="CODE"><code>conflict</code></td><td data-label="Arti &amp; tindakan">Idempotency-Key yang sama sudah dipakai dengan isi berbeda, atau request sebelumnya masih diproses. Untuk operasi baru, pakai kunci baru.</td></tr>
+          <tr><td data-label="HTTP">429</td><td data-label="CODE"><code>rate_limited</code></td><td data-label="Arti &amp; tindakan">Anda terlalu cepat (rate limit) atau antrean sedang penuh. Tunggu sesuai header <code>Retry-After</code>, lalu coba lagi.</td></tr>
+          <tr><td data-label="HTTP">502</td><td data-label="CODE"><code>provider_error</code></td><td data-label="Arti &amp; tindakan">Layanan pemeriksa memberi respons yang tidak bisa diproses. Aman diulang dengan Idempotency-Key yang sama.</td></tr>
+          <tr><td data-label="HTTP">503</td><td data-label="CODE"><code>service_unavailable</code></td><td data-label="Arti &amp; tindakan">Layanan pemeriksa sedang tidak tersedia, atau produk ini belum aktif. Coba lagi beberapa saat.</td></tr>
         </table>
         <div class="callout info"><p><strong>Kami sudah mencoba lagi untuk Anda.</strong> Jika layanan pemeriksa gagal sesaat (timeout, sedang sibuk, atau respons rusak), Rajacek otomatis mengulang sampai 2 kali sebelum menyerah. Jawaban yang sudah pasti — misalnya "tidak ditemukan" — tidak pernah diulang.</p></div>
         <div class="callout info"><p><strong>Cara aman mengulang:</strong> untuk error 429, 502, dan 503, kirim ulang request yang sama persis dengan <code>Idempotency-Key</code> yang sama. Anda tidak akan ditagih dua kali.</p></div>
