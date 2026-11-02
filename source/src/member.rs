@@ -736,9 +736,57 @@ pub struct MemberHistoryQuery {
     offset: Option<u32>,
 }
 
+/// Baris riwayat untuk portal member (perintah user 2026-11-02): sama
+/// dengan `ValidationHistoryItem` KECUALI `account_name` — di sini nama
+/// tampil dalam bentuk yang sama seperti hasil validasi member
+/// (di-uppercase) bila tersedia, dan null bila tidak ada (WhatsApp,
+/// e-wallet NotKyc, baris pra-migrasi 0024). `ValidationHistoryItem`
+/// sendiri TIDAK PERNAH diserialisasi untuk member (field admin-only-nya
+/// `skip_serializing`); endpoint riwayat member selalu mengembalikan view
+/// ini. `target_raw`, `member_code`, `provider_endpoint_name`, dan
+/// `provider_hint_display` tetap tidak ada di bentuk ini.
+#[derive(Serialize)]
+pub struct MemberHistoryItemView {
+    pub request_id: String,
+    pub api_key_prefix: String,
+    pub product: ValidationProduct,
+    pub outcome: String,
+    pub target_masked: String,
+    pub account_name: Option<String>,
+    pub provider_reference: Option<String>,
+    pub provider_latency_ms: u64,
+    pub rajacek_processing_ms: Option<u64>,
+    pub total_latency_ms: Option<u64>,
+    pub attempts: Option<u32>,
+    pub occurred_at: DateTime<Utc>,
+    pub channel: String,
+}
+
+impl From<&crate::models::ValidationHistoryItem> for MemberHistoryItemView {
+    fn from(item: &crate::models::ValidationHistoryItem) -> Self {
+        Self {
+            request_id: item.request_id.clone(),
+            api_key_prefix: item.api_key_prefix.clone(),
+            product: item.product,
+            outcome: item.outcome.clone(),
+            target_masked: item.target_masked.clone(),
+            // Sama seperti hasil validasi member: nama di-uppercase,
+            // tanpa transformasi lain.
+            account_name: item.account_name.as_deref().map(str::to_uppercase),
+            provider_reference: item.provider_reference.clone(),
+            provider_latency_ms: item.provider_latency_ms,
+            rajacek_processing_ms: item.rajacek_processing_ms,
+            total_latency_ms: item.total_latency_ms,
+            attempts: item.attempts,
+            occurred_at: item.occurred_at,
+            channel: item.channel.clone(),
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct HistoryResponse {
-    items: Vec<crate::models::ValidationHistoryItem>,
+    items: Vec<MemberHistoryItemView>,
     total: u64,
     limit: u32,
     offset: u32,
@@ -774,7 +822,9 @@ pub async fn history(
     Query(query): Query<MemberHistoryQuery>,
 ) -> Result<Json<HistoryResponse>, AppError> {
     let session = resolve_session(&state, &headers).await?;
-    let limit = query.limit.unwrap_or(15).clamp(1, 100);
+    // Riwayat member: maks 50 baris per halaman, default 50 (perintah user
+    // 2026-11-02 — portal hanya menampilkan 50 validasi terakhir).
+    let limit = query.limit.unwrap_or(50).clamp(1, 50);
     let offset = query.offset.unwrap_or(0);
     let product = parse_member_history_product(query.product.as_deref())?;
 
@@ -810,7 +860,10 @@ pub async fn history(
         .await
     {
         return Ok(Json(HistoryResponse {
-            items,
+            items: items
+                .into_iter()
+                .map(|item| MemberHistoryItemView::from(&item))
+                .collect(),
             total,
             limit,
             offset,
@@ -826,7 +879,10 @@ pub async fn history(
         .validation_history(&filters, limit as usize, offset as usize)
         .await;
     Ok(Json(HistoryResponse {
-        items,
+        items: items
+            .into_iter()
+            .map(|item| MemberHistoryItemView::from(&item))
+            .collect(),
         total: total as u64,
         limit,
         offset,
@@ -2363,10 +2419,11 @@ mod member_history_no_raw_fields_tests {
 
 
     #[test]
-    fn member_history_response_serialization_omits_raw_target_and_name() {
-        // Bukti ujung-ke-ujung di level struct respons member: item yang
-        // membawa target_raw + account_name tetap terserialisasi TANPA
-        // keduanya saat dibungkus HistoryResponse.
+    fn member_history_response_shows_account_name_but_omits_raw_fields() {
+        // Perintah user 2026-11-02 (membalik batas audit 25 Okt untuk
+        // field ini saja): riwayat member menampilkan account_name
+        // (di-uppercase, bentuk yang sama seperti hasil validasi) bila
+        // ada; field admin-only lain tetap tidak diserialisasi.
         let item = crate::models::ValidationHistoryItem {
             request_id: "R9".to_owned(),
             api_key_prefix: "rv_live_x".to_owned(),
@@ -2387,9 +2444,9 @@ mod member_history_no_raw_fields_tests {
             channel: "api".to_owned(),
         };
         let response = HistoryResponse {
-            items: vec![item],
+            items: vec![MemberHistoryItemView::from(&item)],
             total: 1,
-            limit: 15,
+            limit: 50,
             offset: 0,
             source: "database",
             stats: HistoryStats {
@@ -2398,19 +2455,21 @@ mod member_history_no_raw_fields_tests {
             },
         };
         let serialized = serde_json::to_string(&response).expect("serialize");
+        assert!(serialized.contains("\"account_name\":\"ANDRIAS SE****AN SU****O\""));
         assert!(!serialized.contains("target_raw"));
-        assert!(!serialized.contains("account_name"));
         assert!(!serialized.contains("member_code"));
         assert!(!serialized.contains("provider_endpoint_name"));
-        assert!(!serialized.contains("Endpoint Uji"));
-        // Batas yang sama untuk hint (migration 0035): tampilan kode
-        // bank adalah admin-only, tidak boleh bocor ke member.
         assert!(!serialized.contains("provider_hint_display"));
         assert!(!serialized.contains("014 · BCA"));
         assert!(!serialized.contains("1234567890"));
-        assert!(!serialized.contains("Andrias Se****an Su****o"));
         assert!(!serialized.contains("RC000001"));
         assert!(serialized.contains("\"target_masked\":\"***7890\""));
+        // Tanpa nama -> null, bukan string kosong.
+        let mut nameless = item.clone();
+        nameless.account_name = None;
+        assert!(MemberHistoryItemView::from(&nameless)
+            .account_name
+            .is_none());
     }
 
     #[test]

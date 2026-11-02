@@ -860,7 +860,7 @@
               <div style="padding:16px 20px;border-bottom:1px solid var(--line-soft);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;">
                 <div>
                   <h2 class="section">Riwayat Validasi</h2>
-                  <p class="live-line"><span class="live-dot">●</span> Realtime · diperbarui <span id="historyLiveAt">–</span> (otomatis tiap 5 detik) · Nomor tujuan selalu ditampilkan tersamar</p>
+                  <p class="live-line"><span class="live-dot">●</span> Realtime · diperbarui <span id="historyLiveAt">–</span> (otomatis tiap 5 detik) · Nomor tujuan selalu ditampilkan tersamar · Menampilkan 50 validasi terakhir</p>
                 </div>
                 <div class="filters" style="margin-bottom:0;">
                   <select id="filterProduct">
@@ -883,18 +883,12 @@
               <div style="overflow-x:auto;">
                 <table>
                   <thead>
-                    <tr><th>Waktu (WIB)</th><th>Produk</th><th>Tujuan</th><th>Hasil</th><th>Latensi</th><th>Request ID</th><th style="width:44px;"></th></tr>
+                    <tr><th>Waktu (WIB)</th><th>Produk</th><th>Tujuan</th><th>Nama Pemilik</th><th>Hasil</th><th>Latensi</th><th>Request ID</th><th style="width:44px;"></th></tr>
                   </thead>
                   <tbody id="historyBody"></tbody>
                 </table>
               </div>
               <div class="empty hidden" id="historyEmpty">Belum ada riwayat pada filter ini.</div>
-              <div class="pager">
-                <button type="button" id="prevBtn">← Sebelumnya</button>
-                <button type="button" id="nextBtn">Berikutnya →</button>
-                <div class="spacer"></div>
-                <span id="pageInfo"></span>
-              </div>
             </div>
           </section>
 
@@ -914,6 +908,7 @@
           <div><dt>Waktu</dt><dd id="dWaktu">–</dd></div>
           <div><dt>Produk</dt><dd id="dProduk">–</dd></div>
           <div><dt>Tujuan</dt><dd class="mono" id="dTarget">–</dd></div>
+          <div><dt>Nama Pemilik</dt><dd id="dNama">–</dd></div>
           <div><dt>Hasil</dt><dd id="dHasil">–</dd></div>
           <div><dt>Kanal</dt><dd id="dKanal">–</dd></div>
           <div><dt>Latensi provider</dt><dd id="dLatensi">–</dd></div>
@@ -958,7 +953,7 @@
 
     <script>
       const $ = (id) => document.getElementById(id);
-      const state = { offset: 0, limit: 15, total: 0 };
+      const state = { offset: 0, limit: 50, total: 0 };
       const fmtNum = (n) => new Intl.NumberFormat('id-ID').format(n);
       const fmtTime = (iso) => new Intl.DateTimeFormat('id-ID', {
         timeZone: 'Asia/Jakarta', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit'
@@ -1322,6 +1317,7 @@
           <td style="white-space:nowrap;">${fmtTime(item.occurred_at)}</td>
           <td>${productLabel(item.product)}${item.channel === 'portal' ? '<span class="chan">PORTAL</span>' : ''}</td>
           <td class="mono">${item.target_masked}</td>
+          <td>${item.account_name ? escHtml(item.account_name) : '–'}</td>
           <td>${badge(item.outcome)}</td>
           <td>${fmtNum(item.provider_latency_ms)} ms</td>
           <td class="mono" style="font-size:11.5px;">${item.request_id.length <= 12 ? item.request_id : item.request_id.slice(0, 8) + '…'}</td>
@@ -1343,17 +1339,13 @@
           $('navHistoryCount').textContent = fmtNum(d.total);
           $('recentCount').textContent = `Lihat Semua (${fmtNum(d.total)}) →`;
         }
-        const from = d.total === 0 ? 0 : state.offset + 1;
-        const to = Math.min(state.offset + state.limit, d.total);
-        $('pageInfo').textContent = `${from}–${to} dari ${fmtNum(d.total)} riwayat`;
-        $('prevBtn').disabled = state.offset === 0;
-        $('nextBtn').disabled = state.offset + state.limit >= d.total;
+        // Riwayat member: satu halaman 50 terakhir, tanpa pager
+        // (perintah user 2026-11-02); total card tetap memakai d.total.
       }
 
       $('filterProduct').addEventListener('change', () => { state.offset = 0; loadHistory(); });
       $('filterOutcome').addEventListener('change', () => { state.offset = 0; loadHistory(); });
-      $('prevBtn').addEventListener('click', () => { state.offset = Math.max(0, state.offset - state.limit); loadHistory(); });
-      $('nextBtn').addEventListener('click', () => { state.offset += state.limit; loadHistory(); });
+
 
       // ---- Detail riwayat (icon i) ----
       const INFO_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><line x1="12" y1="11" x2="12" y2="16"/><line x1="12" y1="7.6" x2="12" y2="8.2" stroke-width="2.6"/></svg>';
@@ -1365,6 +1357,7 @@
         $('dWaktu').textContent = fmtTime(item.occurred_at) + ' WIB';
         $('dProduk').textContent = productLabel(item.product);
         $('dTarget').textContent = item.target_masked;
+        $('dNama').textContent = item.account_name || '–';
         $('dHasil').innerHTML = badge(item.outcome);
         $('dKanal').textContent = item.channel === 'portal' ? 'Portal (Coba Cek Live)' : 'API';
         $('dLatensi').textContent = fmtNum(item.provider_latency_ms) + ' ms';

@@ -345,10 +345,11 @@ pub struct ProviderRequestLogItem {
 ///
 /// The raw target and holder name live on this struct for internal use
 /// (admin view, CSV-adjacent logic) but are NEVER serialized from it:
-/// the member history endpoint returns this struct verbatim, so the new
-/// fields carry `skip_serializing` and the admin endpoint converts to
-/// [`AdminValidationHistoryItem`] instead. Adding a field here without
-/// `skip_serializing` would leak raw targets/names to members.
+/// the member history endpoint returns `MemberHistoryItemView` (member.rs)
+/// built from this struct, and the admin endpoint converts to
+/// [`AdminValidationHistoryItem`] instead. The fields below therefore
+/// carry `skip_serializing`; adding a field here without it would leak
+/// raw targets/names to members.
 #[derive(Clone, Debug, Serialize)]
 pub struct ValidationHistoryItem {
     pub request_id: String,
@@ -372,7 +373,10 @@ pub struct ValidationHistoryItem {
     pub target_raw: Option<String>,
     /// Holder name as returned upstream, admin history only. None for rows
     /// recorded before migration 0024, for WhatsApp, and for e-wallet
-    /// NotKyc (the provider logic already strips the name there).
+    /// NotKyc (the provider logic already strips the name there). The
+    /// member view (`MemberHistoryItemView`) exposes an uppercased copy
+    /// of this value — perintah user 2026-11-02; the stored form here
+    /// stays admin-only.
     #[serde(skip_serializing)]
     pub account_name: Option<String>,
     /// Nama endpoint yang jawabannya dipakai, admin history only
