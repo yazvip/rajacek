@@ -2453,8 +2453,15 @@ pub async fn prune_old_raw_targets(
         // SELECT ... FOR UPDATE di bawah mengunci baris ini sampai commit,
         // jadi dua transaksi bersamaan mengantre dan mendapat nomor
         // berbeda — tidak ada hitung-hitungan dari jumlah baris members.
+        // 2026-11-02: INSERT IGNORE, bukan INSERT biasa. SELECT agregat
+        // MAX() tanpa GROUP BY SELALU menghasilkan 1 baris meski WHERE NOT
+        // EXISTS salah — jadi saat baris counter sudah ada (keadaan normal),
+        // INSERT biasa selalu gagal duplicate key 1062 dan SEMUA signup baru
+        // gagal di sini. Dengan IGNORE, baris yang sudah ada dilewati begitu
+        // saja (0 baris, warning) dan SELECT FOR UPDATE di bawah membaca
+        // nilai yang benar; saat baris belum ada, seed tetap ter-insert.
         sqlx::query(
-            "INSERT INTO member_code_counter (id, next_value) \
+            "INSERT IGNORE INTO member_code_counter (id, next_value) \
              SELECT 1, COALESCE(MAX(CAST(SUBSTRING(member_code, 3) AS UNSIGNED)), 0) + 1 \
              FROM members \
              WHERE NOT EXISTS (SELECT 1 FROM member_code_counter WHERE id = 1)",
