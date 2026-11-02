@@ -97,7 +97,7 @@ body:not(.auth-ok) .app-shell { display: none !important; }
    oleh aturan gerbang di atas, bukan oleh warna latar */ }
 
 /* ------------------------------------------------------------------ tombol */
-.button, button.button {
+.button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -111,8 +111,8 @@ body:not(.auth-ok) .app-shell { display: none !important; }
   font-weight: 600;
   white-space: nowrap;
 }
-.button:hover, button.button:hover { background: #f8fafc; text-decoration: none; }
-.button svg, button.button svg { width: 16px; height: 16px; flex: none; }
+.button:hover { background: #f8fafc; text-decoration: none; }
+.button svg { width: 16px; height: 16px; flex: none; }
 .button-primary {
   border-color: var(--brand-700);
   background: var(--brand-700);
@@ -501,6 +501,7 @@ textarea { resize: vertical; min-height: 76px; }
   background: #fff;
   flex: none;
 }
+.menu-button:hover { background: #f8fafc; }
 .menu-button span {
   display: block;
   width: 18px; height: 1.5px;
@@ -584,6 +585,7 @@ textarea { resize: vertical; min-height: 76px; }
   color: #92400e;
   font-size: 18px;
 }
+.banner-dismiss:hover { color: var(--ink); }
 
 /* ------------------------------------------------------------------ panel */
 .panel {
@@ -1396,6 +1398,7 @@ td.empty-state { display: table-cell; }
   color: var(--brand-700);
   font-size: 12px; font-weight: 700;
 }
+.secret-value button:hover { background: var(--brand-100); }
 
 /* ------------------------------------------------------------------ toast */
 .toast-region {
@@ -1876,6 +1879,11 @@ td.empty-state { display: table-cell; }
 .member-tab:hover { color: var(--brand-700); }
 .member-tab.is-active { color: var(--brand-700); border-bottom-color: var(--brand); }
 .analytics-tabpanel[hidden] { display: none; }
+/* Rentang tanggal kustom analitik (default hide via [hidden]): dua input
+   tanggal berdampingan saat ditampilkan; [hidden] tidak boleh kalah oleh
+   display:flex di sini, makanya selektor memakai :not([hidden]). */
+#analytics-custom-range:not([hidden]) { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px; }
+#analytics-custom-range label { flex: 1 1 160px; }
 .analytics-tabpanel > :first-child { margin-top: 20px; }
 /* --- Tab Pengaturan (29 Okt 2026): pola yang sama dengan tab analitik,
    nama kelas sendiri. Bar tab nowrap + scroll horizontal di layar sempit

@@ -329,14 +329,17 @@ pub struct AdminStore {
     /// only for the get-or-increment, never across an await.
     invalid_free_fallback:
         std::sync::Mutex<HashMap<(String, chrono::NaiveDate), u32>>,
-    /// Short-lived analytics cache (AREA 1, 60 detik, keyed by `days`):
+    /// Short-lived analytics cache (AREA 1, 60 detik, keyed by window):
     /// the analytics endpoint aggregates `validation_requests` on every
     /// call, and the dashboard polls often enough for that to matter.
-    /// Health is intentionally NOT cached (breaker state must stay live).
+    /// Kunci membedakan preset (`days:N`) dari rentang kustom
+    /// (`custom:YYYY-MM-DD:YYYY-MM-DD`) agar keduanya tidak saling
+    /// menimpa dalam satu slot cache. Health is intentionally NOT
+    /// cached (breaker state must stay live).
     analytics_cache: std::sync::Mutex<
         Option<(
             std::time::Instant,
-            i64,
+            String,
             crate::analytics::AnalyticsResponse,
         )>,
     >,
@@ -647,15 +650,15 @@ impl AdminStore {
         self.pool.read().expect("pool lock").clone()
     }
 
-    /// Cached analytics response for this `days` window, if fresh
+    /// Cached analytics response for this window key, if fresh
     /// (AREA 1, TTL 60 detik). The returned copy is marked `cached`.
     pub(crate) fn cached_analytics(
         &self,
-        days: i64,
+        key: &str,
     ) -> Option<crate::analytics::AnalyticsResponse> {
         let guard = self.analytics_cache.lock().expect("analytics cache lock");
-        let (stored_at, stored_days, response) = guard.as_ref()?;
-        if *stored_days != days
+        let (stored_at, stored_key, response) = guard.as_ref()?;
+        if stored_key != key
             || stored_at.elapsed().as_secs() >= crate::analytics::ANALYTICS_CACHE_TTL_SECS
         {
             return None;
@@ -665,14 +668,14 @@ impl AdminStore {
         Some(response)
     }
 
-    /// Store a fresh analytics response for this `days` window.
+    /// Store a fresh analytics response for this window key.
     pub(crate) fn store_cached_analytics(
         &self,
-        days: i64,
+        key: &str,
         response: crate::analytics::AnalyticsResponse,
     ) {
         let mut guard = self.analytics_cache.lock().expect("analytics cache lock");
-        *guard = Some((std::time::Instant::now(), days, response));
+        *guard = Some((std::time::Instant::now(), key.to_owned(), response));
     }
 
     /// Member pemilik sebuah kunci berdasarkan prefix, tanpa memeriksa

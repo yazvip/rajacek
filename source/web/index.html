@@ -10,7 +10,7 @@
     <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
     <link rel="icon" href="/favicon.png?v=20261028-1" />
-    <link rel="stylesheet" href="/styles.css?v=20261031-3" />
+    <link rel="stylesheet" href="/styles.css?v=20261102-1" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -184,7 +184,7 @@
 
           <section class="view" id="view-analytics" aria-labelledby="analytics-heading">
             <div class="page-heading heading-row"><div><div class="eyebrow">Pendapatan &amp; penggunaan</div><h1 id="analytics-heading">Analitik</h1><p>Tinjau tren pendapatan, volume validasi, keberhasilan, dan latensi berdasarkan periode.</p></div><button class="button button-secondary" id="refresh-analytics" type="button">Muat ulang</button></div>
-            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Rentang</span><h2>Periode analitik</h2></div><span class="count-chip" id="analytics-meta">Memuat...</span></div><form id="analytics-range-form" class="form-grid"><label>Rentang<select id="analytics-days"><option value="7">7 hari terakhir</option><option value="30" selected>30 hari terakhir</option><option value="90">90 hari terakhir</option><option value="0">Sepanjang masa</option></select></label><div class="form-actions"><button class="button button-primary" type="submit">Tampilkan</button></div></form><p class="tester-audit-note" id="analytics-note"></p></article>
+            <article class="panel data-panel"><div class="panel-heading"><div><span class="section-kicker">Rentang</span><h2>Periode analitik</h2></div><span class="count-chip" id="analytics-meta">Memuat...</span></div><form id="analytics-range-form" class="form-grid"><label>Rentang<select id="analytics-days"><option value="7">7 hari terakhir</option><option value="30" selected>30 hari terakhir</option><option value="90">90 hari terakhir</option><option value="0">Sepanjang masa</option></select></label><div><button class="text-button" id="analytics-custom-toggle" type="button">Pilih tanggal sendiri</button><div id="analytics-custom-range" hidden><label>Dari<input id="analytics-from" type="date" /></label><label>Sampai<input id="analytics-to" type="date" /></label></div></div><div class="form-actions"><button class="button button-primary" type="submit">Tampilkan</button></div></form><p class="tester-audit-note" id="analytics-note"></p></article>
             <div class="analytics-tabs" role="tablist" aria-label="Bagian analitik">
               <button type="button" class="analytics-tab is-active" role="tab" aria-selected="true" aria-controls="analytics-tab-summary" id="analytics-tab-btn-summary" data-analytics-tab="summary">Ringkasan</button>
               <button type="button" class="analytics-tab" role="tab" aria-selected="false" aria-controls="analytics-tab-revenue" id="analytics-tab-btn-revenue" data-analytics-tab="revenue">Pendapatan</button>
@@ -445,6 +445,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261102-1" defer></script>
+    <script src="/app.js?v=20261102-2" defer></script>
   </body>
 </html>

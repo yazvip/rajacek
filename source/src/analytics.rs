@@ -278,6 +278,12 @@ pub struct AnalyticsResponse {
     /// `true` bila `days` yang diminta adalah 0 (sepanjang masa); `days`
     /// pada respons ini adalah rentang hari aktual sejak data pertama.
     pub alltime: bool,
+    /// Rentang kustom yang dipakai (tanggal WIB efektif, `to` sudah
+    /// di-clamp ke hari ini); `None` untuk preset 7/30/90/alltime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
     pub generated_at: chrono::DateTime<Utc>,
     /// `true` bila respons ini dari cache 60 detik (bukan query baru).
     pub cached: bool,
@@ -322,6 +328,8 @@ impl AnalyticsResponse {
         AnalyticsResponse {
             days,
             alltime: days == 0,
+            from: None,
+            to: None,
             generated_at: Utc::now(),
             cached: false,
             database: false,
@@ -343,6 +351,37 @@ impl AnalyticsResponse {
             per_member: Vec::new(),
             per_endpoint: Vec::new(),
         }
+    }
+
+    /// Respons kosong untuk rentang kustom tanpa database: zero-fill
+    /// memakai hari jendela (bukan N hari terakhir sampai hari ini).
+    pub fn empty_custom(window: &AnalyticsWindow) -> Self {
+        let mut response = Self::empty(window.days);
+        response.from = window.from.clone();
+        response.to = window.to.clone();
+        response.revenue.per_day = window
+            .day_list
+            .iter()
+            .map(|day| DailyRevenue {
+                day: day.format("%Y-%m-%d").to_string(),
+                label: day_label(*day),
+                revenue_idr: 0,
+                orders: 0,
+            })
+            .collect();
+        response.hits_per_day = window
+            .day_list
+            .iter()
+            .flat_map(|day| {
+                let key = day.format("%Y-%m-%d").to_string();
+                KNOWN_PRODUCTS.iter().map(move |product| DailyHits {
+                    day: key.clone(),
+                    product: product.as_str().to_owned(),
+                    hits: 0,
+                })
+            })
+            .collect();
+        response
     }
 }
 
@@ -575,6 +614,84 @@ fn build_endpoint_analytics(
     out
 }
 
+/// Jendela agregasi analitik: preset (7/30/90/alltime, tanpa batas atas)
+/// maupun rentang kustom (dari–sampai inklusif, batas atas = tengah malam
+/// WIB sehari setelah `to`). `day_list` = hari WIB jendela, untuk zero-fill.
+pub struct AnalyticsWindow {
+    pub start: chrono::NaiveDateTime,
+    pub end: Option<chrono::NaiveDateTime>,
+    pub day_list: Vec<NaiveDate>,
+    pub days: i64,
+    pub alltime: bool,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+/// Tanggal WIB hari ini (satu definisi untuk resolver rentang kustom dan
+/// helper jendela preset).
+pub fn wib_today() -> NaiveDate {
+    let wib = FixedOffset::east_opt(7 * 3600).expect("offset WIB valid");
+    Utc::now().with_timezone(&wib).date_naive()
+}
+
+/// Parse tanggal kalender ketat `YYYY-MM-DD` (10 karakter, `-` di posisi
+/// 4 dan 7, sisanya digit). Tolak format longgar seperti `2026-1-5`.
+fn parse_wib_date(s: &str) -> Option<NaiveDate> {
+    let bytes = s.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(i, c)| i == 4 || i == 7 || c.is_ascii_digit())
+    {
+        return None;
+    }
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+}
+
+/// Resolusi rentang kustom (fungsi murni, testable): `from`/`to` tanggal
+/// WIB inklusif. `to` di masa depan di-clamp ke hari ini; rentang yang
+/// seluruhnya di masa depan, `from` > `to`, atau span > 365 hari ditolak
+/// (pesan untuk 400, bukan fallback diam-diam ke preset).
+pub fn resolve_custom_window(
+    from: &str,
+    to: &str,
+    today: NaiveDate,
+) -> Result<AnalyticsWindow, String> {
+    let from_day =
+        parse_wib_date(from).ok_or_else(|| "Format tanggal mulai harus YYYY-MM-DD".to_owned())?;
+    let to_day =
+        parse_wib_date(to).ok_or_else(|| "Format tanggal akhir harus YYYY-MM-DD".to_owned())?;
+    if from_day > to_day {
+        return Err("Tanggal mulai tidak boleh setelah tanggal akhir".to_owned());
+    }
+    let to_day = to_day.min(today);
+    if from_day > to_day {
+        return Err("Rentang tanggal seluruhnya di masa depan".to_owned());
+    }
+    let span = (to_day - from_day).num_days() + 1;
+    if span > 365 {
+        return Err("Rentang tanggal maks 365 hari".to_owned());
+    }
+    let mut day_list = Vec::with_capacity(span as usize);
+    let mut day = from_day;
+    while day <= to_day {
+        day_list.push(day);
+        day += chrono::Duration::days(1);
+    }
+    Ok(AnalyticsWindow {
+        start: window_start_utc_for_day(from_day),
+        end: Some(window_start_utc_for_day(to_day + chrono::Duration::days(1))),
+        day_list,
+        days: span,
+        alltime: false,
+        from: Some(from_day.format("%Y-%m-%d").to_string()),
+        to: Some(to_day.format("%Y-%m-%d").to_string()),
+    })
+}
+
 /// Agregasi analitik dari database. `None` bila ada query yang gagal
 /// (pemanggil mengembalikan error, bukan angka parsial yang menyesatkan).
 pub async fn analytics_from_db(pool: &MySqlPool, days: i64) -> Option<AnalyticsResponse> {
@@ -596,59 +713,102 @@ pub async fn analytics_from_db(pool: &MySqlPool, days: i64) -> Option<AnalyticsR
     } else {
         days
     };
+    analytics_from_db_window(
+        pool,
+        &AnalyticsWindow {
+            start,
+            end: None,
+            day_list,
+            days: response_days,
+            alltime,
+            from: None,
+            to: None,
+        },
+    )
+    .await
+}
+
+/// Agregasi analitik untuk satu jendela (preset maupun rentang kustom).
+/// Bila `window.end` ada, setiap query ikut membatasi `< end` sehingga
+/// rentang kustom yang berakhir di masa lalu tidak ikut menghitung hit
+/// sesudah `to`; tanpa `end`, perilaku sama persis dengan preset
+/// (terbuka sampai sekarang).
+pub async fn analytics_from_db_window(
+    pool: &MySqlPool,
+    window: &AnalyticsWindow,
+) -> Option<AnalyticsResponse> {
+    let start = window.start;
+    let end = window.end;
+    let day_list = &window.day_list;
+
+    // Tambahan `AND <expr> < ?` hanya bila jendela punya batas atas;
+    // bind kedua ditambahkan dengan urutan yang sama (start, end).
+    let end_clause = |expr: &str| -> String {
+        match end {
+            Some(_) => format!(" AND {expr} < ?"),
+            None => String::new(),
+        }
+    };
 
     // Pendapatan per hari (WIB) dari order lunas/ter-grant saja.
     // COALESCE(paid_at, created_at): order `paid`/`granted` selalu punya
     // paid_at; fallback hanya pengaman baris warisan.
-    let revenue_rows: Vec<(String, u64, i64)> = sqlx::query_as(
+    let revenue_sql = format!(
         "SELECT DATE_FORMAT(CONVERT_TZ(COALESCE(paid_at, created_at), '+00:00', '+07:00'), '%Y-%m-%d') AS day, \
          CAST(COALESCE(SUM(amount_idr), 0) AS UNSIGNED), COUNT(*) \
          FROM package_orders \
-         WHERE status IN ('paid', 'granted') AND COALESCE(paid_at, created_at) >= ? \
+         WHERE status IN ('paid', 'granted') AND COALESCE(paid_at, created_at) >= ?{} \
          GROUP BY day ORDER BY day",
-    )
-    .bind(start)
-    .fetch_all(pool)
-    .await
-    .ok()?;
-    let revenue = build_revenue(revenue_rows, &day_list);
+        end_clause("COALESCE(paid_at, created_at)")
+    );
+    let mut revenue_query = sqlx::query_as::<_, (String, u64, i64)>(&revenue_sql).bind(start);
+    if let Some(end) = end {
+        revenue_query = revenue_query.bind(end);
+    }
+    let revenue_rows = revenue_query.fetch_all(pool).await.ok()?;
+    let revenue = build_revenue(revenue_rows, day_list);
 
     // Hit per hari per produk (semua outcome) dari validation_requests.
-    let hit_rows: Vec<(String, String, i64)> = sqlx::query_as(
+    let hits_sql = format!(
         "SELECT DATE_FORMAT(CONVERT_TZ(occurred_at, '+00:00', '+07:00'), '%Y-%m-%d') AS day, \
          product_code, COUNT(*) FROM validation_requests \
-         WHERE occurred_at >= ? GROUP BY day, product_code ORDER BY day, product_code",
-    )
-    .bind(start)
-    .fetch_all(pool)
-    .await
-    .ok()?;
+         WHERE occurred_at >= ?{} GROUP BY day, product_code ORDER BY day, product_code",
+        end_clause("occurred_at")
+    );
+    let mut hits_query = sqlx::query_as::<_, (String, String, i64)>(&hits_sql).bind(start);
+    if let Some(end) = end {
+        hits_query = hits_query.bind(end);
+    }
+    let hit_rows = hits_query.fetch_all(pool).await.ok()?;
     let extra_products: Vec<String> = hit_rows
         .iter()
         .map(|(_, product, _)| product.clone())
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect();
-    let hits_per_day = build_hits_per_day(hit_rows, &day_list, &extra_products);
+    let hits_per_day = build_hits_per_day(hit_rows, day_list, &extra_products);
 
     // Agregat per produk: total, sukses (valid+not_kyc), final, rata-rata.
-    let product_rows: Vec<(String, i64, i64, i64, f64)> = sqlx::query_as(
+    let products_sql = format!(
         "SELECT product_code, COUNT(*), \
          CAST(COALESCE(SUM(outcome IN ('valid', 'not_kyc')), 0) AS SIGNED), \
          CAST(COALESCE(SUM(outcome IN ('valid', 'invalid', 'not_found', 'not_kyc')), 0) AS SIGNED), \
          CAST(COALESCE(AVG(provider_latency_ms), 0) AS DOUBLE) \
-         FROM validation_requests WHERE occurred_at >= ? GROUP BY product_code",
-    )
-    .bind(start)
-    .fetch_all(pool)
-    .await
-    .ok()?;
+         FROM validation_requests WHERE occurred_at >= ?{} GROUP BY product_code",
+        end_clause("occurred_at")
+    );
+    let mut products_query =
+        sqlx::query_as::<_, (String, i64, i64, i64, f64)>(&products_sql).bind(start);
+    if let Some(end) = end {
+        products_query = products_query.bind(end);
+    }
+    let product_rows = products_query.fetch_all(pool).await.ok()?;
     let products = build_product_analytics(product_rows);
 
     // Agregat per member: hit dari validation_requests (prefix kunci ->
     // member) + pendapatan dari package_orders lunas/ter-grant.
     // Kunci tanpa member terikat mengumpul di baris (None, None, None).
-    let member_hit_rows: Vec<(Option<String>, Option<String>, Option<String>, i64, i64, i64, f64)> = sqlx::query_as(
+    let member_hits_sql = format!(
         "SELECT m.id, m.member_code, m.email, COUNT(*), \
          CAST(COALESCE(SUM(outcome IN ('valid', 'not_kyc')), 0) AS SIGNED), \
          CAST(COALESCE(SUM(outcome IN ('valid', 'invalid', 'not_found', 'not_kyc')), 0) AS SIGNED), \
@@ -656,45 +816,78 @@ pub async fn analytics_from_db(pool: &MySqlPool, days: i64) -> Option<AnalyticsR
          FROM validation_requests vr \
          LEFT JOIN admin_api_keys k ON k.prefix = vr.api_key_prefix \
          LEFT JOIN members m ON m.id = k.member_id \
-         WHERE vr.occurred_at >= ? GROUP BY m.id, m.member_code, m.email ORDER BY COUNT(*) DESC",
-    )
-    .bind(start)
-    .fetch_all(pool)
-    .await
-    .ok()?;
-    let member_revenue_rows: Vec<(String, Option<String>, Option<String>, i64, u64)> = sqlx::query_as(
+         WHERE vr.occurred_at >= ?{} GROUP BY m.id, m.member_code, m.email ORDER BY COUNT(*) DESC",
+        end_clause("vr.occurred_at")
+    );
+    let mut member_hits_query = sqlx::query_as::<_, (
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        i64,
+        i64,
+        f64,
+    )>(&member_hits_sql)
+        .bind(start);
+    if let Some(end) = end {
+        member_hits_query = member_hits_query.bind(end);
+    }
+    let member_hit_rows = member_hits_query.fetch_all(pool).await.ok()?;
+    let member_revenue_sql = format!(
         "SELECT m.id, m.member_code, m.email, COUNT(*), CAST(COALESCE(SUM(o.amount_idr), 0) AS UNSIGNED) \
          FROM package_orders o JOIN members m ON m.id = o.member_id \
-         WHERE o.status IN ('paid', 'granted') AND COALESCE(o.paid_at, o.created_at) >= ? \
+         WHERE o.status IN ('paid', 'granted') AND COALESCE(o.paid_at, o.created_at) >= ?{} \
          GROUP BY m.id, m.member_code, m.email",
-    )
-    .bind(start)
-    .fetch_all(pool)
-    .await
-    .ok()?;
+        end_clause("COALESCE(o.paid_at, o.created_at)")
+    );
+    let mut member_revenue_query = sqlx::query_as::<_, (
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
+        u64,
+    )>(&member_revenue_sql)
+        .bind(start);
+    if let Some(end) = end {
+        member_revenue_query = member_revenue_query.bind(end);
+    }
+    let member_revenue_rows = member_revenue_query.fetch_all(pool).await.ok()?;
     let per_member = build_member_analytics(member_hit_rows, member_revenue_rows);
 
     // Agregat per server endpoint: hanya nama server dari konfigurasi
     // admin (bukan URL/nama vendor). Hit tanpa endpoint (baris lama)
     // mengumpul di baris endpoint null.
-    let endpoint_rows: Vec<(Option<String>, Option<String>, String, i64, i64, i64, f64)> = sqlx::query_as(
+    let endpoint_sql = format!(
         "SELECT HEX(vr.provider_endpoint_id), te.name, vr.product_code, COUNT(*), \
          CAST(COALESCE(SUM(outcome IN ('valid', 'not_kyc')), 0) AS SIGNED), \
          CAST(COALESCE(SUM(outcome IN ('valid', 'invalid', 'not_found', 'not_kyc')), 0) AS SIGNED), \
          CAST(COALESCE(AVG(provider_latency_ms), 0) AS DOUBLE) \
          FROM validation_requests vr \
          LEFT JOIN third_party_endpoints te ON te.id = vr.provider_endpoint_id \
-         WHERE vr.occurred_at >= ? GROUP BY vr.provider_endpoint_id, te.name, vr.product_code ORDER BY COUNT(*) DESC",
-    )
-    .bind(start)
-    .fetch_all(pool)
-    .await
-    .ok()?;
+         WHERE vr.occurred_at >= ?{} GROUP BY vr.provider_endpoint_id, te.name, vr.product_code ORDER BY COUNT(*) DESC",
+        end_clause("vr.occurred_at")
+    );
+    let mut endpoint_query = sqlx::query_as::<_, (
+        Option<String>,
+        Option<String>,
+        String,
+        i64,
+        i64,
+        i64,
+        f64,
+    )>(&endpoint_sql)
+        .bind(start);
+    if let Some(end) = end {
+        endpoint_query = endpoint_query.bind(end);
+    }
+    let endpoint_rows = endpoint_query.fetch_all(pool).await.ok()?;
     let per_endpoint = build_endpoint_analytics(endpoint_rows);
 
     Some(AnalyticsResponse {
-        days: response_days,
-        alltime,
+        days: window.days,
+        alltime: window.alltime,
+        from: window.from.clone(),
+        to: window.to.clone(),
         generated_at: Utc::now(),
         cached: false,
         database: true,
@@ -917,8 +1110,9 @@ mod tests {
         build_endpoint_analytics, build_hits_per_day, build_member_analytics,
         build_product_analytics, build_revenue, build_route_health, clamp_analytics_days,
         initial_product_health, is_revenue_status, latency_summary, percentile_sorted,
-        product_label_for, success_rate_percent, wib_day_list, wib_day_list_from,
-        window_start_utc_for_day, ANALYTICS_DEFAULT_DAYS, ANALYTICS_MAX_DAYS,
+        product_label_for, resolve_custom_window, success_rate_percent, wib_day_list,
+        wib_day_list_from, window_start_utc_for_day, ANALYTICS_DEFAULT_DAYS,
+        ANALYTICS_MAX_DAYS,
     };
 
     use crate::{
@@ -1047,6 +1241,47 @@ mod tests {
         assert_eq!(clamp_analytics_days(Some(-5)), 1);
         assert_eq!(clamp_analytics_days(Some(7)), 7);
         assert_eq!(clamp_analytics_days(Some(ANALYTICS_MAX_DAYS + 500)), ANALYTICS_MAX_DAYS);
+    }
+
+    #[test]
+    fn custom_window_resolves_inclusive_span() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let window = resolve_custom_window("2026-10-28", "2026-11-02", today).unwrap();
+        assert_eq!(window.days, 6);
+        assert_eq!(window.day_list.len(), 6);
+        assert_eq!(window.from.as_deref(), Some("2026-10-28"));
+        assert_eq!(window.to.as_deref(), Some("2026-11-02"));
+        assert!(!window.alltime);
+        assert!(window.end.is_some());
+        // Batas atas = tengah malam WIB 3 Nov -> 2 Nov 17:00 UTC.
+        assert_eq!(
+            window.end.unwrap(),
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 3)
+                .unwrap()
+                .and_hms_opt(0, 0, 0)
+                .unwrap()
+                - chrono::Duration::hours(7)
+        );
+    }
+
+    #[test]
+    fn custom_window_clamps_future_end_to_today() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let window = resolve_custom_window("2026-10-30", "2026-12-25", today).unwrap();
+        assert_eq!(window.to.as_deref(), Some("2026-11-02"));
+        assert_eq!(window.days, 4);
+    }
+
+    #[test]
+    fn custom_window_rejects_bad_ranges() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        assert!(resolve_custom_window("2026-11-05", "2026-11-02", today).is_err());
+        assert!(resolve_custom_window("2026-11-03", "2026-11-04", today).is_err());
+        assert!(resolve_custom_window("2025-10-01", "2026-11-02", today).is_err());
+        assert!(resolve_custom_window("2026-1-5", "2026-11-02", today).is_err());
+        assert!(resolve_custom_window("2026/11/01", "2026-11-02", today).is_err());
+        assert!(resolve_custom_window("2026-13-01", "2026-11-02", today).is_err());
+        assert!(resolve_custom_window("2026-11-02", "2026-11-02", today).is_ok());
     }
 
     #[test]

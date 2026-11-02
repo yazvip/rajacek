@@ -2444,6 +2444,8 @@ async fn admin_overview(
 #[derive(Deserialize)]
 struct AnalyticsQuery {
     days: Option<i64>,
+    from: Option<String>,
+    to: Option<String>,
 }
 
 // AUTHZ-ROLE: Viewer
@@ -2460,8 +2462,45 @@ async fn admin_analytics(
     Query(query): Query<AnalyticsQuery>,
 ) -> Result<Json<crate::analytics::AnalyticsResponse>, AppError> {
     require_admin_role(&state, &headers, Role::Viewer).await?;
+    // Rentang kustom (from+to) punya jalur sendiri: resolver murni di
+    // analytics.rs (clamp `to` ke hari ini, tolak span > 365 hari dan
+    // format salah dengan 400) + kunci cache sendiri, supaya tidak
+    // tertukar dengan preset. Satu sisi saja diisi = 400, bukan fallback
+    // diam-diam ke preset.
+    if query.from.is_some() || query.to.is_some() {
+        let (Some(from), Some(to)) = (query.from.as_deref(), query.to.as_deref()) else {
+            return Err(AppError::bad_request(
+                "Rentang kustom butuh tanggal mulai dan tanggal akhir",
+            ));
+        };
+        let window = crate::analytics::resolve_custom_window(
+            from,
+            to,
+            crate::analytics::wib_today(),
+        )
+        .map_err(AppError::bad_request)?;
+        let key = format!(
+            "custom:{}:{}",
+            window.from.clone().unwrap_or_default(),
+            window.to.clone().unwrap_or_default()
+        );
+        if let Some(cached) = state.store.cached_analytics(&key) {
+            return Ok(Json(cached));
+        }
+        let Some(pool) = state.store.pool() else {
+            return Ok(Json(crate::analytics::AnalyticsResponse::empty_custom(
+                &window,
+            )));
+        };
+        let response = crate::analytics::analytics_from_db_window(&pool, &window)
+            .await
+            .ok_or_else(|| AppError::internal("Analitik gagal dibaca dari database"))?;
+        state.store.store_cached_analytics(&key, response.clone());
+        return Ok(Json(response));
+    }
     let days = crate::analytics::clamp_analytics_days(query.days);
-    if let Some(cached) = state.store.cached_analytics(days) {
+    let key = format!("days:{days}");
+    if let Some(cached) = state.store.cached_analytics(&key) {
         return Ok(Json(cached));
     }
     let Some(pool) = state.store.pool() else {
@@ -2470,7 +2509,7 @@ async fn admin_analytics(
     let response = crate::analytics::analytics_from_db(&pool, days)
         .await
         .ok_or_else(|| AppError::internal("Analitik gagal dibaca dari database"))?;
-    state.store.store_cached_analytics(days, response.clone());
+    state.store.store_cached_analytics(&key, response.clone());
     Ok(Json(response))
 }
 

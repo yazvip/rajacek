@@ -26,6 +26,8 @@
     adminActivity: { items: [], total: 0, limit: 50, offset: 0, action: "", actor: "", from: "", to: "", loaded: false },
     analytics: null,
     analyticsDays: 30,
+    analyticsFrom: null,
+    analyticsTo: null,
     providerHealth: null,
     adminAccounts: [],
     dashboardLoadError: false,
@@ -144,6 +146,13 @@
     return typeof value === "string" && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(value) ? `${value}Z` : value;
   }
 
+  function formatWibDate(iso) {
+    const parts = String(iso).split("-");
+    const months = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+    const month = Number(parts[1]);
+    if (parts.length !== 3 || !month || month < 1 || month > 12) return String(iso);
+    return `${Number(parts[2])} ${months[month - 1]} ${parts[0]}`;
+  }
   function formatDate(value) {
     if (!value) return "Belum pernah";
     const date = new Date(normalizeDateValue(value));
@@ -1850,7 +1859,10 @@
   // tetap di kartu Ringkasan. Tanpa database, backend mengembalikan
   // angka nol — panel menandainya "tanpa database", bukan "nol".
   async function loadAnalytics() {
-    state.analytics = await api(`/v1/admin/analytics?days=${state.analyticsDays}`);
+    const params = state.analyticsFrom && state.analyticsTo
+      ? `from=${encodeURIComponent(state.analyticsFrom)}&to=${encodeURIComponent(state.analyticsTo)}`
+      : `days=${state.analyticsDays}`;
+    state.analytics = await api(`/v1/admin/analytics?${params}`);
     renderAnalytics();
   }
 
@@ -1858,7 +1870,10 @@
     const data = state.analytics;
     if (!data) return;
     const meta = $("#analytics-meta");
-    if (meta) meta.textContent = `${data.alltime ? "Sepanjang masa" : `${data.days} hari`} · ${data.cached ? "cache 60 detik" : "data baru"}${data.database ? "" : " · tanpa database"}`;
+    const rangeLabel = data.from && data.to
+      ? `${formatWibDate(data.from)} – ${formatWibDate(data.to)}`
+      : data.alltime ? "Sepanjang masa" : `${data.days} hari`;
+    if (meta) meta.textContent = `${rangeLabel} · ${data.cached ? "cache 60 detik" : "data baru"}${data.database ? "" : " · tanpa database"}`;
     const note = $("#analytics-note");
     if (note) note.textContent = data.database
       ? "Pendapatan = order paid + granted dalam rentang ini. Success rate = valid + belum KYC dibanding hasil final."
@@ -3384,9 +3399,47 @@
     });
     $("#analytics-range-form")?.addEventListener("submit", (event) => {
       event.preventDefault();
-      const daysValue = Number($("#analytics-days").value);
-      state.analyticsDays = Number.isFinite(daysValue) ? daysValue : 30;
+      const range = $("#analytics-custom-range");
+      const note = $("#analytics-note");
+      if (range && !range.hasAttribute("hidden")) {
+        const from = $("#analytics-from").value;
+        const to = $("#analytics-to").value;
+        if (!from || !to) {
+          if (note) note.textContent = "Isi tanggal mulai dan tanggal akhir.";
+          return;
+        }
+        if (from > to) {
+          if (note) note.textContent = "Tanggal mulai tidak boleh setelah tanggal akhir.";
+          return;
+        }
+        state.analyticsFrom = from;
+        state.analyticsTo = to;
+      } else {
+        const daysValue = Number($("#analytics-days").value);
+        state.analyticsDays = Number.isFinite(daysValue) ? daysValue : 30;
+      }
       loadAnalytics().catch(handleApiError);
+    });
+    $("#analytics-custom-toggle")?.addEventListener("click", () => {
+      const range = $("#analytics-custom-range");
+      const select = $("#analytics-days");
+      const toggle = $("#analytics-custom-toggle");
+      if (range.hasAttribute("hidden")) {
+        range.removeAttribute("hidden");
+        const now = new Date();
+        const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+        $("#analytics-from").max = today;
+        $("#analytics-to").max = today;
+        if (select) select.disabled = true;
+        toggle.textContent = "Kembali ke preset";
+      } else {
+        range.setAttribute("hidden", "");
+        state.analyticsFrom = null;
+        state.analyticsTo = null;
+        if (select) select.disabled = false;
+        toggle.textContent = "Pilih tanggal sendiri";
+        loadAnalytics().catch(handleApiError);
+      }
     });
     // Tab Analitik: hanya show/hide seksi (tanpa reload data, tanpa hash).
     // Semua seksi tetap dirender saat load; grafik batang memakai tinggi %
