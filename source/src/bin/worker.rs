@@ -190,6 +190,84 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Notifikasi member (3 Nov 2026): dua loop baru dengan pola yang
+    // sama seperti job kedaluwarsa admin di atas. Job admin (expiry,
+    // stuck, sweep) TIDAK diubah — loop ini hanya tambahan.
+    // (a) Sisa masa aktif member tiap 6 jam (tick pertama langsung,
+    // agar bucket yang masuk jendela saat worker mati tetap dikirim
+    // setelah restart).
+    let notify_pool = database.pool().clone();
+    let notify_key = config.api_key_encryption_key.clone();
+    tokio::spawn(async move {
+        loop {
+            match rajacek_api::member_notify::run_member_expiry_job_with_key(
+                &notify_pool,
+                notify_key.as_deref(),
+                chrono::Utc::now(),
+            )
+            .await
+            {
+                Ok(run) => {
+                    tracing::info!(
+                        candidates = run.candidates,
+                        sent = run.sent,
+                        failed = run.failed,
+                        "Notifikasi sisa masa aktif member selesai (tick 6 jam)"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "Notifikasi sisa masa aktif member gagal; dicoba lagi pada tick berikutnya"
+                    );
+                }
+            }
+            sleep(Duration::from_secs(
+                rajacek_api::member_notify::MEMBER_EXPIRY_JOB_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    });
+
+    // (b) Rekapan 24 jam: cek tiap 30 menit; pengiriman hanya terjadi
+    // di jendela 07:00–07:29 WIB (gerbang di dalam job + dedupe tanggal
+    // WIB mencegah kirim ganda bila worker restart di dalam jendela).
+    let recap_pool = database.pool().clone();
+    let recap_key = config.api_key_encryption_key.clone();
+    tokio::spawn(async move {
+        loop {
+            match rajacek_api::member_notify::run_member_recap_job_with_key(
+                &recap_pool,
+                recap_key.as_deref(),
+                chrono::Utc::now(),
+            )
+            .await
+            {
+                Ok(run) => {
+                    if run.window_open {
+                        tracing::info!(
+                            considered = run.considered,
+                            sent = run.sent,
+                            skipped_inactive = run.skipped_inactive,
+                            failed = run.failed,
+                            "Rekapan 24 jam member selesai"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        ?error,
+                        "Rekapan 24 jam member gagal; dicoba lagi pada pengecekan berikutnya"
+                    );
+                }
+            }
+            sleep(Duration::from_secs(
+                rajacek_api::member_notify::RECAP_CHECK_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    });
+
     // Alert order macet B1 (28 Okt 2026): order `paid` yang belum grant
     // setelah 15 menit — sekali saat startup, lalu tiap 10 menit.
     // Anti-duplikat lewat kolom package_orders.stuck_notified_at: hanya

@@ -2123,7 +2123,7 @@
     const planLabel = { trial: "Trial", package: "Paket", manual: "Manual", umum: "Umum" };
     const planEffective = member.plan_effective || member.plan_kind;
     $("#member-detail-title").textContent = member.name || member.email;
-    $("#member-detail-sub").textContent = `${member.email} · Kode member: ${member.member_code || "—"} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[planEffective] || planEffective} · Daftar ${formatDate(member.created_at)} · Login terakhir ${member.last_login_at ? formatDate(member.last_login_at) : "—"}`;
+    $("#member-detail-sub").textContent = `${member.email} · Kode member: ${member.member_code || "—"} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[planEffective] || planEffective} · Daftar ${formatDate(member.created_at)} · Login terakhir ${member.last_login_at ? formatDate(member.last_login_at) : "—"} · Telegram: ${member.telegram_linked ? `Terhubung${member.telegram_linked_at ? ` sejak ${formatDate(member.telegram_linked_at)}` : ""}` : "Belum terhubung"}`;
     // Formulir ubah email selalu mulai bersih agar nilai member
     // sebelumnya tidak terbawa; onclick (bukan addEventListener) agar
     // render ulang tidak menumpuk handler.
@@ -3143,6 +3143,24 @@
         await api("/v1/admin/telegram-webhook/activate", { method: "POST", body: "{}" });
         await loadTelegramSettings();
         showToast("Perintah bot diaktifkan. Kirim /stats dari Telegram.", "success");
+      } catch (error) {
+        handleApiError(error);
+      }
+    });
+    // Broadcast admin ke member (3 Nov 2026): hasil ringkasan tampil di
+    // area yang sama (tidak pernah tersembunyi di belakang modal).
+    $("#broadcast-send")?.addEventListener("click", async () => {
+      const title = $("#broadcast-title").value.trim();
+      const body = $("#broadcast-body").value.trim();
+      const result = $("#broadcast-result");
+      if (!title || !body) {
+        result.textContent = "Judul dan isi broadcast wajib diisi.";
+        return;
+      }
+      try {
+        const summary = await api("/v1/admin/telegram-broadcast", { method: "POST", body: JSON.stringify({ title, body }) });
+        result.textContent = `Broadcast terkirim ke ${summary.sent} dari ${summary.total} member (${summary.failed} gagal).`;
+        showToast("Broadcast selesai.", summary.failed === 0 ? "success" : "error");
       } catch (error) {
         handleApiError(error);
       }

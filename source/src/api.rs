@@ -274,6 +274,27 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/v1/member/orders/:id/qr", get(crate::member::order_qr))
         .route(
+            "/v1/member/notifications",
+            get(crate::member_notify::notifications_status),
+        )
+        .route(
+            "/v1/member/notifications/link-code",
+            post(crate::member_notify::create_link_code_endpoint),
+        )
+        .route(
+            "/v1/member/notifications/prefs",
+            post(crate::member_notify::update_prefs_endpoint),
+        )
+        .route(
+            "/v1/member/notifications/unlink",
+            post(crate::member_notify::unlink_endpoint),
+        )
+        .route(
+            "/v1/member/notifications/test",
+            post(crate::member_notify::test_endpoint),
+        )
+        .route("/v1/admin/telegram-broadcast", post(broadcast_telegram))
+        .route(
             "/v1/payments/qris/webhook/gobiz",
             post(gobiz_qris_webhook),
         )
@@ -4397,6 +4418,11 @@ struct MemberDetailMemberView {
     status: String,
     created_at: chrono::DateTime<Utc>,
     last_login_at: Option<chrono::DateTime<Utc>>,
+    /// Status tautan Telegram member (3 Nov 2026). Nilai chat_id TIDAK
+    /// PERNAH dikirim ke panel — hanya status + tanggal tautan.
+    telegram_linked: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    telegram_linked_at: Option<chrono::DateTime<Utc>>,
 }
 
 impl From<&crate::models::MemberAccount> for MemberDetailMemberView {
@@ -4413,6 +4439,8 @@ impl From<&crate::models::MemberAccount> for MemberDetailMemberView {
             status: member.status.clone(),
             created_at: member.created_at,
             last_login_at: member.last_login_at,
+            telegram_linked: false,
+            telegram_linked_at: None,
         }
     }
 }
@@ -4537,6 +4565,14 @@ async fn get_member_detail(
     }
     // Tab Trial/Umum: samakan plan detail ke plan efektif (derivasi
     // saat dibaca, sama seperti daftar — nilai tersimpan tak diubah).
+    // Status tautan Telegram (tanpa nilai chat_id). Gagal baca = tetap
+    // false (tidak menggagalkan detail member).
+    if let Some(pool) = state.store.pool() {
+        if let Ok(link) = crate::member_notify::get_link(&pool, &id).await {
+            member_view.telegram_linked = link.is_some();
+            member_view.telegram_linked_at = link.map(|link| link.linked_at);
+        }
+    }
     member_view.plan_effective = crate::store::effective_plan_kind(
         &member.plan_kind,
         state
@@ -4782,6 +4818,49 @@ fn telegram_cipher(state: &AppState) -> crate::provider_config::CredentialCipher
     )
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BroadcastRequest {
+    title: String,
+    body: String,
+}
+
+// AUTHZ-ROLE: Manager (SAMA seperti simpan telegram-settings).
+// Broadcast ke member tertaut + toggle admin aktif. Isi adalah teks
+// bebas admin — backend meng-escape-nya di builder, TIDAK memfilter.
+// Peringatan di form panel: jangan memuat kunci/target/nomor.
+async fn broadcast_telegram(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<BroadcastRequest>,
+) -> Result<Json<crate::member_notify::BroadcastSummary>, AppError> {
+    require_admin_role(&state, &headers, Role::Manager).await?;
+    if input.title.trim().is_empty() || input.title.chars().count() > 100 {
+        return Err(AppError::bad_request(
+            "Judul broadcast wajib diisi (maks 100 karakter)",
+        ));
+    }
+    if input.body.trim().is_empty() || input.body.chars().count() > 2000 {
+        return Err(AppError::bad_request(
+            "Isi broadcast wajib diisi (maks 2000 karakter)",
+        ));
+    }
+    let Some(pool) = state.store.pool() else {
+        return Err(AppError::service_unavailable(
+            "Database tidak tersedia untuk broadcast",
+        ));
+    };
+    let cipher = telegram_cipher(&state);
+    let summary = crate::member_notify::broadcast_to_members(
+        &pool,
+        Some(&cipher),
+        input.title.trim(),
+        input.body.trim(),
+    )
+    .await?;
+    Ok(Json(summary))
+}
+
 async fn get_telegram_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -4910,6 +4989,8 @@ async fn telegram_webhook(
     let Some(text) = message.text else {
         return StatusCode::OK;
     };
+    // Dipindah ke atas (tanpa perubahan nilai) agar cabang member di
+    // bawah bisa mengecualikan chat admin.
     let allowed_chat = match crate::telegram_settings::load_telegram_settings(&pool).await {
         Ok(settings) => settings
             .chat_id
@@ -4924,6 +5005,45 @@ async fn telegram_webhook(
             }),
         Err(_) => None,
     };
+    // Cabang member (notifikasi member, 3 Nov 2026): /start <kode> dan
+    // /stop ditangani SEBELUM gate chat admin. /start tanpa argumen dan
+    // segala pesan lain dari chat admin mengembalikan NotMember sehingga
+    // jatuh ke jalur lama di bawah — perilaku chat admin TIDAK BERUBAH
+    // SAMA SEKALI, walau chat itu tertaut sebagai member. Chat tertaut
+    // non-admin yang mengirim perintah admin dijawab diam.
+    let admin_chat_num = allowed_chat
+        .as_deref()
+        .map(str::trim)
+        .and_then(|value| value.parse::<i64>().ok());
+    match crate::member_notify::handle_member_update(
+        &pool,
+        message.chat.id,
+        &text,
+        admin_chat_num,
+    )
+    .await {
+        crate::member_notify::MemberUpdateOutcome::Replied(reply) => {
+            if let Some((token, _)) =
+                crate::telegram_settings::resolve_credentials(&pool, Some(&cipher)).await
+            {
+                let base_url = crate::alerts::telegram_base_url();
+                if let Err(error) = crate::alerts::send_telegram_message(
+                    &base_url,
+                    &token,
+                    &message.chat.id.to_string(),
+                    &reply,
+                    Some("HTML"),
+                )
+                .await
+                {
+                    tracing::warn!(error = %error, "Balasan tautan member gagal terkirim");
+                }
+            }
+            return StatusCode::OK;
+        }
+        crate::member_notify::MemberUpdateOutcome::SilentHandled => return StatusCode::OK,
+        crate::member_notify::MemberUpdateOutcome::NotMember => {}
+    }
     let Some(allowed_chat) = allowed_chat else {
         return StatusCode::OK;
     };

@@ -1150,6 +1150,31 @@ pub async fn waiting_order_for_member(
 /// Telegram fire-and-forget (kegagalan hanya jadi log). Lookup kode
 /// member gagal → kirim dilewati, audit tetap tercatat. Dipanggil
 /// HANYA pada transisi baru (changed==true), bukan pengulangan.
+/// Notifikasi member fire-and-forget untuk transisi order (3 Nov 2026).
+/// Dipanggil HANYA saat CAS transisi menang (bukan pengulangan) — sama
+/// seperti aturan notifikasi admin di sekitarnya. Tidak pernah
+/// menggagalkan pemanggil: kegagalan kirim hanya jadi log di dalam
+/// `notify_member_purchase`.
+fn spawn_member_purchase_notify(
+    store: &AdminStore,
+    pool: &MySqlPool,
+    order_id: &str,
+    event: crate::member_notify::PurchaseEvent,
+) {
+    let notify_pool = pool.clone();
+    let notify_cipher = store.credential_cipher();
+    let order_id = order_id.to_owned();
+    tokio::spawn(async move {
+        crate::member_notify::notify_member_purchase(
+            &notify_pool,
+            notify_cipher.as_ref(),
+            &order_id,
+            event,
+        )
+        .await;
+    });
+}
+
 async fn notify_needs_review_panel(
     store: &AdminStore,
     pool: &MySqlPool,
@@ -1178,6 +1203,14 @@ async fn notify_needs_review_panel(
         order.updated_at,
     );
     crate::alerts::notify_admin(pool.clone(), store.credential_cipher(), title, text);
+    // Notifikasi member needs_review (transisi baru saja — helper ini
+    // hanya dipanggil saat changed == true).
+    spawn_member_purchase_notify(
+        store,
+        pool,
+        &order.id,
+        crate::member_notify::PurchaseEvent::NeedsReview,
+    );
 }
 
 async fn set_order_status(
@@ -2033,6 +2066,12 @@ pub async fn verify_and_grant(
                         _ => (view(&row), verdict_for_status(&row.status)),
                     });
                 }
+                spawn_member_purchase_notify(
+                    store,
+                    &pool,
+                    &row.id,
+                    crate::member_notify::PurchaseEvent::Expired,
+                );
                 return Ok((view(&row), VerifyOutcome::Expired));
             }
             Ok((view(&order), VerifyOutcome::Waiting))
@@ -2049,6 +2088,12 @@ pub async fn verify_and_grant(
                     _ => (view(&row), verdict_for_status(&row.status)),
                 });
             }
+            spawn_member_purchase_notify(
+                store,
+                &pool,
+                &row.id,
+                crate::member_notify::PurchaseEvent::Expired,
+            );
             Ok((view(&row), VerifyOutcome::Expired))
         }
         QrisPaymentStatus::Canceled => {
@@ -2063,6 +2108,12 @@ pub async fn verify_and_grant(
                     _ => (view(&row), verdict_for_status(&row.status)),
                 });
             }
+            spawn_member_purchase_notify(
+                store,
+                &pool,
+                &row.id,
+                crate::member_notify::PurchaseEvent::Canceled,
+            );
             Ok((view(&row), VerifyOutcome::Canceled))
         }
         QrisPaymentStatus::NotFound => {
@@ -2086,6 +2137,12 @@ pub async fn verify_and_grant(
                         _ => (view(&row), verdict_for_status(&row.status)),
                     });
                 }
+                spawn_member_purchase_notify(
+                    store,
+                    &pool,
+                    &row.id,
+                    crate::member_notify::PurchaseEvent::Expired,
+                );
                 return Ok((view(&row), VerifyOutcome::Expired));
             }
             Ok((view(&order), VerifyOutcome::Waiting))
@@ -2419,6 +2476,13 @@ async fn grant_row(
                 );
             }
         }
+        // Notifikasi member grant pertama (bukan AlreadyGranted).
+        spawn_member_purchase_notify(
+            store,
+            pool,
+            &order.id,
+            crate::member_notify::PurchaseEvent::Granted,
+        );
     }
     Ok(result)
 }

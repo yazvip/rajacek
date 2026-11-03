@@ -202,7 +202,7 @@ fn session_key_binding_matches(claimed_prefix: &str, current_prefix: Option<&str
 /// Resolve the session cookie to a member session. New sessions carry the
 /// member id (Google sign-in, or a key that belongs to a member); older
 /// sessions carry the key prefix directly.
-async fn resolve_session(state: &AppState, headers: &HeaderMap) -> Result<MemberSession, AppError> {
+pub(crate) async fn resolve_session(state: &AppState, headers: &HeaderMap) -> Result<MemberSession, AppError> {
     let claims = member_session_claims(state, headers).await?;
     let sub = claims.sub;
     if let Ok(id) = uuid::Uuid::parse_str(&sub) {
@@ -2137,6 +2137,27 @@ pub async fn create_order(
         .ok_or_else(|| AppError::not_found("Paket tidak ditemukan"))?;
     let (view, created) =
         qris::create_member_order(&state.store, &state.config, member_id, &package).await?;
+    // Notifikasi pembelian member (3 Nov 2026) — HANYA pada order yang
+    // benar-benar baru dibuat (created), bukan waiting yang dikembalikan
+    // ulang (B9). Fire-and-forget: kegagalan kirim tidak menggagalkan
+    // create; hook tidak mengubah logika transisi apa pun.
+    if created {
+        if let Some(pool) = state.store.pool() {
+            let cipher = crate::provider_config::CredentialCipher::new(
+                state.config.api_key_encryption_key.as_deref(),
+            );
+            let order_id = view.id.clone();
+            tokio::spawn(async move {
+                crate::member_notify::notify_member_purchase(
+                    &pool,
+                    Some(&cipher),
+                    &order_id,
+                    crate::member_notify::PurchaseEvent::Created,
+                )
+                .await;
+            });
+        }
+    }
     Ok((
         if created {
             StatusCode::CREATED
@@ -2274,6 +2295,23 @@ pub async fn cancel_order(
     )
     .await?
     .unwrap_or(row);
+    // Notifikasi pembatalan member — hanya bila CAS lokal ini yang
+    // memenangkan transisi. Bila sweep/verify lebih dulu mengubah status,
+    // jalur itu yang memberi notifikasi (dedupe log juga menjaga ganda).
+    if changed.rows_affected() == 1 && updated.status == "canceled" {
+        let notify_pool = pool.clone();
+        let notify_cipher = cipher.clone();
+        let order_id = updated.id.clone();
+        tokio::spawn(async move {
+            crate::member_notify::notify_member_purchase(
+                &notify_pool,
+                Some(&notify_cipher),
+                &order_id,
+                crate::member_notify::PurchaseEvent::Canceled,
+            )
+            .await;
+        });
+    }
     Ok(Json(updated.member_view()))
 }
 

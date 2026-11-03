@@ -646,6 +646,37 @@
                 </table>
               </div>
             </div>
+
+            <div class="card" id="notifCard">
+              <div class="section-head">
+                <h2 class="section">Notifikasi Telegram</h2>
+                <span class="nav-badge emerald">bot</span>
+              </div>
+              <p style="font-size:13px;color:var(--muted);line-height:1.55;margin-top:8px;">Terima kabar paket, pembelian, dan rekapan harian lewat bot Telegram Rajacek yang sama dengan bot admin. Notifikasi hanya dikirim bila Anda mengaktifkannya di bawah.</p>
+              <p id="notifStatus" style="font-size:13px;font-weight:600;margin-top:12px;">Memuat status…</p>
+              <div id="notifLinkArea">
+                <button type="button" class="primary" id="notifLinkBtn">Hubungkan Telegram</button>
+                <div id="notifCodeBox" class="hidden" style="margin-top:12px;">
+                  <p style="font-size:13px;line-height:1.55;">Buka bot Telegram Rajacek lalu kirim perintah berikut (kode berlaku 15 menit):</p>
+                  <p class="mono" id="notifCodeText" style="font-size:16px;font-weight:700;margin-top:6px;"></p>
+                  <div style="display:flex;gap:8px;margin-top:10px;">
+                    <button type="button" id="notifCopyBtn">Salin perintah</button>
+                  </div>
+                </div>
+              </div>
+              <div id="notifPrefsArea" class="hidden" style="margin-top:12px;">
+                <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-top:8px;"><input type="checkbox" id="notifPrefExpiry" /> Sisa masa aktif paket (H-3 dan H-1)</label>
+                <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-top:8px;"><input type="checkbox" id="notifPrefAdmin" /> Pesan dari admin</label>
+                <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-top:8px;"><input type="checkbox" id="notifPrefPurchase" /> Pembelian (dibuat, lunas, kedaluwarsa, dibatalkan, perlu peninjauan)</label>
+                <label style="display:flex;gap:8px;align-items:center;font-size:13px;margin-top:8px;"><input type="checkbox" id="notifPrefRecap" /> Rekapan 24 jam (07:00 WIB, hanya bila ada aktivitas)</label>
+                <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
+                  <button type="button" class="primary" id="notifSaveBtn">Simpan pengaturan</button>
+                  <button type="button" id="notifTestBtn">Kirim notifikasi tes</button>
+                  <button type="button" id="notifUnlinkBtn">Putuskan tautan</button>
+                </div>
+              </div>
+              <p id="notifMsg" style="font-size:13px;font-weight:600;margin-top:12px;"></p>
+            </div>
           </section>
 
           <!-- PAGE: PENGGUNAAN -->
@@ -1148,9 +1179,78 @@
 
       async function loadAll() {
         loadSiteBanners();
-        await Promise.all([loadOverview(), loadUsage(), loadHistory()]);
+        await Promise.all([loadOverview(), loadUsage(), loadHistory(), loadNotifSettings()]);
         hidePortalError();
       }
+
+      async function notifApi(path, options) {
+        const res = await api(path, options);
+        if (res.ok) return res.json();
+        let detail = '';
+        try { const j = await res.json(); detail = j.message || j.error || ''; } catch (_) { /* isi body bukan JSON */ }
+        throw new Error(detail || ('Gagal (' + res.status + ').'));
+      }
+
+      /* Notifikasi Telegram (3 Nov 2026): semua pesan hasil/galat ditulis
+         ke #notifMsg di dalam kartu yang sama — tidak pernah tersembunyi
+         di belakang modal (pelajaran bug modal beli). */
+      async function loadNotifSettings() {
+        const msg = $('notifMsg');
+        try {
+          const d = await notifApi('/v1/member/notifications');
+          $('notifStatus').textContent = d.linked ? 'Terhubung ke Telegram.' : 'Belum terhubung ke Telegram.';
+          $('notifLinkArea').classList.toggle('hidden', d.linked);
+          $('notifPrefsArea').classList.toggle('hidden', !d.linked);
+          $('notifPrefExpiry').checked = !!d.prefs.notify_expiry;
+          $('notifPrefAdmin').checked = !!d.prefs.notify_admin;
+          $('notifPrefPurchase').checked = !!d.prefs.notify_purchase;
+          $('notifPrefRecap').checked = !!d.prefs.notify_recap;
+          if (msg) msg.textContent = '';
+        } catch (e) {
+          if (msg) msg.textContent = e.message || 'Gagal memuat pengaturan notifikasi.';
+        }
+      }
+
+      $('notifLinkBtn')?.addEventListener('click', async () => {
+        const msg = $('notifMsg'); msg.textContent = '';
+        try {
+          const d = await notifApi('/v1/member/notifications/link-code', { method: 'POST' });
+          $('notifCodeText').textContent = '/start ' + d.code;
+          $('notifCodeBox').classList.remove('hidden');
+          msg.textContent = 'Kode berlaku 15 menit. ' + (d.instruction || '');
+        } catch (e) { msg.textContent = e.message || 'Gagal membuat kode tautan.'; }
+      });
+      $('notifCopyBtn')?.addEventListener('click', async () => {
+        const msg = $('notifMsg');
+        const cmd = $('notifCodeText').textContent || '';
+        try {
+          if (navigator.clipboard) { await navigator.clipboard.writeText(cmd); msg.textContent = 'Perintah disalin. Tempel di chat bot.'; }
+          else { msg.textContent = 'Salin manual: ' + cmd; }
+        } catch (_) { msg.textContent = 'Salin manual: ' + cmd; }
+      });
+      $('notifSaveBtn')?.addEventListener('click', async () => {
+        const msg = $('notifMsg'); msg.textContent = '';
+        try {
+          await notifApi('/v1/member/notifications/prefs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ notify_expiry: $('notifPrefExpiry').checked, notify_admin: $('notifPrefAdmin').checked, notify_purchase: $('notifPrefPurchase').checked, notify_recap: $('notifPrefRecap').checked }) });
+          msg.textContent = 'Pengaturan notifikasi tersimpan.';
+        } catch (e) { msg.textContent = e.message || 'Gagal menyimpan pengaturan.'; }
+      });
+      $('notifTestBtn')?.addEventListener('click', async () => {
+        const msg = $('notifMsg'); msg.textContent = '';
+        try {
+          const d = await notifApi('/v1/member/notifications/test', { method: 'POST' });
+          msg.textContent = d.detail || (d.sent ? 'Pesan tes terkirim.' : 'Pesan tes tidak terkirim.');
+        } catch (e) { msg.textContent = e.message || 'Gagal mengirim pesan tes.'; }
+      });
+      $('notifUnlinkBtn')?.addEventListener('click', async () => {
+        const msg = $('notifMsg'); msg.textContent = '';
+        try {
+          await notifApi('/v1/member/notifications/unlink', { method: 'POST' });
+          $('notifCodeBox').classList.add('hidden');
+          await loadNotifSettings();
+          msg.textContent = 'Tautan Telegram diputus.';
+        } catch (e) { msg.textContent = e.message || 'Gagal memutuskan tautan.'; }
+      });
 
       async function loadOverview() {
         const res = await api('/v1/member/overview');
