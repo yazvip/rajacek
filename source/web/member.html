@@ -331,6 +331,7 @@
       .buy-confirm-highlight dd { color:var(--brand-800); }
       .buy-confirm-delta { display:inline-block; font-size:12px; font-weight:700; color:var(--brand-700); background:var(--brand-50); border-radius:999px; padding:2px 8px; margin-left:6px; }
       .buy-confirm-note { font-size:13px; color:var(--muted); line-height:1.55; margin:12px 0 0; }
+      .buy-confirm-error { font-size:13px; color:#be123c; font-weight:700; line-height:1.55; margin:12px 0 0; }
 
       /* ---------- Recap / pager / filters / login / footer ---------- */
       .recap { display:grid; grid-template-columns:1fr; gap:16px; }
@@ -944,6 +945,7 @@
         </dl>
         <p class="buy-confirm-note">Langkah ini belum menagih apa pun. Kuota baru hanya bertambah setelah pembayaran Anda terverifikasi. Paket baru ini punya masa aktif sendiri; pemakaian menghabiskan paket yang paling cepat kedaluwarsa dulu.</p>
         <p id="buyPreviewTrial" class="hidden buy-confirm-note"></p>
+        <p id="buyPreviewMsg" class="hidden buy-confirm-error" role="alert"></p>
         <div class="buy-actions buy-modal-actions">
           <button type="button" class="primary" id="buyConfirmBtn">Lanjutkan &amp; Buat QR</button>
           <button type="button" id="buyPreviewCancelBtn">Batal</button>
@@ -1987,6 +1989,8 @@
       async function buyStartPreview(packageId) {
         buyPendingPackageId = packageId;
         $('buyMsg').textContent = '';
+        $('buyPreviewMsg').textContent = '';
+        $('buyPreviewMsg').classList.add('hidden');
         buyClearSelection();
         document.querySelector(`[data-buy="${packageId}"]`)?.closest('.buy-pkg')?.classList.add('selected');
         try {
@@ -2039,7 +2043,14 @@
           buyShowWaiting(order);
           loadBuyHistory();
         } catch (e) {
-          $('buyMsg').textContent = e.message || 'Order gagal dibuat.';
+          // Pesan HARUS tampil di dalam modal (3 Nov 2026): sebelumnya
+          // hanya buyMsg di halaman belakang modal yang ditulis,
+          // sementara modal tetap terbuka — member melihat klik tanpa
+          // hasil. buyMsg tetap ditulis untuk log halaman.
+          const msg = e.message || 'Order gagal dibuat.';
+          $('buyMsg').textContent = msg;
+          $('buyPreviewMsg').textContent = msg;
+          $('buyPreviewMsg').classList.remove('hidden');
         } finally { btn.disabled = false; }
       });
       $('buyPreviewCancelBtn').addEventListener('click', () => {
