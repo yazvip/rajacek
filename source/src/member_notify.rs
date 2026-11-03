@@ -1343,11 +1343,68 @@ pub async fn notifications_status(
 pub struct LinkCodeResponse {
     pub code: String,
     pub expires_at: DateTime<Utc>,
-    /// Username bot untuk deep-link t.me. None = tidak ada konstanta
-    /// username di kode — portal menampilkan instruksi manual
+    /// Username bot untuk deep-link t.me, diambil server-side lewat
+    /// Bot API getMe (token tidak pernah keluar dari server; hanya
+    /// username publik yang dikembalikan). None = getMe gagal / bot
+    /// belum dikonfigurasi — portal menampilkan instruksi manual
     /// ("buka bot lalu kirim /start <kode>"), TIDAK mengarang username.
     pub bot_username: Option<String>,
     pub instruction: String,
+}
+
+/// Username bot Telegram valid: 5–32 karakter [A-Za-z0-9_].
+/// Dipakai untuk memvalidasi hasil getMe sebelum dirender jadi tautan.
+pub fn is_valid_bot_username(username: &str) -> bool {
+    let len = username.chars().count();
+    (5..=32).contains(&len)
+        && username
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Parser respons Bot API getMe -> username bot, atau None bila
+/// respons tidak ok / username tidak ada / format tidak valid.
+/// Fungsi murni (diuji tanpa HTTP nyata).
+pub fn parse_getme_username(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    if value.get("ok")?.as_bool()? != true {
+        return None;
+    }
+    let username = value.get("result")?.get("username")?.as_str()?;
+    if !is_valid_bot_username(username) {
+        return None;
+    }
+    Some(username.to_owned())
+}
+
+/// Deep-link t.me untuk membuka bot dengan payload /start.
+/// Username + kode sudah tervalidasi formatnya oleh pemanggil.
+pub fn telegram_deep_link(username: &str, code: &str) -> String {
+    format!("https://t.me/{username}?start={code}")
+}
+
+/// Ambil username bot server-side lewat Bot API getMe.
+/// Token didekripsi di server dan hanya dipakai di URL panggilan ini;
+/// yang dikembalikan ke pemanggil HANYA username publik. Gagal apa pun
+/// (bot belum dikonfigurasi, HTTP galat, respons tak terduga) -> None,
+/// supaya endpoint link-code tetap jalan dengan instruksi manual.
+pub async fn fetch_bot_username(
+    pool: &MySqlPool,
+    cipher: Option<&CredentialCipher>,
+) -> Option<String> {
+    let (token, _) = crate::telegram_settings::resolve_credentials(pool, cipher).await?;
+    let base_url = crate::alerts::telegram_base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .ok()?;
+    let body = client
+        .get(format!("{base_url}/bot{token}/getMe"))
+        .send()
+        .await
+        .ok()?;
+    let text = body.text().await.ok()?;
+    parse_getme_username(&text)
 }
 
 /// POST /v1/member/notifications/link-code — buat kode baru.
@@ -1358,12 +1415,16 @@ pub async fn create_link_code_endpoint(
     let session = crate::member::resolve_session(&state, &headers).await?;
     let member_id = require_member_uuid(&session)?;
     let pool = pool_or_503(&state)?;
+    let cipher = member_cipher(&state);
     let (code, expires_at) = create_link_code(&pool, &member_id, Utc::now().naive_utc()).await?;
+    // Username diambil live dari getMe; gagal -> None (portal fallback
+    // ke instruksi manual). Kegagalan getMe tidak menggagalkan kode.
+    let bot_username = fetch_bot_username(&pool, Some(&cipher)).await;
     Ok(Json(LinkCodeResponse {
         instruction: format!("Buka bot Telegram Rajacek lalu kirim /start {code}"),
         code,
         expires_at: expires_at.and_utc(),
-        bot_username: None,
+        bot_username,
     }))
 }
 
@@ -1497,6 +1558,38 @@ mod tests {
         assert!(!is_valid_link_code_format("ABCDEF1234567"));
         assert!(!is_valid_link_code_format("ABCDEF12345-"));
         assert!(!is_valid_link_code_format("ABCDEF12345 "));
+    }
+
+    #[test]
+    fn getme_username_parsing() {
+        assert_eq!(
+            parse_getme_username(r#"{"ok":true,"result":{"id":1,"is_bot":true,"first_name":"Rajacek","username":"rajacek_bot"}}"#),
+            Some("rajacek_bot".to_owned())
+        );
+        assert_eq!(parse_getme_username(r#"{"ok":false,"description":"Unauthorized"}"#), None);
+        assert_eq!(parse_getme_username(r#"{"ok":true,"result":{"id":1}}"#), None);
+        assert_eq!(
+            parse_getme_username(r#"{"ok":true,"result":{"username":"ab"}}"#),
+            None
+        );
+        assert_eq!(
+            parse_getme_username(r#"{"ok":true,"result":{"username":"bad-name!"}}"#),
+            None
+        );
+        assert_eq!(parse_getme_username("bukan json"), None);
+    }
+
+    #[test]
+    fn bot_username_validation_and_deep_link() {
+        assert!(is_valid_bot_username("rajacek_bot"));
+        assert!(is_valid_bot_username("a1234"));
+        assert!(!is_valid_bot_username("ab"));
+        assert!(!is_valid_bot_username("a".repeat(33).as_str()));
+        assert!(!is_valid_bot_username("bad-name"));
+        assert_eq!(
+            telegram_deep_link("rajacek_bot", "ABCDEF123456"),
+            "https://t.me/rajacek_bot?start=ABCDEF123456"
+        );
     }
 
     #[test]
