@@ -372,6 +372,9 @@ impl ProviderConfigStore {
             &number_param,
             key_param.as_deref(),
         )?;
+        // Kredensial boleh kosong HANYA untuk endpoint Generic: tanpa kunci,
+        // dispatch tidak mengirim header auth sama sekali (provider.rs).
+        // Mode Tukangcek/Cutiezy tetap wajib berkredensial.
         let api_key = match input.api_key.as_deref().map(str::trim) {
             Some(value) if !value.is_empty() => {
                 if value.len() > 4_096 {
@@ -380,9 +383,12 @@ impl ProviderConfigStore {
                 value.to_owned()
             }
             _ => {
-                return Err(AppError::bad_request(
-                    "Kredensial provider wajib diisi saat endpoint dibuat",
-                ))
+                if input.request_mode != crate::models::ProviderRequestMode::Generic {
+                    return Err(AppError::bad_request(
+                        "Kredensial provider wajib diisi saat endpoint dibuat",
+                    ));
+                }
+                String::new()
             }
         };
         let endpoint = ProviderEndpoint {
@@ -395,7 +401,7 @@ impl ProviderConfigStore {
             force_on: input.force_on,
             request_mode: input.request_mode,
             auth_header,
-            api_key_configured: true,
+            api_key_configured: !api_key.is_empty(),
             response_mapping: input.response_mapping,
             service_code_mapping: input.service_code_mapping,
             http_method,
@@ -463,7 +469,9 @@ impl ProviderConfigStore {
                 value.to_owned()
             }
             _ => {
-                if existing.api_key.is_empty() {
+                if existing.api_key.is_empty()
+                    && input.request_mode != crate::models::ProviderRequestMode::Generic
+                {
                     return Err(AppError::bad_request(
                         "Kredensial provider wajib diisi saat endpoint pertama kali dibuat",
                     ));
@@ -481,7 +489,7 @@ impl ProviderConfigStore {
             force_on: input.force_on,
             request_mode: input.request_mode,
             auth_header,
-            api_key_configured: true,
+            api_key_configured: !api_key.is_empty(),
             response_mapping: input.response_mapping,
             service_code_mapping: input.service_code_mapping,
             http_method,
@@ -1530,6 +1538,146 @@ mod tests {
 
     use crate::models::ValidationProduct;
     use std::net::{IpAddr, Ipv4Addr};
+
+    use super::{CredentialCipher, ProviderConfigStore};
+    use crate::models::{
+        CreateProviderEndpointRequest, ProviderRequestMode, ProviderResponseMapping,
+        UpdateProviderEndpointRequest,
+    };
+    use std::collections::HashMap;
+    use tokio::sync::RwLock;
+
+    fn test_store() -> ProviderConfigStore {
+        ProviderConfigStore {
+            entries: RwLock::new(HashMap::new()),
+            pool: None,
+            cipher: CredentialCipher::new(None),
+            production: false,
+            allowed_hosts: Vec::new(),
+        }
+    }
+
+    fn bank_input(
+        mode: ProviderRequestMode,
+        api_key: Option<String>,
+    ) -> CreateProviderEndpointRequest {
+        CreateProviderEndpointRequest {
+            product: ValidationProduct::BankAccount,
+            name: "Manual PayMobile".to_owned(),
+            base_url: "https://127.0.0.1/tes.php".to_owned(),
+            api_key,
+            timeout_ms: 10_000,
+            request_mode: mode,
+            auth_header: "X-Api-Key".to_owned(),
+            response_mapping: ProviderResponseMapping::default_for(
+                ValidationProduct::BankAccount,
+            ),
+            service_code_mapping: HashMap::new(),
+            http_method: "GET".to_owned(),
+            code_param: "code".to_owned(),
+            number_param: "nomor".to_owned(),
+            key_param: None,
+            active: true,
+            force_on: false,
+        }
+    }
+
+    fn bank_update_input(
+        mode: ProviderRequestMode,
+        api_key: Option<String>,
+    ) -> UpdateProviderEndpointRequest {
+        UpdateProviderEndpointRequest {
+            name: "Manual PayMobile".to_owned(),
+            base_url: "https://127.0.0.1/tes.php".to_owned(),
+            api_key,
+            timeout_ms: 10_000,
+            request_mode: mode,
+            auth_header: "X-Api-Key".to_owned(),
+            response_mapping: ProviderResponseMapping::default_for(
+                ValidationProduct::BankAccount,
+            ),
+            service_code_mapping: HashMap::new(),
+            http_method: "GET".to_owned(),
+            code_param: "code".to_owned(),
+            number_param: "nomor".to_owned(),
+            key_param: None,
+            active: true,
+            force_on: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_create_without_credential_succeeds() {
+        let store = test_store();
+        let created = store
+            .create(bank_input(ProviderRequestMode::Generic, None))
+            .await
+            .expect("Generic tanpa kredensial harus bisa dibuat");
+        assert!(
+            !created.api_key_configured,
+            "tanpa kunci, penanda api_key_configured harus false"
+        );
+        let stored = store.entries.read().await;
+        let record = stored.get(&created.id).expect("endpoint harus tersimpan");
+        assert!(record.api_key.is_empty(), "kunci tersimpan harus kosong");
+    }
+
+    #[tokio::test]
+    async fn generic_create_with_credential_still_configured() {
+        let store = test_store();
+        let created = store
+            .create(bank_input(
+                ProviderRequestMode::Generic,
+                Some("kunci-dummy".to_owned()),
+            ))
+            .await
+            .expect("Generic berkredensial tetap bisa dibuat");
+        assert!(created.api_key_configured);
+    }
+
+    #[tokio::test]
+    async fn non_generic_create_without_credential_rejected() {
+        let store = test_store();
+        let error = store
+            .create(bank_input(ProviderRequestMode::Tukangcek, None))
+            .await
+            .expect_err("Tukangcek tanpa kredensial harus ditolak");
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn generic_update_keeps_empty_credential() {
+        let store = test_store();
+        let created = store
+            .create(bank_input(ProviderRequestMode::Generic, None))
+            .await
+            .expect("buat Generic tanpa kredensial");
+        let updated = store
+            .update_by_id(
+                created.id,
+                bank_update_input(ProviderRequestMode::Generic, None),
+            )
+            .await
+            .expect("update Generic tanpa kredensial harus lolos");
+        assert!(!updated.api_key_configured);
+    }
+
+    #[tokio::test]
+    async fn switch_to_non_generic_without_credential_rejected() {
+        let store = test_store();
+        let created = store
+            .create(bank_input(ProviderRequestMode::Generic, None))
+            .await
+            .expect("buat Generic tanpa kredensial");
+        let error = store
+            .update_by_id(
+                created.id,
+                bank_update_input(ProviderRequestMode::Tukangcek, None),
+            )
+            .await
+            .expect_err("pindah ke Tukangcek tanpa kredensial harus ditolak");
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+    }
 
     #[test]
     fn empty_auth_header_allowed_only_for_generic() {

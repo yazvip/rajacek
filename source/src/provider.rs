@@ -611,9 +611,13 @@ impl HttpProvider {
             };
             // B5: an empty auth_header (storable only for Generic
             // endpoints) means NO auth header is sent at all — neither
-            // for Generic GET nor Generic POST. Endpoints that do set a
-            // header behave exactly as before.
-            let (auth_header, auth_value) = if endpoint.auth_header.trim().is_empty() {
+            // for Generic GET nor Generic POST. Same for an empty api_key:
+            // a Generic endpoint created without a credential sends no
+            // auth header either. Endpoints that do set both behave
+            // exactly as before.
+            let (auth_header, auth_value) = if endpoint.auth_header.trim().is_empty()
+                || endpoint.api_key.is_empty()
+            {
                 (None, None)
             } else {
                 let header =
@@ -2913,6 +2917,7 @@ mod pacer_failure_tests {
     use crate::provider_guard::{ProviderGuard, ProviderGuardConfig};
     use std::io::{Read, Write};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     fn test_config() -> AppConfig {
         AppConfig {
@@ -3054,6 +3059,108 @@ mod pacer_failure_tests {
             !provider_failure,
             "gagal pacer pada retry tidak boleh dicatat sebagai kegagalan \
              provider (breaker): flag harus false"
+        );
+    }
+
+    /// Server lokal sekali-pakai yang mencatat apakah header X-Api-Key
+    /// ikut terkirim, lalu menjawab HTTP 500.
+    fn serve_capture_api_key_header() -> (u16, Arc<AtomicBool>) {
+        let seen = Arc::new(AtomicBool::new(false));
+        let seen_in_thread = Arc::clone(&seen);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind lokal");
+        let port = listener.local_addr().expect("alamat lokal").port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buffer = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                loop {
+                    match stream.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            buffer.extend_from_slice(&chunk[..read]);
+                            if buffer
+                                .windows(4)
+                                .position(|window| window == b"\r\n\r\n")
+                                .is_some()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let text = String::from_utf8_lossy(&buffer).into_owned().to_ascii_lowercase();
+                if text.contains("x-api-key:") {
+                    seen_in_thread.store(true, Ordering::SeqCst);
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 2\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",
+                );
+                let _ = stream.flush();
+            }
+        });
+        (port, seen)
+    }
+
+    async fn api_key_header_seen(api_key: &str) -> bool {
+        let guard = Arc::new(ProviderGuard::new(ProviderGuardConfig {
+            max_concurrency_per_product: 16,
+            max_concurrency_pln: 3,
+            queue_wait_ms: 2_000,
+            failure_threshold: 1,
+            cooldown_seconds: 60,
+            max_attempts: 1,
+            pace_interval_ms: 100,
+            pace_max_wait_ms: 5_000,
+        }));
+        let configs = ProviderConfigStore::build(&test_config())
+            .await
+            .expect("store tanpa DB");
+        let provider = HttpProvider::new(configs, Arc::clone(&guard));
+        let (port, seen) = serve_capture_api_key_header();
+        let endpoint = crate::provider_config::ResolvedProviderEndpoint {
+            id: uuid::Uuid::now_v7(),
+            product: ValidationProduct::BankAccount,
+            name: "uji".to_owned(),
+            base_url: format!("http://127.0.0.1:{port}/check"),
+            force_on: false,
+            api_key: api_key.to_owned(),
+            timeout_ms: 5_000,
+            request_mode: ProviderRequestMode::Generic,
+            auth_header: "X-Api-Key".to_owned(),
+            response_mapping: ProviderResponseMapping::default_for(
+                ValidationProduct::BankAccount,
+            ),
+            service_code_mapping: std::collections::HashMap::new(),
+            http_method: "POST".to_owned(),
+            code_param: "code".to_owned(),
+            number_param: "number".to_owned(),
+            key_param: None,
+        };
+        let request = ProviderValidationRequest {
+            product: ValidationProduct::BankAccount,
+            provider_hint: Some("002".to_owned()),
+            target: "1234567890".to_owned(),
+        };
+        let (result, _, _) = provider
+            .validate_upstream_endpoint(&endpoint, request, false)
+            .await;
+        assert!(result.is_err(), "mock 500 harus gagal");
+        seen.load(Ordering::SeqCst)
+    }
+
+    #[tokio::test]
+    async fn empty_credential_sends_no_auth_header() {
+        assert!(
+            !api_key_header_seen("").await,
+            "tanpa kredensial, header X-Api-Key tidak boleh terkirim"
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_present_sends_auth_header() {
+        assert!(
+            api_key_header_seen("kunci-dummy").await,
+            "dengan kredensial, header X-Api-Key harus terkirim"
         );
     }
 }
