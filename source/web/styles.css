@@ -1597,6 +1597,25 @@ td.empty-state { display: table-cell; }
 .member-usage-bar > .usage-invalid { background: var(--rose); }
 .usage-legend-valid { color: var(--brand); }
 .usage-legend-invalid { color: var(--rose); }
+/* Detail member sebagai halaman sendiri: hero identitas, kartu
+   statistik, dan grid 2 kolom (kolom samping 340px) yang runtuh
+   jadi 1 kolom di bawah 1024px. */
+#view-member-detail > * + * { margin-top: 20px; }
+.member-hero { display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start; }
+.member-hero-identity { display: flex; gap: 14px; align-items: center; min-width: 0; flex: 1 1 280px; }
+.member-avatar { flex: none; width: 56px; height: 56px; border-radius: 50%; background: var(--brand); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; }
+.member-hero-name { font-size: 17px; font-weight: 700; color: var(--ink); overflow-wrap: anywhere; }
+.member-hero-email { margin-top: 2px; color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.member-hero-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.member-hero-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 20px; margin: 0; flex: 1 1 280px; }
+.member-hero-meta dt { color: var(--muted); font-size: 11px; }
+.member-hero-meta dd { margin: 2px 0 0; font-weight: 600; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
+.member-detail-grid { display: grid; gap: 20px; }
+.member-detail-main > .panel + .panel, .member-detail-side > .panel + .panel { margin-top: 20px; }
+@media (min-width: 1024px) {
+  .member-detail-grid { grid-template-columns: minmax(0, 1fr) 340px; }
+  .member-hero-meta { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
 #view-orders #orders-recon { padding: 0 20px; }
 #view-orders #alert-status { margin: 0; padding: 0 20px; }
 #view-orders .data-panel > .form-actions { margin-top: 0; padding: 16px 20px 20px; }

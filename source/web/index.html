@@ -10,7 +10,7 @@
     <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
     <link rel="icon" href="/favicon.png?v=20261028-1" />
-    <link rel="stylesheet" href="/styles.css?v=20261102-1" />
+    <link rel="stylesheet" href="/styles.css?v=20261106-2" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -317,30 +317,40 @@
             <p id="member-new-key" class="tester-audit-note" hidden></p>
             </article>
 
-            <article class="panel" id="member-detail-panel" hidden><div class="panel-heading"><div><span class="section-kicker">Detail member</span><h2 id="member-detail-title">—</h2><p class="tester-audit-note" id="member-detail-sub" style="margin:4px 0 0;"></p></div><button class="button button-secondary" id="member-detail-close" type="button">Tutup</button></div>
-            <h3>Ubah email member</h3>
-            <p class="tester-audit-note">Untuk member yang lupa atau tidak punya akses ke email Google lamanya. Setelah email diubah, member login lagi dengan akun Google baru yang emailnya sama dengan email baru ini — akun itu otomatis tertaut ke member yang sama (kuota dan riwayat tetap). Login Google lama langsung putus.</p>
-            <div class="form-grid"><label>Email baru<input id="member-email-new" type="email" placeholder="email-baru@contoh.id" autocomplete="off" /></label><div class="form-actions"><button class="button button-secondary" id="member-email-change" type="button">Ubah email</button></div></div>
-            <p class="tester-audit-note" id="member-email-change-result"></p>
-            <h3>Kunci</h3>
-            <div class="table-scroll"><table><thead><tr><th>Kunci</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Gratis invalid hari ini</th><th>Adjust kuota manual</th></tr></thead><tbody id="member-detail-keys"></tbody></table></div>
-            <p class="tester-audit-note">Adjust kuota bersifat relatif (sisa ditambah/dikurangi delta, bukan di-set absolut) dan selalu dicatat di Aktivitas beserta alasan. Delta positif yang melampaui total ikut menaikkan total; delta negatif tidak mengubah total.</p>
-            <div id="member-detail-buckets-wrap" hidden>
-            <h3>Kuota per paket</h3>
-            <p class="tester-audit-note">Setiap pembelian adalah paket tersendiri; pemakaian menghabiskan paket yang paling cepat kedaluwarsa dulu. Paket yang kedaluwarsa tidak lagi bisa dipakai, walau paket lain masih aktif.</p>
-            <div id="member-detail-buckets"></div>
-            </div>
-            <h3>Order</h3>
-            <div class="table-scroll"><table><thead><tr><th>Waktu</th><th>Paket</th><th>Nominal</th><th>Status</th><th>Grant</th></tr></thead><tbody id="member-detail-orders"></tbody></table></div>
-            <div class="form-actions full-width"><button class="button button-secondary" id="member-detail-orders-prev" type="button">← Sebelumnya</button><span id="member-detail-orders-info" class="tester-audit-note"></span><button class="button button-secondary" id="member-detail-orders-next" type="button">Berikutnya →</button></div>
-            <h3>Pemakaian 30 hari terakhir</h3>
-            <p class="tester-audit-note"><span class="usage-legend-valid">■</span> Valid &nbsp; <span class="usage-legend-invalid">■</span> Tidak valid &nbsp;·&nbsp; arahkan kursor ke bar untuk rincian harian.</p>
-            <p class="tester-audit-note" id="member-detail-usage-note"></p>
-            <div id="member-detail-usage"></div>
-            </article>
-
             <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Trial pendaftaran</span><h2>Paket trial member baru</h2></div><span class="count-chip">Berlaku untuk pendaftaran berikutnya</span></div>
             <form id="trial-form" class="form-grid"><label>Kuota trial (hit)<input id="trial-quota" type="number" min="1" max="100000" step="1" required /></label><label>Masa aktif trial (hari)<input id="trial-days" type="number" min="1" max="90" step="1" required /></label><div class="form-actions"><button class="button button-primary" type="submit">Simpan pengaturan trial</button></div></form></article>
+          </section>
+
+          <section class="view" id="view-member-detail" aria-labelledby="member-detail-title">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Member · <span id="member-detail-crumb-code">—</span></div><h1 id="member-detail-title">—</h1><p id="member-detail-sub">—</p></div><button class="button button-secondary" id="member-detail-close" type="button">← Kembali ke Daftar Member</button></div>
+            <div class="panel member-hero">
+              <div class="member-hero-identity"><span class="member-avatar" id="member-detail-avatar">—</span><div class="member-hero-main"><div class="member-hero-name" id="member-detail-hero-name">—</div><div class="member-hero-email" id="member-detail-hero-email">—</div><div class="member-hero-chips" id="member-detail-chips"></div></div></div>
+              <dl class="member-hero-meta" id="member-detail-meta"></dl>
+            </div>
+            <div class="metric-grid" id="member-detail-stats"></div>
+            <div class="member-detail-grid">
+              <div class="member-detail-main">
+                <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Kunci API</span><h2>Kunci</h2></div></div>
+                <div class="table-scroll"><table><thead><tr><th>Kunci</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Gratis invalid hari ini</th><th>Adjust kuota manual</th></tr></thead><tbody id="member-detail-keys"></tbody></table></div>
+                <p class="tester-audit-note">Adjust kuota bersifat relatif (sisa ditambah/dikurangi delta, bukan di-set absolut) dan selalu dicatat di Aktivitas beserta alasan. Delta positif yang melampaui total ikut menaikkan total; delta negatif tidak mengubah total.</p></article>
+                <article class="panel" id="member-detail-buckets-wrap" hidden><div class="panel-heading"><div><span class="section-kicker">Bucket FIFO</span><h2>Kuota per paket</h2></div></div>
+                <p class="tester-audit-note">Setiap pembelian adalah paket tersendiri; pemakaian menghabiskan paket yang paling cepat kedaluwarsa dulu. Paket yang kedaluwarsa tidak lagi bisa dipakai, walau paket lain masih aktif.</p>
+                <div id="member-detail-buckets"></div></article>
+                <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Pembelian</span><h2>Order</h2></div></div>
+                <div class="table-scroll"><table><thead><tr><th>Waktu</th><th>Paket</th><th>Nominal</th><th>Status</th><th>Grant</th></tr></thead><tbody id="member-detail-orders"></tbody></table></div>
+                <div class="form-actions full-width"><button class="button button-secondary" id="member-detail-orders-prev" type="button">← Sebelumnya</button><span id="member-detail-orders-info" class="tester-audit-note"></span><button class="button button-secondary" id="member-detail-orders-next" type="button">Berikutnya →</button></div></article>
+              </div>
+              <div class="member-detail-side">
+                <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Aktivitas</span><h2>Pemakaian 30 hari terakhir</h2></div></div>
+                <p class="tester-audit-note"><span class="usage-legend-valid">■</span> Valid &nbsp; <span class="usage-legend-invalid">■</span> Tidak valid &nbsp;·&nbsp; arahkan kursor ke bar untuk rincian harian.</p>
+                <p class="tester-audit-note" id="member-detail-usage-note"></p>
+                <div id="member-detail-usage"></div></article>
+                <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Akun</span><h2>Ubah email member</h2></div></div>
+                <p class="tester-audit-note">Untuk member yang lupa atau tidak punya akses ke email Google lamanya. Setelah email diubah, member login lagi dengan akun Google baru yang emailnya sama dengan email baru ini — akun itu otomatis tertaut ke member yang sama (kuota dan riwayat tetap). Login Google lama langsung putus.</p>
+                <div class="form-grid"><label>Email baru<input id="member-email-new" type="email" placeholder="email-baru@contoh.id" autocomplete="off" /></label><div class="form-actions"><button class="button button-secondary" id="member-email-change" type="button">Ubah email</button></div></div>
+                <p class="tester-audit-note" id="member-email-change-result"></p></article>
+              </div>
+            </div>
           </section>
 
           <section class="view" id="view-orders" aria-labelledby="orders-heading">
@@ -446,6 +456,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261103-1" defer></script>
+    <script src="/app.js?v=20261106-1" defer></script>
   </body>
 </html>

@@ -48,6 +48,7 @@
     "rate-limits": "Rate Limit",
     "api-keys": "Kunci API",
     members: "Member",
+    "member-detail": "Detail Member",
     orders: "Order QRIS",
     activity: "Aktivitas",
     admins: "Admin",
@@ -449,8 +450,10 @@
     $$(".view").forEach((element) => {
       element.classList.toggle("is-visible", element.id === `view-${view}`);
     });
+    // Detail member adalah anak halaman Member: sorot nav Member.
+    const navTarget = view === "member-detail" ? "members" : view;
     $$(".nav-link[data-view-target]").forEach((element) => {
-      element.classList.toggle("is-active", element.dataset.viewTarget === view);
+      element.classList.toggle("is-active", element.dataset.viewTarget === navTarget);
     });
     $("#breadcrumb-title").textContent = viewLabels[view];
     if (view === "history" && !state.history.loaded) loadHistory().catch(handleApiError);
@@ -2099,7 +2102,7 @@
     state.memberDetailPage.offset = 0;
     try {
       await loadMemberDetail(memberId);
-      $("#member-detail-panel").scrollIntoView({ behavior: "smooth", block: "start" });
+      setActiveView("member-detail");
     } catch (error) {
       handleApiError(error);
     }
@@ -2122,15 +2125,27 @@
     const member = detail.member;
     const planLabel = { trial: "Trial", package: "Paket", manual: "Manual", umum: "Umum" };
     const planEffective = member.plan_effective || member.plan_kind;
-    $("#member-detail-title").textContent = member.name || member.email;
-    $("#member-detail-sub").textContent = `${member.email} · Kode member: ${member.member_code || "—"} · ${member.status === "active" ? "Aktif" : "Nonaktif"} · Plan ${planLabel[planEffective] || planEffective} · Daftar ${formatDate(member.created_at)} · Login terakhir ${member.last_login_at ? formatDate(member.last_login_at) : "—"} · Telegram: ${member.telegram_linked ? `Terhubung${member.telegram_linked_at ? ` sejak ${formatDate(member.telegram_linked_at)}` : ""}` : "Belum terhubung"}`;
+    const displayName = member.name || member.email;
+    $("#member-detail-title").textContent = displayName;
+    $("#member-detail-sub").textContent = member.email;
+    $("#member-detail-crumb-code").textContent = member.member_code || "—";
+    const initials = displayName.trim().split(/\s+/).slice(0, 2).map((word) => word[0]).join("").toUpperCase() || "?";
+    $("#member-detail-avatar").textContent = initials;
+    $("#member-detail-hero-name").textContent = displayName;
+    $("#member-detail-hero-email").textContent = member.email;
+    $("#member-detail-chips").innerHTML = `<span class="status-badge ${member.status === "active" ? "valid" : "invalid"}">${member.status === "active" ? "Aktif" : "Nonaktif"}</span><span class="count-chip">Plan ${escapeHtml(planLabel[planEffective] || planEffective)}</span><span class="count-chip">${member.telegram_linked ? "Telegram terhubung" : "Telegram belum terhubung"}</span>`;
+    $("#member-detail-meta").innerHTML = [
+      ["Kode member", member.member_code || "—"],
+      ["Daftar", formatDate(member.created_at)],
+      ["Login terakhir", member.last_login_at ? formatDate(member.last_login_at) : "—"],
+      ["Telegram", member.telegram_linked ? `Terhubung${member.telegram_linked_at ? ` sejak ${formatDate(member.telegram_linked_at)}` : ""}` : "Belum terhubung"],
+    ].map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
     // Formulir ubah email selalu mulai bersih agar nilai member
     // sebelumnya tidak terbawa; onclick (bukan addEventListener) agar
     // render ulang tidak menumpuk handler.
     $("#member-email-new").value = "";
     $("#member-email-change-result").textContent = "";
     $("#member-email-change").onclick = submitMemberEmailChange;
-    $("#member-detail-panel").hidden = false;
     const statusLabel = { active: "Aktif", disabled: "Nonaktif", revoked: "Dicabut" };
     $("#member-detail-keys").innerHTML = detail.keys.length ? detail.keys.map((key) => `<tr>
       <td data-label="Kunci"><code>${escapeHtml(key.prefix)}</code><br /><span class="tester-audit-note">${escapeHtml(key.name)}</span></td>
@@ -2163,6 +2178,13 @@
         return new Date(a.expires_at) - new Date(b.expires_at);
       }).map((bucket) => `<div class="member-bucket-row"><span class="member-bucket-name">${escapeHtml(bucket.package_name || "Paket")}</span><span class="member-bucket-hits">${formatNumber(bucket.remaining_hits || 0)} / ${formatNumber(bucket.total_hits || 0)} hit</span><span class="tester-audit-note" style="margin:0;">${bucket.expires_at ? `s/d ${escapeHtml(formatDate(bucket.expires_at))}` : "Tanpa kedaluwarsa"}</span></div>`).join("") : "";
     }
+    const quotaRemaining = detail.keys.reduce((sum, key) => sum + (key.quota_remaining || 0), 0);
+    const quotaTotal = detail.keys.reduce((sum, key) => sum + (key.quota_total || 0), 0);
+    const validTotal = detail.usage.reduce((sum, day) => sum + (day.valid_hits || 0), 0);
+    const invalidTotal = detail.usage.reduce((sum, day) => sum + (day.invalid_hits || 0), 0);
+    const activeKeys = detail.keys.filter((key) => key.status === "active").length;
+    const nearestExpiry = [...detailBuckets].filter((bucket) => bucket.expires_at).map((bucket) => new Date(bucket.expires_at)).sort((a, b) => a - b)[0];
+    $("#member-detail-stats").innerHTML = `<article class="metric-card"><div><span>Kuota sisa</span><strong>${formatNumber(quotaRemaining)} hit</strong><small>dari ${formatNumber(quotaTotal)} total</small></div></article><article class="metric-card"><div><span>Hit 30 hari</span><strong>${formatNumber(detail.usage_total_charged)} hit</strong><small>${formatNumber(validTotal)} valid · ${formatNumber(invalidTotal)} tidak valid</small></div></article><article class="metric-card"><div><span>Kunci aktif</span><strong>${formatNumber(activeKeys)}</strong><small>dari ${formatNumber(detail.keys.length)} kunci</small></div></article><article class="metric-card"><div><span>Paket aktif</span><strong>${formatNumber(detailBuckets.length)}</strong><small>${detailBuckets.length ? (nearestExpiry ? `tercepat kedaluwarsa ${formatDate(nearestExpiry.toISOString())}` : "tanpa kedaluwarsa") : "belum ada paket aktif"}</small></div></article>`;
     const orderLabel = { waiting_payment: "Menunggu bayar", paid: "Lunas (belum grant)", granted: "Ter-grant", expired: "Kedaluwarsa", canceled: "Dibatalkan", needs_review: "Perlu tinjauan" };
     $("#member-detail-orders").innerHTML = detail.orders.length ? detail.orders.map((order) => `<tr>
       <td data-label="Waktu">${escapeHtml(formatDate(order.created_at))}</td>
@@ -3207,8 +3229,8 @@
       state.managedMemberId = null;
     });
     $("#member-detail-close")?.addEventListener("click", () => {
-      $("#member-detail-panel").hidden = true;
       state.memberDetail = null;
+      setActiveView("members");
     });
     $("#member-detail-orders-prev")?.addEventListener("click", async () => {
       if (!state.memberDetail || state.memberDetailPage.offset <= 0) return;
