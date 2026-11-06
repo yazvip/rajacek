@@ -1611,6 +1611,37 @@ td.empty-state { display: table-cell; }
 .member-hero-meta dt { color: var(--muted); font-size: 11px; }
 .member-hero-meta dd { margin: 2px 0 0; font-weight: 600; font-size: 13px; color: var(--ink); overflow-wrap: anywhere; }
 .member-detail-grid { display: grid; gap: 20px; }
+/* ------------------------------------------------------------------
+   Perbaikan responsif halaman Detail Member di HP (2026-11-06,
+   dari screenshot user 14:01 WIB).
+   Akar (sama seperti tabel rute provider 26 Okt): tabel width:100%
+   di layar HP menjepit kolom KUNCI sampai ~60px, lalu
+   `overflow-wrap: anywhere` global menghancurkan kode kunci per
+   huruf ("rc_u/r8fP7/TnY") dan nama member patah per kata; form
+   Adjust terjepit di kolom ~100px. Anak grid tanpa min-width:0 juga
+   bisa memaksa track grid lebih lebar dari viewport (scrollbar
+   horizontal halaman).
+   Perbaikan (CSS saja, scoped ke halaman ini): tabel diberi lebar
+   minimum agar kolom punya ruang baca dan .table-scroll menggeser
+   horizontal; sel pendek tidak membungkus, hanya kolom nama kunci
+   dan nama paket yang boleh membungkus (di spasi); panel Kunci
+   dibuat full-width (pindah ke atas grid di index.html) supaya di
+   desktop tidak ikut terjepit kolom samping 340px; heading menumpuk
+   di HP supaya tombol kembali tidak menempel judul. */
+#view-member-detail .table-scroll table { min-width: 640px; }
+#view-member-detail > article.panel .table-scroll table { min-width: 960px; }
+#member-detail-keys td { overflow-wrap: normal; }
+#member-detail-keys td:first-child code { white-space: nowrap; }
+#member-detail-keys td:nth-child(2),
+#member-detail-keys td:nth-child(3),
+#member-detail-keys td:nth-child(4),
+#member-detail-keys td:nth-child(5),
+#member-detail-keys td:nth-child(6) { white-space: nowrap; }
+#member-detail-orders td { white-space: nowrap; }
+#member-detail-orders td:nth-child(2) { white-space: normal; }
+@media (max-width: 640px) {
+  #view-member-detail .heading-row { flex-direction: column; align-items: flex-start; }
+}
 .member-detail-main > .panel + .panel, .member-detail-side > .panel + .panel { margin-top: 20px; }
 @media (min-width: 1024px) {
   .member-detail-grid { grid-template-columns: minmax(0, 1fr) 340px; }
@@ -1772,7 +1803,7 @@ td.empty-state { display: table-cell; }
 /* ------------------------------------------------------------------ responsif */
 .metric-grid > *, .overview-grid > *, .product-grid > *, .package-grid > *,
 .settings-grid > *, .tester-layout > *, .form-grid > *, .history-stats > *,
-.order-fields > * { min-width: 0; }
+.member-detail-grid > *, .order-fields > * { min-width: 0; }
 @media (min-width: 640px) {
   .metric-grid { grid-template-columns: repeat(2, 1fr); }
   .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

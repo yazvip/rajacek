@@ -10,7 +10,7 @@
     <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
     <link rel="icon" href="/favicon.png?v=20261028-1" />
-    <link rel="stylesheet" href="/styles.css?v=20261106-2" />
+    <link rel="stylesheet" href="/styles.css?v=20261106-3" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -328,11 +328,11 @@
               <dl class="member-hero-meta" id="member-detail-meta"></dl>
             </div>
             <div class="metric-grid" id="member-detail-stats"></div>
+            <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Kunci API</span><h2>Kunci</h2></div></div>
+            <div class="table-scroll"><table><thead><tr><th>Kunci</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Gratis invalid hari ini</th><th>Adjust kuota manual</th></tr></thead><tbody id="member-detail-keys"></tbody></table></div>
+            <p class="tester-audit-note">Adjust kuota bersifat relatif (sisa ditambah/dikurangi delta, bukan di-set absolut) dan selalu dicatat di Aktivitas beserta alasan. Delta positif yang melampaui total ikut menaikkan total; delta negatif tidak mengubah total.</p></article>
             <div class="member-detail-grid">
               <div class="member-detail-main">
-                <article class="panel"><div class="panel-heading"><div><span class="section-kicker">Kunci API</span><h2>Kunci</h2></div></div>
-                <div class="table-scroll"><table><thead><tr><th>Kunci</th><th>Status</th><th>Kuota (sisa/total)</th><th>Aktif s/d</th><th>Rate limit</th><th>Gratis invalid hari ini</th><th>Adjust kuota manual</th></tr></thead><tbody id="member-detail-keys"></tbody></table></div>
-                <p class="tester-audit-note">Adjust kuota bersifat relatif (sisa ditambah/dikurangi delta, bukan di-set absolut) dan selalu dicatat di Aktivitas beserta alasan. Delta positif yang melampaui total ikut menaikkan total; delta negatif tidak mengubah total.</p></article>
                 <article class="panel" id="member-detail-buckets-wrap" hidden><div class="panel-heading"><div><span class="section-kicker">Bucket FIFO</span><h2>Kuota per paket</h2></div></div>
                 <p class="tester-audit-note">Setiap pembelian adalah paket tersendiri; pemakaian menghabiskan paket yang paling cepat kedaluwarsa dulu. Paket yang kedaluwarsa tidak lagi bisa dipakai, walau paket lain masih aktif.</p>
                 <div id="member-detail-buckets"></div></article>
