@@ -2178,7 +2178,7 @@
     $("#member-detail-usage-note").textContent = detail.usage_source === "ledger"
       ? `Total ${formatNumber(detail.usage_total_charged)} hit tertagih dalam ${detail.usage_days} hari terakhir (dari ledger; hit gratis pool invalid tidak masuk hitungan ini).`
       : "Pemakaian tidak tersedia (database tidak terhubung).";
-    $("#member-detail-usage").innerHTML = detail.usage.map((day) => `<div class="member-usage-row"><span>${escapeHtml(day.date)}</span><span class="member-usage-bar"><span style="width:${Math.round((day.charged_hits / maxUsage) * 100)}%"></span></span><strong>${formatNumber(day.charged_hits)}</strong></div>`).join("");
+    $("#member-detail-usage").innerHTML = detail.usage.map((day) => `<div class="member-usage-row"><span>${escapeHtml(day.date)}</span><span class="member-usage-bar" title="${formatNumber(day.valid_hits)} valid · ${formatNumber(day.invalid_hits)} tidak valid"><span class="usage-valid" style="width:${Math.round((day.valid_hits / maxUsage) * 100)}%"></span><span class="usage-invalid" style="width:${Math.round((day.invalid_hits / maxUsage) * 100)}%"></span></span><strong>${formatNumber(day.charged_hits)}</strong></div>`).join("");
   }
 
   async function submitMemberEmailChange() {

@@ -1591,8 +1591,12 @@ td.empty-state { display: table-cell; }
 .member-adjust-form input[type="number"] { flex: none; }
 .member-adjust-form button { flex: none; }
 #member-detail-keys p[data-adjust-result]:empty { margin-top: 0; }
-.member-usage-bar { flex: 1 1 120px; background: var(--line-soft); }
-.member-usage-bar > span { display: block; height: 100%; background: var(--brand); border-radius: 999px; }
+.member-usage-bar { flex: 1 1 120px; background: var(--line-soft); display: flex; overflow: hidden; }
+.member-usage-bar > span { display: block; height: 100%; }
+.member-usage-bar > .usage-valid { background: var(--brand); }
+.member-usage-bar > .usage-invalid { background: var(--rose); }
+.usage-legend-valid { color: var(--brand); }
+.usage-legend-invalid { color: var(--rose); }
 #view-orders #orders-recon { padding: 0 20px; }
 #view-orders #alert-status { margin: 0; padding: 0 20px; }
 #view-orders .data-panel > .form-actions { margin-top: 0; padding: 16px 20px 20px; }

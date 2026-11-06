@@ -413,6 +413,11 @@ pub struct QuotaAdjustment {
 pub struct MemberDailyUsage {
     pub date: String,
     pub charged_hits: i64,
+    /// Hit tertagih ber-outcome valid + not_kyc (konvensi "Sukses" yang
+    /// sama dengan tab analitik: Belum KYC dihitung sukses).
+    pub valid_hits: i64,
+    /// Hit tertagih ber-outcome invalid + not_found.
+    pub invalid_hits: i64,
 }
 
 /// Aturan total untuk adjust kuota manual (Area 4) — dirumuskan di sini
@@ -2769,7 +2774,9 @@ pub async fn prune_old_raw_targets(
         // jadi interpolasi ke INTERVAL aman; prefix tetap di-bind.
         let mut builder = sqlx::QueryBuilder::new(
             "SELECT DATE_FORMAT(CONVERT_TZ(occurred_at, '+00:00', '+07:00'), '%Y-%m-%d') AS day, \
-             CAST(COALESCE(SUM(quantity), 0) AS SIGNED) AS hits \
+             CAST(COALESCE(SUM(quantity), 0) AS SIGNED) AS hits, \
+             CAST(COALESCE(SUM(CASE WHEN outcome IN ('valid', 'not_kyc') THEN quantity ELSE 0 END), 0) AS SIGNED) AS valid_hits, \
+             CAST(COALESCE(SUM(CASE WHEN outcome IN ('invalid', 'not_found') THEN quantity ELSE 0 END), 0) AS SIGNED) AS invalid_hits \
              FROM usage_ledger WHERE operation = 'charge' AND api_key_prefix IN (",
         );
         let mut separated = builder.separated(", ");
@@ -2781,14 +2788,19 @@ pub async fn prune_old_raw_targets(
             " AND occurred_at >= UTC_TIMESTAMP() - INTERVAL {days} DAY \
              GROUP BY day ORDER BY day"
         ));
-        let rows: Vec<(String, i64)> = builder
+        let rows: Vec<(String, i64, i64, i64)> = builder
             .build_query_as()
             .fetch_all(&pool)
             .await
             .unwrap_or_default();
         rows
             .into_iter()
-            .map(|(date, charged_hits)| MemberDailyUsage { date, charged_hits })
+            .map(|(date, charged_hits, valid_hits, invalid_hits)| MemberDailyUsage {
+                date,
+                charged_hits,
+                valid_hits,
+                invalid_hits,
+            })
             .collect()
     }
 

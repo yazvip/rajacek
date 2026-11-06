@@ -4386,6 +4386,8 @@ struct MemberDetailKeyView {
 struct MemberDailyUsageView {
     date: String,
     charged_hits: i64,
+    valid_hits: i64,
+    invalid_hits: i64,
 }
 
 /// Admin-only serialization of a member account for the detail response:
@@ -4482,16 +4484,19 @@ fn fill_usage_days(
     sparse: &[crate::store::MemberDailyUsage],
 ) -> Vec<MemberDailyUsageView> {
     let days = days.clamp(1, 90);
-    let by_date: std::collections::HashMap<&str, i64> = sparse
+    let by_date: std::collections::HashMap<&str, &crate::store::MemberDailyUsage> = sparse
         .iter()
-        .map(|entry| (entry.date.as_str(), entry.charged_hits))
+        .map(|entry| (entry.date.as_str(), entry))
         .collect();
     (0..days)
         .map(|index| {
             let date = today - chrono::Duration::days(i64::from(days - 1 - index));
             let key = date.format("%Y-%m-%d").to_string();
+            let entry = by_date.get(key.as_str()).copied();
             MemberDailyUsageView {
-                charged_hits: by_date.get(key.as_str()).copied().unwrap_or(0),
+                charged_hits: entry.map(|entry| entry.charged_hits).unwrap_or(0),
+                valid_hits: entry.map(|entry| entry.valid_hits).unwrap_or(0),
+                invalid_hits: entry.map(|entry| entry.invalid_hits).unwrap_or(0),
                 date: key,
             }
         })
@@ -7980,6 +7985,8 @@ mod member_detail_adjust_tests {
         let sparse = vec![crate::store::MemberDailyUsage {
             date: "2026-10-24".to_owned(),
             charged_hits: 5,
+            valid_hits: 3,
+            invalid_hits: 2,
         }];
         let filled = fill_usage_days(today, 3, &sparse);
         assert_eq!(
@@ -7995,6 +8002,14 @@ mod member_detail_adjust_tests {
                 .map(|day| day.charged_hits)
                 .collect::<Vec<_>>(),
             vec![0, 5, 0]
+        );
+        // Pecahan valid/tidak valid ikut terbawa, hari kosong nol semua.
+        assert_eq!(
+            filled
+                .iter()
+                .map(|day| (day.valid_hits, day.invalid_hits))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (3, 2), (0, 0)]
         );
         // Rentang di-clamp 1..=90.
         assert_eq!(fill_usage_days(today, 0, &sparse).len(), 1);
