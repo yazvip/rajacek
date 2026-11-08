@@ -577,3 +577,32 @@ Restore dari ZIP ini:
   hasil rakit chunk `cat` mendarat 644 (bukan executable) → kedua service
   crash-loop 203/EXEC ±4 menit; perbaikan `chmod 755` + restart.
   Pelajaran: rakitan chunk WAJIB `chmod 755` sebelum swap.
+
+## 11. KONSISTENSI LANDING/DOCS PASCA-GAMES (LIVE 2026-11-08)
+- Audit live 8 Nov 2026 menemukan 4 ketinggalan dari deploy games: (1)
+  landing masih "empat produk" (trust-row + workflow) dan title/meta/og/
+  JSON-LD masih 4 produk tanpa game; (2) contoh POST game di docs RUSAK
+  (baris `X-API-Key` kehilangan kutip penutup + `\` lanjutan — copy-paste
+  curl gagal); (3) kartu harga landing tidak menampilkan hit game sama
+  sekali (template `render_landing` hanya 3 bullet; `package_products_
+  label` tidak kenal Game); (4) meta docs masih 4 produk + footer
+  "Terakhir diselaraskan 29 Oktober 2026".
+- Perbaikan: landing → "lima produk" + title/meta/og/JSON-LD/FAQ menyebut
+  ID game + kalimat "Hit game dihitung dari kuota game paket, terpisah
+  dari hit validasi" di intro harga; docs → meta + footer 8 November 2026
+  + POST game diperbaiki; openapi.json (deskripsi) + openapi.yaml
+  (summary) menyebut ID game; `render_landing` kini menambah bullet
+  "{N} hit game" HANYA bila `game_hits > 0` (tidak pernah menampilkan
+  "0 hit game"); `package_products_label` kenal Game ("ID Game") + tes
+  baru `all_five_products_include_game`.
+- Fakta DB saat deploy: keempat paket live (Starter/Growth/Scale/Bussines)
+  masih `game_hits = 0` — bullet hit game baru muncul di landing setelah
+  admin mengisi hit game per paket. Residu `1234667890` di contoh hero
+  landing + openapi TIDAK disentuh (utang lama, menunggu keputusan user).
+- Deploy 8 Nov 2026: tes penuh 410 passed (409 + 1 baru); binary api
+  `5262e63d…` / worker `793ab7ce…`; backup
+  `/opt/rajacek/backup-20261108-konsistensi/`; tanpa migrasi DB.
+- CATATAN CACHE: route `/openapi.json` mengirim `Cache-Control: public,
+  max-age=3600` — salinan publik bisa basi sampai 1 jam setelah deploy;
+  verifikasi openapi WAJIB pakai cache-buster (`?x=<tanggal>`) atau cek
+  lokal 127.0.0.1:8091. Landing/docs tidak kena (no-cache).

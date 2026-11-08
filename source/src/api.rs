@@ -516,10 +516,18 @@ fn render_landing(
             String::new()
         };
         cards.push_str(&format!(
-            "<article class=\"product-card price-card{popular}\">{badge}<h3>{name}</h3>{promo_badge}<p class=\"price-amount\">Rp{price}</p>{promo_old}<p class=\"price-per\">per paket · masa aktif {valid_days} hari</p><ul class=\"price-features\"><li><span>✓</span> {hits} hit</li><li><span>✓</span> {rate} hit/menit</li><li><span>✓</span> {products}</li></ul><a class=\"price-cta\" href=\"/member\">Masuk &amp; coba gratis <span aria-hidden=\"true\">→</span></a></article>",
+            "<article class=\"product-card price-card{popular}\">{badge}<h3>{name}</h3>{promo_badge}<p class=\"price-amount\">Rp{price}</p>{promo_old}<p class=\"price-per\">per paket · masa aktif {valid_days} hari</p><ul class=\"price-features\"><li><span>✓</span> {hits} hit</li>{game_bullet}<li><span>✓</span> {rate} hit/menit</li><li><span>✓</span> {products}</li></ul><a class=\"price-cta\" href=\"/member\">Masuk &amp; coba gratis <span aria-hidden=\"true\">→</span></a></article>",
             name = html_escape(&package.name),
             price = format_id_number(effective),
             hits = format_id_number(package.included_hits),
+            game_bullet = if package.game_hits > 0 {
+                format!(
+                    "<li><span>✓</span> {} hit game</li>",
+                    format_id_number(package.game_hits)
+                )
+            } else {
+                String::new()
+            },
             rate = package.rate_limit_per_minute,
             products = package_products_label(&package.products),
             valid_days = valid_days,
@@ -586,6 +594,9 @@ pub(crate) fn package_products_label(products: &[ValidationProduct]) -> String {
     if has(ValidationProduct::Pln) {
         parts.push("PLN");
     }
+    if has(ValidationProduct::Game) {
+        parts.push("ID Game");
+    }
     if parts.is_empty() {
         return "Semua produk".to_owned();
     }
@@ -601,6 +612,22 @@ pub(crate) fn package_products_label(products: &[ValidationProduct]) -> String {
 mod package_products_label_tests {
     use super::package_products_label;
     use crate::models::ValidationProduct;
+
+    #[test]
+    fn all_five_products_include_game() {
+        let products = vec![
+            ValidationProduct::BankAccount,
+            ValidationProduct::Ewallet,
+            ValidationProduct::Whatsapp,
+            ValidationProduct::Pln,
+            ValidationProduct::Game,
+        ];
+        assert_eq!(
+            package_products_label(&products),
+            "Rekening bank + e-wallet + WhatsApp + PLN + ID Game"
+        );
+        assert_eq!(package_products_label(&[ValidationProduct::Game]), "ID Game");
+    }
 
     #[test]
     fn all_four_products_include_pln() {

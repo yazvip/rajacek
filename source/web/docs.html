@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Dokumentasi API Member — Rajacek</title>
-    <meta name="description" content="Dokumentasi API Rajacek untuk member: autentikasi API key, validasi rekening bank, e-wallet, WhatsApp, dan PLN, idempotensi, rate limit, kuota, dan kode error." />
+    <meta name="description" content="Dokumentasi API Rajacek untuk member: autentikasi API key, validasi rekening bank, e-wallet, WhatsApp, PLN, dan ID game, idempotensi, rate limit, kuota, dan kode error." />
     <meta name="robots" content="index,follow" />
     <meta name="theme-color" content="#071225" />
     <link rel="canonical" href="https://www.rajacek.com/docs" />
@@ -388,7 +388,7 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
         <p>Atau POST dengan <code>Idempotency-Key</code> (zone ikut dalam kunci idempotensi — User ID yang sama di zone berbeda adalah cek yang berbeda):</p>
         <pre><code>curl -X POST https://www.rajacek.com/api/v3/validate \
   -H "Content-Type: application/json" \
--H "X-API-Key: <redacted>
+  -H "X-API-Key: rc_CONTOH" \
   -H "Idempotency-Key: game-20261108-0001" \
   -d '{"code": "region-ml", "accountNumber": "861363893", "zone_id": "12422"}'</code></pre>
         <p>Hasil valid (HTTP 200) — <code>account_name</code> adalah nickname pemain (selalu huruf besar semua):</p>
@@ -457,7 +457,7 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
         <h3>Bolehkan saya memakai satu kunci untuk banyak server?</h3>
         <p>Boleh. Tetapi lebih aman dan rapi bila setiap aplikasi atau lingkungan punya kunci sendiri. Jika ada masalah, Anda cukup mencabut satu kunci itu saja.</p>
 
-        <p style="margin-top:2.5rem;color:var(--muted);font-size:.9rem;">Rajacek API · Dokumentasi member · Terakhir diselaraskan dengan kontrak API pada 29 Oktober 2026.</p>
+        <p style="margin-top:2.5rem;color:var(--muted);font-size:.9rem;">Rajacek API · Dokumentasi member · Terakhir diselaraskan dengan kontrak API pada 8 November 2026.</p>
       </main>
     </div>
       <script>

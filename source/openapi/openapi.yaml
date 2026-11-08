@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: Rajacek Validation API
   version: 0.1.0
-  summary: API validasi rekening, e-wallet, WhatsApp, dan PLN dengan kontrol quota, rate limit, dan idempotensi.
+  summary: API validasi rekening, e-wallet, WhatsApp, PLN, dan ID game dengan kontrol quota, rate limit, dan idempotensi.
   description: |
     Rajacek menerima permintaan validasi melalui API key yang memiliki scope produk sesuai.
     Satu endpoint `GET /api/v3/validate` (kunci lewat query `api_key`) dan `POST /api/v3/validate` (kunci lewat header atau field body `api_key`) melayani semua produk lewat `code`: kode bank 3 digit, slug e-wallet, `pln`, `whatsapp`, atau kode game (17 layanan; 6 game ML wajib `zone_id`). Cek game memakai kuota game terpisah per paket (1 hit game untuk `valid`; `not_found` game gratis 100 pertama per hari dari pool game sendiri).
