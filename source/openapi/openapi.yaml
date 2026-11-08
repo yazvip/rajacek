@@ -5,7 +5,7 @@ info:
   summary: API validasi rekening, e-wallet, WhatsApp, dan PLN dengan kontrol quota, rate limit, dan idempotensi.
   description: |
     Rajacek menerima permintaan validasi melalui API key yang memiliki scope produk sesuai.
-    Satu endpoint `GET /api/v3/validate` (kunci lewat query `api_key`) dan `POST /api/v3/validate` (kunci lewat header atau field body `api_key`) melayani semua produk lewat `code`: kode bank 3 digit, slug e-wallet, `pln`, atau `whatsapp`.
+    Satu endpoint `GET /api/v3/validate` (kunci lewat query `api_key`) dan `POST /api/v3/validate` (kunci lewat header atau field body `api_key`) melayani semua produk lewat `code`: kode bank 3 digit, slug e-wallet, `pln`, `whatsapp`, atau kode game (17 layanan; 6 game ML wajib `zone_id`). Cek game memakai kuota game terpisah per paket (1 hit game untuk `valid`; `not_found` game gratis 100 pertama per hari dari pool game sendiri).
     Endpoint POST menerima `Idempotency-Key` unik dari klien; bila tidak dikirim atau kosong, server membuatkannya otomatis dan mengembalikannya lewat header respons `Idempotency-Key` (retry tanpa kunci sendiri dianggap operasi baru). GET tidak idempotent: setiap GET adalah cek baru.
 
     Nilai rekening, nomor e-wallet, dan nomor telepon harus diperlakukan sebagai data sensitif.
@@ -85,7 +85,7 @@ paths:
       operationId: validateV3Get
       summary: Memvalidasi lewat query string
       description: |
-        Satu endpoint untuk semua produk. `code` memilih produk: kode bank 3 digit (mis. `002` BRI), slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`), `pln`, atau `whatsapp`; nomornya di `accountNumber`.
+        Satu endpoint untuk semua produk. `code` memilih produk: kode bank 3 digit (mis. `002` BRI), slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`), `pln`, `whatsapp`, atau kode game (17 layanan; 6 game ML wajib `zone_id`); nomornya di `accountNumber`.
         GET tidak idempotent: setiap GET adalah cek baru. Kunci lewat query `api_key` atau header (`X-API-Key` / `Authorization: Bearer`); bila sumber berbeda nilainya, request ditolak 401.
         API key memerlukan scope produk yang sesuai atau `validate:*`.
       parameters:
@@ -100,7 +100,13 @@ paths:
           required: true
           schema:
             type: string
-          description: Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp.
+          description: Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp / User ID game.
+        - name: zone_id
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Zone ID — wajib hanya untuk 6 game ML (region-ml, mlbb-bundle, mlcreate, first-topup, first-mcgg, mcgg). Tanpa ini, cek game ML ditolak 400 sebelum provider dipanggil.
         - name: api_key
           in: query
           required: false
@@ -237,7 +243,7 @@ components:
       type: object
       required: [product, label, status]
       properties:
-        product: { type: string, enum: [bank_account, ewallet, whatsapp, pln] }
+        product: { type: string, enum: [bank_account, ewallet, whatsapp, pln, game] }
         label: { type: string, example: Validasi Rekening }
         status: { type: string, enum: [operational, degraded] }
     PublicStatus:
@@ -264,12 +270,15 @@ components:
       properties:
         code:
           type: string
-          description: Kode produk — kode bank 3 digit (mis. `002` BRI), slug e-wallet, `pln`, atau `whatsapp`. Harus string.
+          description: Kode produk — kode bank 3 digit (mis. `002` BRI), slug e-wallet, `pln`, `whatsapp`, atau kode game (17 layanan; 6 game ML wajib zone_id). Harus string.
           example: '002'
         accountNumber:
           type: string
-          description: Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp.
+          description: Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp / User ID game.
           example: '1234567890'
+        zone_id:
+          type: string
+          description: Zone ID — wajib hanya untuk 6 game ML (region-ml, mlbb-bundle, mlcreate, first-topup, first-mcgg, mcgg).
         api_key:
           type: string
           description: Kunci API member (opsional bila sudah dikirim lewat header).
@@ -280,7 +289,7 @@ components:
         request_id: { type: string, format: uuid }
         status:
           type: string
-          description: 'Billing: valid dan not_kyc memotong 1 hit; invalid dan not_found (satu pool bersama) gratis hingga 100 per hari per kunci (WIB), selebihnya 1 hit; pending, provider_error, rate_limited, dan quota_exhausted tidak memotong dan tidak memakan jatah gratis. Kunci bersaldo 0 tetap ditolak 402 sebelum cek berjalan.'
+          description: 'Billing: valid dan not_kyc memotong 1 hit; invalid dan not_found (satu pool bersama) gratis hingga 100 per hari per kunci (WIB), selebihnya 1 hit; pending, provider_error, rate_limited, dan quota_exhausted tidak memotong dan tidak memakan jatah gratis. Kunci bersaldo 0 tetap ditolak 402 sebelum cek berjalan. Cek game memakai kuota game terpisah (1 hit game untuk valid; not_found game gratis 100 pertama per hari dari pool game sendiri).'
           enum: [valid, invalid, not_found, not_kyc, pending, provider_error, rate_limited, quota_exhausted]
         valid: { type: boolean }
         product: { $ref: '#/components/schemas/ValidationProduct' }
@@ -295,6 +304,9 @@ components:
         service_code: { type: [string, 'null'], description: Kode layanan yang divalidasi (kode bank 3 digit, slug e-wallet, atau whatsapp). }
         bank_name: { type: [string, 'null'], description: Nama bank sesuai katalog (khusus layanan bank). }
         account_name: { type: [string, 'null'], description: Nilai dapat dimasking oleh provider. Selalu huruf besar semua. }
+        zone: { type: [string, 'null'], description: Zone ID game (khusus produk game, hanya bila tersedia). }
+        country: { type: [string, 'null'], description: Negara akun game (khusus produk game, hanya bila tersedia). }
+        server: { type: [string, 'null'], description: Server game (khusus produk game, hanya bila tersedia). }
         tarif: { type: [string, 'null'], description: Tarif listrik pelanggan (khusus produk pln, hanya bila tersedia). }
         daya: { type: [string, 'null'], description: Daya tersambung pelanggan dalam VA (khusus produk pln, hanya bila tersedia). }
         registered: { type: [boolean, 'null'] }
@@ -312,7 +324,7 @@ components:
         expires_at: { type: [string, 'null'], format: date-time, description: Masa aktif paket yang sedang dipakai (kedaluwarsa paket yang paling cepat habis), sama dengan yang tampil di portal member. null berarti kunci tidak pernah kedaluwarsa. Bukan tanggal kunci mati: kunci tetap bisa dipakai selama masih ada paket aktif, dan tanggal ini bergeser otomatis saat paket yang sedang dipakai habis atau lewat masa aktifnya. }
     ValidationProduct:
       type: string
-      enum: [bank_account, ewallet, whatsapp, pln]
+      enum: [bank_account, ewallet, whatsapp, pln, game]
     ApiError:
       type: object
       required: [code, message, request_id]

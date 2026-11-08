@@ -1295,6 +1295,19 @@ fn tukangcek_response_mapping(product: ValidationProduct) -> ProviderResponseMap
             registered_path: None,
             reference_path: None,
         },
+        // Game tidak pernah lewat Tukangcek; arm hanya untuk exhaustiveness.
+        ValidationProduct::Game => ProviderResponseMapping {
+            status_path: "found".to_owned(),
+            valid_values: vec!["true".to_owned()],
+            invalid_values: vec![],
+            not_found_values: vec!["false".to_owned()],
+            pending_values: vec![],
+            message_path: None,
+            account_name_path: None,
+            provider_path: None,
+            registered_path: None,
+            reference_path: None,
+        },
     }
 }
 
@@ -1423,6 +1436,8 @@ fn validate_service_code_mapping(
         ValidationProduct::Whatsapp => false,
         // PLN tidak punya service-code mapping, seperti WhatsApp.
         ValidationProduct::Pln => false,
+        // Game punya katalog sendiri (game_services), bukan mapping ini.
+        ValidationProduct::Game => false,
     };
     if product == ValidationProduct::Whatsapp {
         return Err(AppError::bad_request(

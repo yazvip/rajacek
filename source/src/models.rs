@@ -28,6 +28,7 @@ pub enum ValidationProduct {
     Ewallet,
     Whatsapp,
     Pln,
+    Game,
 }
 
 impl ValidationProduct {
@@ -36,6 +37,7 @@ impl ValidationProduct {
             Self::BankAccount => "bank_account",
             Self::Ewallet => "ewallet",
             Self::Whatsapp => "whatsapp",
+            Self::Game => "game",
             Self::Pln => "pln",
         }
     }
@@ -46,6 +48,7 @@ impl ValidationProduct {
             Self::Ewallet => "Validasi e-wallet",
             Self::Whatsapp => "Validasi WhatsApp",
             Self::Pln => "Validasi PLN",
+            Self::Game => "Cek ID game",
         }
     }
 }
@@ -140,6 +143,9 @@ pub struct ProviderValidationRequest {
     pub product: ValidationProduct,
     pub provider_hint: Option<String>,
     pub target: String,
+    /// Game only: Zone / Server ID (6 game keluarga ML/MCGG). None untuk
+    /// produk lain. Ikut dalam fingerprint idempotensi (api.rs).
+    pub zone_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -172,6 +178,15 @@ pub struct ValidationResultData {
     /// other product and whenever the name carries no matching suffix, so
     /// other products' serialized responses are byte-identical to before.
     /// The holder name itself is never stripped of its suffix.
+    /// Game only: zone/server id + negara dari respons Cutiezy, bila
+    /// ada. Field lain (bundle, umur akun) TIDAK dipetakan sampai
+    /// terverifikasi dari respons nyata per game.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tarif: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -417,6 +432,9 @@ pub fn provider_hint_display(product: ValidationProduct, hint: Option<&str>) -> 
             .iter()
             .find(|(slug, _)| *slug == hint)
             .map(|(_, name)| format!("{hint} · {name}")),
+        // Game: kode service + nama dari katalog statis (tanpa DB).
+        ValidationProduct::Game => crate::games::find_game_service(hint)
+            .map(|service| format!("{hint} · {}", service.name)),
         _ => None,
     }
 }
@@ -851,6 +869,9 @@ pub struct AdminPackage {
     pub description: String,
     pub price_idr: u64,
     pub included_hits: u64,
+    /// Hit cek ID game yang ikut diberikan tiap pembelian paket ini
+    /// (migrasi 0042). 0 = paket ini tidak berisi hit game.
+    pub game_hits: u64,
     pub active: bool,
     pub highlighted: bool,
     pub products: Vec<ValidationProduct>,
@@ -890,6 +911,9 @@ pub struct CreatePackageRequest {
     pub description: String,
     pub price_idr: u64,
     pub included_hits: u64,
+    /// Hit cek ID game per pembelian paket ini (migrasi 0042); 0 = tidak ada.
+    #[serde(default)]
+    pub game_hits: u64,
     #[serde(default)]
     pub active: bool,
     #[serde(default)]
@@ -908,6 +932,7 @@ pub struct UpdatePackageRequest {
     pub description: Option<String>,
     pub price_idr: Option<u64>,
     pub included_hits: Option<u64>,
+    pub game_hits: Option<u64>,
     pub active: Option<bool>,
     pub highlighted: Option<bool>,
     pub products: Option<Vec<ValidationProduct>>,
@@ -1101,6 +1126,10 @@ pub struct QuotaBucket {
     pub package_id: Option<Uuid>,
     pub total_hits: u64,
     pub remaining_hits: u64,
+    /// Kuota game di bucket yang sama (migrasi 0042): satu pembelian
+    /// membawa dua kuota, FIFO + expiry sama, tidak saling memotong.
+    pub game_total_hits: u64,
+    pub game_remaining_hits: u64,
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }
@@ -1115,11 +1144,53 @@ pub struct QuotaBucketView {
     pub package_name: Option<String>,
     pub total_hits: u64,
     pub remaining_hits: u64,
+    pub game_total_hits: u64,
+    pub game_remaining_hits: u64,
     pub expires_at: Option<DateTime<Utc>>,
 }
 
 /// Bucket masih berlaku pada `now`: tanpa expiry, atau expiry-nya future.
 /// Bucket kedaluwarsa dilewati pemotongan (sisanya mati), bukan dihapus.
+/// Agregat kuota game dari bucket (cerminan bucket_aggregate, migrasi
+/// 0042): total game dari SEMUA bucket, sisa game hanya dari bucket
+/// aktif, expiry bucket aktif bersisa game terdekat.
+pub fn game_bucket_aggregate(
+    buckets: &[QuotaBucket],
+    now: DateTime<Utc>,
+) -> (u64, u64, Option<DateTime<Utc>>) {
+    let total = buckets
+        .iter()
+        .fold(0u64, |sum, bucket| sum.saturating_add(bucket.game_total_hits));
+    let mut active_remaining = 0u64;
+    let mut nearest_dated: Option<DateTime<Utc>> = None;
+    let mut has_active_undated_with_remaining = false;
+    for bucket in buckets {
+        if !bucket_is_active(bucket, now) {
+            continue;
+        }
+        active_remaining = active_remaining.saturating_add(bucket.game_remaining_hits);
+        if bucket.game_remaining_hits > 0 {
+            match bucket.expires_at {
+                Some(expiry) => {
+                    nearest_dated = Some(match nearest_dated {
+                        Some(current) => current.min(expiry),
+                        None => expiry,
+                    });
+                }
+                None => has_active_undated_with_remaining = true,
+            }
+        }
+    }
+    let expiry = if let Some(expiry) = nearest_dated {
+        Some(expiry)
+    } else if has_active_undated_with_remaining {
+        None
+    } else {
+        None
+    };
+    (total, active_remaining, expiry)
+}
+
 pub fn bucket_is_active(bucket: &QuotaBucket, now: DateTime<Utc>) -> bool {
     bucket.expires_at.map_or(true, |expiry| expiry > now)
 }
@@ -1256,6 +1327,7 @@ pub fn new_purchase_bucket(
     order_id: Option<Uuid>,
     package_id: Option<Uuid>,
     hits: u64,
+    game_hits: u64,
     valid_days: i64,
     now: DateTime<Utc>,
 ) -> QuotaBucket {
@@ -1267,6 +1339,8 @@ pub fn new_purchase_bucket(
         package_id,
         total_hits: hits,
         remaining_hits: hits,
+        game_total_hits: game_hits,
+        game_remaining_hits: game_hits,
         expires_at: Some(now + chrono::Duration::days(valid_days)),
         created_at: now,
     }
@@ -1292,6 +1366,8 @@ pub fn backfill_bucket_for_key(
         package_id,
         total_hits: quota_total,
         remaining_hits: quota_remaining,
+        game_total_hits: 0,
+        game_remaining_hits: 0,
         expires_at,
         created_at: now,
     }
@@ -1331,6 +1407,67 @@ pub fn consume_buckets_fifo(
     }
     debug_assert_eq!(left, 0);
     Some(touched)
+}
+
+/// Konsumsi FIFO `hits` dari kuota GAME bucket aktif (cerminan
+/// consume_buckets_fifo, migrasi 0042): bucket yang sama, kolom
+/// game_remaining_hits. None bila sisa game aktif kurang.
+pub fn consume_game_buckets_fifo(
+    buckets: &mut [QuotaBucket],
+    now: DateTime<Utc>,
+    hits: u64,
+) -> Option<Vec<(Uuid, u64)>> {
+    let active_remaining: u64 = buckets
+        .iter()
+        .filter(|bucket| bucket_is_active(bucket, now))
+        .fold(0u64, |sum, bucket| sum.saturating_add(bucket.game_remaining_hits));
+    if active_remaining < hits {
+        return None;
+    }
+    let mut left = hits;
+    let mut touched = Vec::new();
+    for index in fifo_indices(buckets) {
+        if left == 0 {
+            break;
+        }
+        let bucket = &mut buckets[index];
+        if !bucket_is_active(bucket, now) || bucket.game_remaining_hits == 0 {
+            continue;
+        }
+        let take = left.min(bucket.game_remaining_hits);
+        bucket.game_remaining_hits -= take;
+        left -= take;
+        touched.push((bucket.id, bucket.game_remaining_hits));
+    }
+    debug_assert_eq!(left, 0);
+    Some(touched)
+}
+
+/// Kembalikan 1 hit game ke satu bucket (cerminan refund_bucket,
+/// migrasi 0042). Aturan pendaratan sama: bucket asal bila aktif dan
+/// punya ruang (sisa game < total game), lalu bucket aktif FIFO-pertama
+/// yang punya ruang; None bila tidak ada.
+pub fn refund_game_bucket(
+    buckets: &mut [QuotaBucket],
+    now: DateTime<Utc>,
+    bucket_id: Option<Uuid>,
+) -> Option<(Uuid, u64)> {
+    let has_room = |bucket: &QuotaBucket| bucket.game_remaining_hits < bucket.game_total_hits;
+    let target = bucket_id
+        .and_then(|id| buckets.iter().position(|bucket| bucket.id == id))
+        .filter(|&index| bucket_is_active(&buckets[index], now) && has_room(&buckets[index]))
+        .or_else(|| {
+            fifo_indices(buckets).into_iter().find(|&index| {
+                bucket_is_active(&buckets[index], now) && has_room(&buckets[index])
+            })
+        });
+    let index = target?;
+    let bucket = &mut buckets[index];
+    bucket.game_remaining_hits = bucket
+        .game_remaining_hits
+        .saturating_add(1)
+        .min(bucket.game_total_hits);
+    Some((bucket.id, bucket.game_remaining_hits))
 }
 
 /// Kembalikan 1 hit ke satu bucket, dibatasi total bucket itu (refund
@@ -1506,6 +1643,8 @@ mod tests {
             package_id: None,
             total_hits: total,
             remaining_hits: remaining,
+            game_total_hits: 0,
+            game_remaining_hits: 0,
             expires_at,
             created_at,
         }
@@ -1597,9 +1736,11 @@ mod tests {
             now,
         )];
         buckets[0].key_id = key_id;
-        let new_bucket = new_purchase_bucket(key_id, None, None, None, 500, 30, now);
+        let new_bucket = new_purchase_bucket(key_id, None, None, None, 500, 0, 30, now);
         assert_eq!(new_bucket.total_hits, 500);
         assert_eq!(new_bucket.remaining_hits, 500);
+        assert_eq!(new_bucket.game_total_hits, 0);
+        assert_eq!(new_bucket.game_remaining_hits, 0);
         assert_eq!(new_bucket.expires_at, Some(dt("2026-11-24T00:00:00Z")));
         buckets.push(new_bucket);
         let (total, remaining, expiry) = bucket_aggregate(&buckets, now);
@@ -1811,6 +1952,7 @@ mod promo_price_tests {
             description: String::new(),
             price_idr: price,
             included_hits: 1000,
+            game_hits: 0,
             active: true,
             highlighted: false,
             products: vec![],

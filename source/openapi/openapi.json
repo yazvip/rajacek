@@ -3,7 +3,7 @@
   "info": {
     "title": "Rajacek API — Dokumentasi Member",
     "version": "1.0.0",
-    "description": "API validasi rekening bank, e-wallet, nomor WhatsApp, dan ID pelanggan PLN Indonesia untuk member Rajacek.\n\n**Endpoint:** satu endpoint `GET /api/v3/validate` (kunci lewat query `api_key`) dan `POST /api/v3/validate` (kunci lewat header `X-API-Key` / `Authorization: Bearer`, atau field body `api_key`). Kunci lama `rv_live_...` tetap berlaku; kunci baru diawali `rc_...`. Jaga kerahasiaan kunci Anda; kunci hanya ditampilkan sekali saat dibuat. Bila lebih dari satu sumber kunci dikirim dengan nilai berbeda, request ditolak 401.\n\n**Idempotency-Key** hanya berlaku untuk POST: nilai unik 8–200 karakter per operasi bisnis. Bila tidak dikirim atau kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons `Idempotency-Key`. Mengirim ulang request yang sama dengan kunci yang sama akan memutar respons yang sama tanpa memotong kuota dua kali. GET tidak idempotent: setiap GET adalah cek baru.\n\n**Kode produk (`code`):** kode bank 3 digit (mis. `002` BRI, `014` BCA) — ambil daftar lengkapnya dari `GET /v1/banks`; slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`); `pln`; atau `whatsapp`. `code` harus berupa string — angka `2` bukan `\"002\"` dan ditolak 400. Kode internal provider tidak pernah dipakai di sisi member.\n\n**Hasil validasi** ada di field `status` pada respons 200: `valid`, `invalid`, `not_found`, `not_kyc`, atau `pending`. Error teknis memakai format `ApiError` dengan HTTP 4xx/5xx.\n\n**Rate limit** bawaan 60 request/menit per kunci (header `X-RateLimit-Remaining`/`X-RateLimit-Reset` dikembalikan); kuota paket berkurang untuk hasil `valid` dan `not_kyc` (1 hit), serta `invalid`/`not_found` di luar jatah gratis 100 pertama per hari per kunci (WIB)."
+    "description": "API validasi rekening bank, e-wallet, nomor WhatsApp, dan ID pelanggan PLN Indonesia untuk member Rajacek.\n\n**Endpoint:** satu endpoint `GET /api/v3/validate` (kunci lewat query `api_key`) dan `POST /api/v3/validate` (kunci lewat header `X-API-Key` / `Authorization: Bearer`, atau field body `api_key`). Kunci lama `rv_live_...` tetap berlaku; kunci baru diawali `rc_...`. Jaga kerahasiaan kunci Anda; kunci hanya ditampilkan sekali saat dibuat. Bila lebih dari satu sumber kunci dikirim dengan nilai berbeda, request ditolak 401.\n\n**Idempotency-Key** hanya berlaku untuk POST: nilai unik 8–200 karakter per operasi bisnis. Bila tidak dikirim atau kosong, server membuatkan kunci unik otomatis dan mengembalikannya di header respons `Idempotency-Key`. Mengirim ulang request yang sama dengan kunci yang sama akan memutar respons yang sama tanpa memotong kuota dua kali. GET tidak idempotent: setiap GET adalah cek baru.\n\n**Kode produk (`code`):** kode bank 3 digit (mis. `002` BRI, `014` BCA) — ambil daftar lengkapnya dari `GET /v1/banks`; slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`); `pln`; `whatsapp`; atau kode game (`region-ml`, `mlbb-bundle`, `mlcreate`, `first-topup`, `first-mcgg`, `mcgg`, `undawn`, `free-fire`, `pubg`, `codm`, `zenless`, `hok`, `blood-strike`, `valorant`, `genshin`, `hsr`, `roblox` — 6 game ML wajib `zone_id`). `code` harus berupa string — angka `2` bukan `\"002\"` dan ditolak 400. Kode internal provider tidak pernah dipakai di sisi member.\n\n**Hasil validasi** ada di field `status` pada respons 200: `valid`, `invalid`, `not_found`, `not_kyc`, atau `pending`. Error teknis memakai format `ApiError` dengan HTTP 4xx/5xx.\n\n**Rate limit** bawaan 60 request/menit per kunci (header `X-RateLimit-Remaining`/`X-RateLimit-Reset` dikembalikan); kuota paket berkurang untuk hasil `valid` dan `not_kyc` (1 hit), serta `invalid`/`not_found` di luar jatah gratis 100 pertama per hari per kunci (WIB). Cek game memakai kuota game terpisah per paket (1 hit game untuk `valid`; `not_found` game gratis 100 pertama per hari dari pool game sendiri; trial tanpa kuota game)."
   },
   "servers": [
     {
@@ -130,7 +130,7 @@
         ],
         "operationId": "validateV3Get",
         "summary": "Validasi lewat query string",
-        "description": "Satu endpoint untuk semua produk. `code` memilih produk: kode bank 3 digit (mis. `002` BRI), slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`), `pln`, atau `whatsapp`; nomornya di `accountNumber`.\n\nGET tidak idempotent: setiap GET adalah cek baru. Kunci lewat query `api_key` atau header (`X-API-Key` / `Authorization: Bearer`); bila sumber berbeda nilainya, request ditolak 401.\n\nScope kunci yang diperlukan: scope produk yang sesuai atau `validate:*`.",
+        "description": "Satu endpoint untuk semua produk. `code` memilih produk: kode bank 3 digit (mis. `002` BRI), slug e-wallet (`dana`, `gopay`, `gopay_driver`, `ovo`, `shopeepay`, `linkaja`, `astrapay`, `isaku`, `kaspro`), `pln`, `whatsapp`, atau kode game (17 layanan; 6 game ML wajib `zone_id`); nomornya di `accountNumber`.\n\nGET tidak idempotent: setiap GET adalah cek baru. Kunci lewat query `api_key` atau header (`X-API-Key` / `Authorization: Bearer`); bila sumber berbeda nilainya, request ditolak 401.\n\nScope kunci yang diperlukan: scope produk yang sesuai atau `validate:*`.",
         "parameters": [
           {
             "name": "code",
@@ -145,7 +145,16 @@
             "name": "accountNumber",
             "in": "query",
             "required": true,
-            "description": "Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp.",
+            "description": "Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp / User ID game.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "zone_id",
+            "in": "query",
+            "required": false,
+            "description": "Zone ID — wajib hanya untuk 6 game ML (region-ml, mlbb-bundle, mlcreate, first-topup, first-mcgg, mcgg). Tanpa ini, cek game ML ditolak 400 sebelum provider dipanggil.",
             "schema": {
               "type": "string"
             }
@@ -527,7 +536,8 @@
               "bank_account",
               "ewallet",
               "whatsapp",
-              "pln"
+              "pln",
+              "game"
             ]
           },
           "label": {
@@ -655,6 +665,28 @@
             ],
             "example": "NAMA PELANGGAN"
           },
+          "zone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Zone ID game (khusus produk game, hanya bila tersedia).",
+            "example": "12422"
+          },
+          "country": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Negara akun game (khusus produk game, hanya bila tersedia)."
+          },
+          "server": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Server game (khusus produk game, hanya bila tersedia)."
+          },
           "tarif": {
             "type": [
               "string",
@@ -732,13 +764,17 @@
         "properties": {
           "code": {
             "type": "string",
-            "description": "Kode produk: kode bank 3 digit (mis. 002 BRI), slug e-wallet (dana, gopay, gopay_driver, ovo, shopeepay, linkaja, astrapay, isaku, kaspro), pln, atau whatsapp. Harus string.",
+            "description": "Kode produk: kode bank 3 digit (mis. 002 BRI), slug e-wallet (dana, gopay, gopay_driver, ovo, shopeepay, linkaja, astrapay, isaku, kaspro), pln, whatsapp, atau kode game (17 layanan; 6 game ML wajib zone_id). Harus string.",
             "example": "002"
           },
           "accountNumber": {
             "type": "string",
-            "description": "Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp.",
+            "description": "Nomor rekening / akun e-wallet / ID pelanggan PLN / nomor WhatsApp / User ID game.",
             "example": "1234567890"
+          },
+          "zone_id": {
+            "type": "string",
+            "description": "Zone ID — wajib hanya untuk 6 game ML (region-ml, mlbb-bundle, mlcreate, first-topup, first-mcgg, mcgg)."
           },
           "api_key": {
             "type": "string",
@@ -774,7 +810,8 @@
               "bank_account",
               "ewallet",
               "whatsapp",
-              "pln"
+              "pln",
+              "game"
             ]
           },
           "message": {

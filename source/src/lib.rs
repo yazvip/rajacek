@@ -16,6 +16,7 @@ pub mod database;
 pub mod error;
 pub mod events;
 pub mod ewallet_codes;
+pub mod games;
 pub mod gobiz;
 pub mod idempotency;
 pub mod member;

@@ -150,6 +150,9 @@ impl ProviderAdapter for DemoProvider {
                 service_code: service_code_for(&request),
                 bank_name: bank_name_for(&request),
                 account_name: None,
+                zone: None,
+                country: None,
+                server: None,
                 tarif: None,
                 daya: None,
                 provider: None,
@@ -197,6 +200,8 @@ fn demo_result(request: &ProviderValidationRequest, digest: &[u8]) -> Validation
         // Demo PLN mirrors the live name shape (holder + tariff/power
         // suffix) so the demo path exercises the same result fields.
         ValidationProduct::Pln => Some("PELANGGAN DEMO - R1/1300".to_owned()),
+        // Demo game: nickname demo, tanpa zone/country/server.
+        ValidationProduct::Game => Some("PEMAIN DEMO".to_owned()),
     };
 
     let (tarif, daya) = match request.product {
@@ -211,6 +216,9 @@ fn demo_result(request: &ProviderValidationRequest, digest: &[u8]) -> Validation
         service_code: service_code_for(request),
         bank_name: bank_name_for(request),
         account_name,
+        zone: None,
+        country: None,
+        server: None,
         tarif,
         daya,
         provider: None,
@@ -226,7 +234,7 @@ fn demo_result(request: &ProviderValidationRequest, digest: &[u8]) -> Validation
 
 fn target_fields(product: ValidationProduct, target: &str) -> (Option<String>, Option<String>) {
     match product {
-        ValidationProduct::BankAccount | ValidationProduct::Ewallet | ValidationProduct::Pln => {
+        ValidationProduct::BankAccount | ValidationProduct::Ewallet | ValidationProduct::Pln | ValidationProduct::Game => {
             (Some(target.to_owned()), None)
         }
         ValidationProduct::Whatsapp => (None, Some(target.to_owned())),
@@ -252,6 +260,8 @@ fn service_code_for(request: &ProviderValidationRequest) -> Option<String> {
         // PLN carries no provider hint (no bank code / wallet slug); the
         // fixed product code plays the same role as "whatsapp" above.
         ValidationProduct::Pln => Some("pln".to_owned()),
+        // Game: hint = kode service game (mis. region-ml).
+        ValidationProduct::Game => request.provider_hint.clone(),
     }
 }
 
@@ -1549,6 +1559,10 @@ fn build_provider_request(
                     "Provider validasi sedang tidak tersedia. Silakan ulangi beberapa saat lagi.",
                 ))
             }
+            // Game tidak pernah lewat endpoint provider (dispatch sendiri).
+            ValidationProduct::Game => Err(AppError::internal(
+                "Game tidak memakai endpoint provider",
+            )),
         },
     }
 }
@@ -1794,6 +1808,9 @@ fn normalize_provider_payload(
                 .as_deref()
                 .and_then(|path| json_path(payload, path))
                 .and_then(value_as_text),
+            zone: None,
+            country: None,
+            server: None,
             // Never surface an upstream-sourced provider string in a
             // normalized result: public/member responses identify the
             // provider only as "Rajacek" (meta.provider). Raw upstream
@@ -1818,6 +1835,9 @@ fn normalize_provider_payload(
                 .as_deref()
                 .and_then(|path| json_path(payload, path))
                 .and_then(value_as_text),
+            zone: None,
+            country: None,
+            server: None,
             provider: None,
             tarif: None,
             daya: None,
@@ -1834,6 +1854,9 @@ fn normalize_provider_payload(
             service_code: None,
             bank_name: None,
             account_name: None,
+            zone: None,
+            country: None,
+            server: None,
             provider: None,
             tarif: None,
             daya: None,
@@ -1857,6 +1880,9 @@ fn normalize_provider_payload(
                 service_code: None,
                 bank_name: None,
                 account_name,
+                zone: None,
+                country: None,
+                server: None,
                 tarif,
                 daya,
                 // Upstream "provider": "API" is deliberately never mapped
@@ -1868,6 +1894,8 @@ fn normalize_provider_payload(
                 reference: mapped_text(payload, mapping.reference_path.as_deref()),
             })
         }
+        // Game tidak memakai mapping endpoint (dispatch sendiri di games.rs).
+        ValidationProduct::Game => None,
     };
 
     // K10: nama pemegang kosong pada hasil Valid = jawaban yang tidak
@@ -2120,6 +2148,8 @@ fn cutiezy_mapping(product: ValidationProduct) -> crate::models::ProviderRespons
             // used (see the guard in validate_upstream_endpoint); this
             // arm exists only for exhaustiveness.
             ValidationProduct::Pln => None,
+            // Game tidak memakai mapping endpoint (dispatch sendiri).
+            ValidationProduct::Game => None,
         },
         provider_path: None,
         registered_path: None,
@@ -2154,6 +2184,19 @@ fn tukangcek_mapping(product: ValidationProduct) -> crate::models::ProviderRespo
             account_name_path: None,
             provider_path: None,
             registered_path: Some("registered".to_owned()),
+            reference_path: None,
+        },
+        // Game tidak pernah lewat Tukangcek; arm hanya untuk exhaustiveness.
+        ValidationProduct::Game => crate::models::ProviderResponseMapping {
+            status_path: "found".to_owned(),
+            valid_values: vec!["true".to_owned()],
+            invalid_values: vec![],
+            not_found_values: vec!["false".to_owned()],
+            pending_values: vec![],
+            message_path: None,
+            account_name_path: None,
+            provider_path: None,
+            registered_path: None,
             reference_path: None,
         },
         ValidationProduct::BankAccount | ValidationProduct::Ewallet => {
@@ -2394,6 +2437,7 @@ mod mapping_tests {
             product: ValidationProduct::BankAccount,
             provider_hint: Some("002".to_owned()),
             target: "1234567890".to_owned(),
+            zone_id: None,
         };
         let body = build_provider_request(
             &request,
@@ -2413,6 +2457,7 @@ mod mapping_tests {
             product: ValidationProduct::Ewallet,
             provider_hint: Some("gopay_driver".to_owned()),
             target: "081234567890".to_owned(),
+            zone_id: None,
         };
         assert_eq!(
             build_provider_request(
@@ -2441,6 +2486,7 @@ mod mapping_tests {
             product: ValidationProduct::Ewallet,
             provider_hint: Some("dana".to_owned()),
             target: "081234567890".to_owned(),
+            zone_id: None,
         };
         let mut mapping = std::collections::HashMap::new();
         mapping.insert("dana".to_owned(), "dana009".to_owned());
@@ -2588,6 +2634,7 @@ mod mode_rejection_tests {
                 product: ValidationProduct::Pln,
                 provider_hint: None,
                 target: "12345678901".to_owned(),
+                zone_id: None,
             },
             ProviderRequestMode::Tukangcek,
             &std::collections::HashMap::new(),
@@ -2663,6 +2710,7 @@ mod mode_rejection_tests {
                     product: ValidationProduct::Pln,
                     provider_hint: None,
                     target: "12345678901".to_owned(),
+                    zone_id: None,
                 },
                 false,
             )
@@ -3043,6 +3091,7 @@ mod pacer_failure_tests {
             product: ValidationProduct::BankAccount,
             provider_hint: Some("002".to_owned()),
             target: "1234567890".to_owned(),
+            zone_id: None,
         };
         // Attempt 1: HTTP 500 (provider_failure=true, retryable).
         // Attempt 2: pacer menolak -> error 429 internal.
@@ -3140,6 +3189,7 @@ mod pacer_failure_tests {
             product: ValidationProduct::BankAccount,
             provider_hint: Some("002".to_owned()),
             target: "1234567890".to_owned(),
+            zone_id: None,
         };
         let (result, _, _) = provider
             .validate_upstream_endpoint(&endpoint, request, false)
@@ -3315,6 +3365,7 @@ mod endpoint_source_tests {
             product: ValidationProduct::BankAccount,
             provider_hint: Some("002".to_owned()),
             target: "1234567890".to_owned(),
+            zone_id: None,
         }
     }
 
@@ -3553,6 +3604,7 @@ mod demo_provider_tests {
                         product,
                         provider_hint: Some(hint.to_owned()),
                         target,
+                        zone_id: None,
                     })
                     .await
                     .expect("validasi demo berhasil");

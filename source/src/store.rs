@@ -149,6 +149,8 @@ struct QuotaBucketRow {
     package_id: Option<String>,
     total_hits: u64,
     remaining_hits: u64,
+    game_total_hits: u64,
+    game_remaining_hits: u64,
     expires_at: Option<chrono::DateTime<Utc>>,
     created_at: chrono::DateTime<Utc>,
 }
@@ -179,6 +181,8 @@ impl QuotaBucketRow {
                 .transpose()?,
             total_hits: self.total_hits,
             remaining_hits: self.remaining_hits,
+            game_total_hits: self.game_total_hits,
+            game_remaining_hits: self.game_remaining_hits,
             expires_at: self.expires_at,
             created_at: self.created_at,
         })
@@ -190,7 +194,7 @@ async fn insert_bucket_row(
     bucket: &QuotaBucket,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, game_total_hits, game_remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(bucket.id.to_string())
     .bind(bucket.key_id.to_string())
@@ -199,6 +203,8 @@ async fn insert_bucket_row(
     .bind(bucket.package_id.map(|id| id.to_string()))
     .bind(bucket.total_hits)
     .bind(bucket.remaining_hits)
+    .bind(bucket.game_total_hits)
+    .bind(bucket.game_remaining_hits)
     .bind(bucket.expires_at)
     .bind(bucket.created_at)
     .execute(pool)
@@ -211,10 +217,12 @@ async fn update_bucket_row(
     bucket: &QuotaBucket,
 ) -> Result<u64, sqlx::Error> {
     sqlx::query(
-        "UPDATE quota_buckets SET total_hits = ?, remaining_hits = ? WHERE id = ?",
+        "UPDATE quota_buckets SET total_hits = ?, remaining_hits = ?, game_total_hits = ?, game_remaining_hits = ? WHERE id = ?",
     )
     .bind(bucket.total_hits)
     .bind(bucket.remaining_hits)
+    .bind(bucket.game_total_hits)
+    .bind(bucket.game_remaining_hits)
     .bind(bucket.id.to_string())
     .execute(pool)
     .await
@@ -228,7 +236,7 @@ async fn insert_bucket_row_tx(
     bucket: &QuotaBucket,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO quota_buckets (id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, game_total_hits, game_remaining_hits, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(bucket.id.to_string())
     .bind(bucket.key_id.to_string())
@@ -237,6 +245,8 @@ async fn insert_bucket_row_tx(
     .bind(bucket.package_id.map(|id| id.to_string()))
     .bind(bucket.total_hits)
     .bind(bucket.remaining_hits)
+    .bind(bucket.game_total_hits)
+    .bind(bucket.game_remaining_hits)
     .bind(bucket.expires_at)
     .bind(bucket.created_at)
     .execute(&mut **tx)
@@ -250,10 +260,12 @@ async fn update_bucket_row_tx(
     bucket: &QuotaBucket,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "UPDATE quota_buckets SET total_hits = ?, remaining_hits = ? WHERE id = ?",
+        "UPDATE quota_buckets SET total_hits = ?, remaining_hits = ?, game_total_hits = ?, game_remaining_hits = ? WHERE id = ?",
     )
     .bind(bucket.total_hits)
     .bind(bucket.remaining_hits)
+    .bind(bucket.game_total_hits)
+    .bind(bucket.game_remaining_hits)
     .bind(bucket.id.to_string())
     .execute(&mut **tx)
     .await
@@ -329,6 +341,10 @@ pub struct AdminStore {
     /// only for the get-or-increment, never across an await.
     invalid_free_fallback:
         std::sync::Mutex<HashMap<(String, chrono::NaiveDate), u32>>,
+    /// Cerminan game dari pool di atas (migrasi 0042): pool gratis
+    /// NotFound game terpisah dari pool validasi.
+    game_invalid_free_fallback:
+        std::sync::Mutex<HashMap<(String, chrono::NaiveDate), u32>>,
     /// Short-lived analytics cache (AREA 1, 60 detik, keyed by window):
     /// the analytics endpoint aggregates `validation_requests` on every
     /// call, and the dashboard polls often enough for that to matter.
@@ -368,6 +384,10 @@ struct QuotaWrite {
     /// atas. None = gerakan agregat lama (grant/assign/adjust, yang
     /// menulis baris bucket-nya sendiri) atau kunci tanpa bucket.
     bucket: Option<(Uuid, u64)>,
+    /// Delta game dari gerakan ini (bucket_id, sisa game baru bucket
+    /// itu), ditulis writer dalam pesan yang sama, setelah delta di
+    /// atas. None = gerakan bukan game.
+    game_bucket: Option<(Uuid, u64)>,
 }
 
 /// Durable dashboard aggregates computed from `validation_requests`.
@@ -531,6 +551,7 @@ impl AdminStore {
             quota_writer: std::sync::Mutex::new(None),
             key_locks: std::sync::Mutex::new(HashMap::new()),
             invalid_free_fallback: std::sync::Mutex::new(HashMap::new()),
+            game_invalid_free_fallback: std::sync::Mutex::new(HashMap::new()),
             analytics_cache: std::sync::Mutex::new(None),
             default_rate_limit_per_minute: std::sync::atomic::AtomicU32::new(
                 default_rate_limit_per_minute.max(1),
@@ -699,7 +720,7 @@ impl AdminStore {
         };
         // Packages: DB rows replace the samples; an empty table receives the
         // current in-memory set as its initial content.
-        match sqlx::query_as::<_, PackageRow>("SELECT id, name, slug, description, price_idr, included_hits, active, highlighted, products, rate_limit_per_minute, promo_percent, promo_ends_at, created_at, updated_at FROM admin_packages")
+        match sqlx::query_as::<_, PackageRow>("SELECT id, name, slug, description, price_idr, included_hits, game_hits, active, highlighted, products, rate_limit_per_minute, promo_percent, promo_ends_at, created_at, updated_at FROM admin_packages")
             .fetch_all(&pool)
             .await
         {
@@ -787,7 +808,7 @@ impl AdminStore {
         // migrasi 0023) = warn saja: kunci tetap jalan lewat agregat
         // lama sampai migrasi diterapkan, bukan crash saat start.
         match sqlx::query_as::<_, QuotaBucketRow>(
-            "SELECT id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, expires_at, created_at FROM quota_buckets",
+            "SELECT id, key_id, member_id, order_id, package_id, total_hits, remaining_hits, game_total_hits, game_remaining_hits, expires_at, created_at FROM quota_buckets",
         )
         .fetch_all(&pool)
         .await
@@ -895,8 +916,8 @@ impl AdminStore {
         let Some(pool) = self.pool() else { return };
         let products = serde_json::to_string(&package.products).unwrap_or_else(|_| "[]".into());
         if let Err(error) = sqlx::query(
-            "INSERT INTO admin_packages (id, name, slug, description, price_idr, included_hits, active, highlighted, products, rate_limit_per_minute, promo_percent, promo_ends_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-             ON DUPLICATE KEY UPDATE name = VALUES(name), slug = VALUES(slug), description = VALUES(description), price_idr = VALUES(price_idr), included_hits = VALUES(included_hits), active = VALUES(active), highlighted = VALUES(highlighted), products = VALUES(products), rate_limit_per_minute = VALUES(rate_limit_per_minute), promo_percent = VALUES(promo_percent), promo_ends_at = VALUES(promo_ends_at), updated_at = VALUES(updated_at)",
+            "INSERT INTO admin_packages (id, name, slug, description, price_idr, included_hits, game_hits, active, highlighted, products, rate_limit_per_minute, promo_percent, promo_ends_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON DUPLICATE KEY UPDATE name = VALUES(name), slug = VALUES(slug), description = VALUES(description), price_idr = VALUES(price_idr), included_hits = VALUES(included_hits), game_hits = VALUES(game_hits), active = VALUES(active), highlighted = VALUES(highlighted), products = VALUES(products), rate_limit_per_minute = VALUES(rate_limit_per_minute), promo_percent = VALUES(promo_percent), promo_ends_at = VALUES(promo_ends_at), updated_at = VALUES(updated_at)",
         )
         .bind(package.id.to_string())
         .bind(&package.name)
@@ -904,6 +925,7 @@ impl AdminStore {
         .bind(&package.description)
         .bind(package.price_idr)
         .bind(package.included_hits)
+        .bind(package.game_hits)
         .bind(package.active)
         .bind(package.highlighted)
         .bind(products)
@@ -1140,6 +1162,34 @@ impl AdminStore {
                         }
                     }
                 }
+                // Delta game (migrasi 0042): pesan yang sama, setelah
+                // delta validasi — urutan key-vs-bucket tetap tidak
+                // terbalik. None = gerakan bukan game.
+                if let Some((bucket_id, game_remaining)) = write.game_bucket {
+                    let mut delay = std::time::Duration::from_secs(1);
+                    loop {
+                        match sqlx::query(
+                            "UPDATE quota_buckets SET game_remaining_hits = ? WHERE id = ?",
+                        )
+                        .bind(game_remaining)
+                        .bind(bucket_id.to_string())
+                        .execute(&pool)
+                        .await
+                        {
+                            Ok(result) => {
+                                if result.rows_affected() == 0 {
+                                    tracing::warn!(prefix = %write.prefix, bucket_id = %bucket_id, "Snapshot bucket game tidak menemukan baris bucket di database (0 baris diubah); snapshot bucket game hilang");
+                                }
+                                break;
+                            }
+                            Err(error) => {
+                                tracing::warn!(?error, prefix = %write.prefix, bucket_id = %bucket_id, "Gagal menyimpan sisa bucket game ke database (writer); percobaan ulang");
+                                tokio::time::sleep(delay).await;
+                                delay = (delay * 2).min(std::time::Duration::from_secs(30));
+                            }
+                        }
+                    }
+                }
             }
         });
         *slot = Some(tx);
@@ -1170,17 +1220,20 @@ impl AdminStore {
     /// rare dropped write self-healing on the next movement. Without a
     /// writer (worker binary, tests) the UPDATE runs inline as before.
     async fn persist_key_quota(&self, prefix: &str, remaining_quota: u64) {
-        self.persist_key_quota_with_bucket(prefix, remaining_quota, None)
+        self.persist_key_quota_with_bucket(prefix, remaining_quota, None, None)
             .await;
     }
 
     /// Seperti persist_key_quota, ditambah delta satu bucket (dipakai
     /// reserve/refund jalur panas — bukan grant/assign/adjust).
+    /// `game_bucket` = delta game (migrasi 0042); None untuk gerakan
+    /// bukan game.
     async fn persist_key_quota_with_bucket(
         &self,
         prefix: &str,
         remaining_quota: u64,
         bucket: Option<(Uuid, u64)>,
+        game_bucket: Option<(Uuid, u64)>,
     ) {
         let tx = self.quota_tx.read().expect("quota writer lock").clone();
         if let Some(tx) = tx {
@@ -1189,6 +1242,7 @@ impl AdminStore {
                 remaining: remaining_quota,
                 at: Utc::now(),
                 bucket,
+                game_bucket,
             };
             match tx.try_send(write) {
                 Ok(()) => return,
@@ -1218,7 +1272,19 @@ impl AdminStore {
                 Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
             }
         }
-        self.persist_key_quota_direct(prefix, remaining_quota, Utc::now(), bucket)
+        self.persist_key_quota_direct(prefix, remaining_quota, Utc::now(), bucket, game_bucket)
+            .await;
+    }
+
+    /// Persist gerakan game (migrasi 0042): snapshot agregat validasi
+    /// dikirim apa adanya (tidak berubah oleh gerakan game) + delta game.
+    async fn persist_game_quota_with_bucket(
+        &self,
+        prefix: &str,
+        remaining_quota: u64,
+        game_bucket: Option<(Uuid, u64)>,
+    ) {
+        self.persist_key_quota_with_bucket(prefix, remaining_quota, None, game_bucket)
             .await;
     }
 
@@ -1352,6 +1418,7 @@ pub async fn prune_old_raw_targets(
         remaining_quota: u64,
         at: chrono::DateTime<Utc>,
         bucket: Option<(Uuid, u64)>,
+        game_bucket: Option<(Uuid, u64)>,
     ) {
         let Some(pool) = self.pool() else { return };
         match sqlx::query(
@@ -1389,6 +1456,25 @@ pub async fn prune_old_raw_targets(
                 }
                 Err(error) => {
                     tracing::warn!(?error, prefix, bucket_id = %bucket_id, "Gagal menyimpan sisa bucket ke database");
+                }
+            }
+        }
+        if let Some((bucket_id, game_remaining)) = game_bucket {
+            match sqlx::query(
+                "UPDATE quota_buckets SET game_remaining_hits = ? WHERE id = ?",
+            )
+            .bind(game_remaining)
+            .bind(bucket_id.to_string())
+            .execute(&pool)
+            .await
+            {
+                Ok(result) => {
+                    if result.rows_affected() == 0 {
+                        tracing::warn!(prefix, bucket_id = %bucket_id, "Snapshot bucket game tidak menemukan baris bucket di database (0 baris diubah); snapshot bucket game hilang");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(?error, prefix, bucket_id = %bucket_id, "Gagal menyimpan sisa bucket game ke database");
                 }
             }
         }
@@ -1698,6 +1784,7 @@ pub async fn prune_old_raw_targets(
                         ValidationProduct::Ewallet => "Validasi e-wallet",
                         ValidationProduct::Whatsapp => "Validasi WhatsApp",
                         ValidationProduct::Pln => "Validasi PLN",
+                        ValidationProduct::Game => "Cek ID game",
                     };
                     Some(ActivityItem {
                         id: Uuid::parse_str(&request_id).unwrap_or_else(|_| Uuid::new_v4()),
@@ -1800,6 +1887,7 @@ pub async fn prune_old_raw_targets(
             description: input.description.trim().to_owned(),
             price_idr: input.price_idr,
             included_hits: input.included_hits,
+            game_hits: input.game_hits,
             active: input.active,
             highlighted: input.highlighted,
             products: input.products,
@@ -1858,6 +1946,10 @@ pub async fn prune_old_raw_targets(
                 ));
             }
             package.included_hits = hits;
+        }
+        if let Some(game_hits) = input.game_hits {
+            // 0 = paket tidak berisi hit game (boleh; bukan error).
+            package.game_hits = game_hits;
         }
         if let Some(active) = input.active {
             package.active = active;
@@ -2884,6 +2976,8 @@ pub async fn prune_old_raw_targets(
                         package_id: record.package_id,
                         total_hits: remainder,
                         remaining_hits: remainder,
+                        game_total_hits: 0,
+                        game_remaining_hits: 0,
                         expires_at: Some(expiry),
                         created_at: now,
                     });
@@ -3139,6 +3233,7 @@ pub async fn prune_old_raw_targets(
         &self,
         member_id: Uuid,
         quota_hits: u64,
+        game_hits: u64,
         valid_days: i64,
         mode: &str,
         rate_limit_per_minute: Option<u32>,
@@ -3203,6 +3298,7 @@ pub async fn prune_old_raw_targets(
             None,
             package_id,
             quota_hits,
+            game_hits,
             valid_days,
             now,
         );
@@ -3307,6 +3403,7 @@ pub async fn prune_old_raw_targets(
         order_id: Uuid,
         member_id: Uuid,
         quota_hits: u64,
+        game_hits: u64,
         valid_days: i64,
         package_rate: u32,
         package_id: Uuid,
@@ -3402,6 +3499,7 @@ pub async fn prune_old_raw_targets(
             Some(order_id),
             Some(package_id),
             quota_hits,
+            game_hits,
             valid_days,
             now,
         );
@@ -4447,6 +4545,8 @@ impl AdminStore {
                 }),
                 total_hits: bucket.total_hits,
                 remaining_hits: bucket.remaining_hits,
+                game_total_hits: bucket.game_total_hits,
+                game_remaining_hits: bucket.game_remaining_hits,
                 expires_at: bucket.expires_at,
             })
             .collect()
@@ -4506,6 +4606,7 @@ impl AdminStore {
                 prefix,
                 remaining,
                 Some((bucket_id, bucket_remaining)),
+                None,
             )
             .await;
             drop(data);
@@ -4585,9 +4686,284 @@ impl AdminStore {
         if let Some((remaining, bucket)) = movement {
             // Same ordering rule as reserve_quota: the send happens under
             // the lock so a refund can never overtake its reserve.
-            self.persist_key_quota_with_bucket(prefix, remaining, bucket)
+            self.persist_key_quota_with_bucket(prefix, remaining, bucket, None)
                 .await;
         }
+    }
+
+
+    /// Sisa hit game aktif kunci ini (agregat game_bucket_aggregate).
+    /// None bila kunci tidak dikenal.
+    pub async fn game_quota_remaining(&self, prefix: &str) -> Option<u64> {
+        let data = self.data.read().await;
+        let record = data.api_keys.get(prefix)?;
+        Some(crate::models::game_bucket_aggregate(&record.buckets, Utc::now()).1)
+    }
+
+    /// (sisa game aktif, expiry bucket game aktif terdekat) untuk meta
+    /// respons game — cerminan definisi meta validasi, tapi atas kolom
+    /// game_* (migrasi 0042).
+    pub async fn game_quota_summary(
+        &self,
+        prefix: &str,
+    ) -> Option<(u64, u64, Option<chrono::DateTime<Utc>>)> {
+        let data = self.data.read().await;
+        let record = data.api_keys.get(prefix)?;
+        let (total, remaining, expiry) =
+            crate::models::game_bucket_aggregate(&record.buckets, Utc::now());
+        Some((total, remaining, expiry))
+    }
+
+    /// Potong 1 hit game dari bucket FIFO-pertama yang masih aktif
+    /// (cerminan reserve_quota, migrasi 0042). Kunci tanpa bucket atau
+    /// tanpa sisa game aktif -> 402 SEBELUM provider dipanggil, persis
+    /// seperti validasi: pool gratis hanya bisa dipakai selama sisa game
+    /// di atas nol.
+    pub async fn reserve_game_quota(
+        &self,
+        prefix: &str,
+    ) -> Result<(u64, Option<Uuid>), AppError> {
+        // B6: lock member dulu (urutan mengikat), seperti reserve_quota.
+        let member_lock = self.member_lock_for_prefix(prefix).await;
+        let _member_guard = match &member_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        let mut data = self.data.write().await;
+        let record = data
+            .api_keys
+            .get_mut(prefix)
+            .ok_or_else(|| AppError::unauthorized("API key tidak dikenali"))?;
+        let now = Utc::now();
+        let touched = crate::models::consume_game_buckets_fifo(&mut record.buckets, now, 1);
+        let Some(touched) = touched else {
+            return Err(AppError::new(
+                axum::http::StatusCode::PAYMENT_REQUIRED,
+                "game_quota_exhausted",
+                "Kuota game sudah habis. Silakan beli paket yang berisi hit game.",
+            ));
+        };
+        // Reserve 1 hit menyentuh tepat satu bucket.
+        let (bucket_id, game_remaining) = touched
+            .into_iter()
+            .next()
+            .expect("konsumsi 1 hit game menyentuh tepat satu bucket");
+        record.summary.last_used_at = Some(now);
+        let remaining = crate::models::game_bucket_aggregate(&record.buckets, now).1;
+        let validation_remaining = record.remaining_quota;
+        self.persist_game_quota_with_bucket(
+            prefix,
+            validation_remaining,
+            Some((bucket_id, game_remaining)),
+        )
+        .await;
+        drop(data);
+        Ok((remaining, Some(bucket_id)))
+    }
+
+    /// Kembalikan 1 hit game KE BUCKET YANG TADI DIPOTONG (cerminan
+    /// refund_quota, migrasi 0042). Kunci tanpa bucket tidak punya hit
+    /// game, jadi tidak ada yang dikembalikan.
+    pub async fn refund_game_quota(&self, prefix: &str, bucket_id: Option<Uuid>) {
+        // B6: lock member dulu (urutan mengikat), seperti reserve.
+        let member_lock = self.member_lock_for_prefix(prefix).await;
+        let _member_guard = match &member_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        let mut data = self.data.write().await;
+        let now = Utc::now();
+        let movement = match data.api_keys.get_mut(prefix) {
+            Some(record) => {
+                if !record.buckets.is_empty() {
+                    match crate::models::refund_game_bucket(&mut record.buckets, now, bucket_id)
+                    {
+                        Some((id, game_remaining)) => {
+                            Some((record.remaining_quota, Some((id, game_remaining))))
+                        }
+                        // K1/K13 (game): refund hilang — tidak ada bucket
+                        // aktif yang punya ruang game.
+                        None => {
+                            tracing::warn!(prefix = %prefix, bucket_id = ?bucket_id, "Refund kuota game hilang: tidak ada bucket aktif yang punya ruang game — 1 hit game tidak dikembalikan ke bucket mana pun");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            None => None,
+        };
+        if let Some((remaining, bucket)) = movement {
+            self.persist_game_quota_with_bucket(prefix, remaining, bucket)
+                .await;
+        }
+    }
+
+    /// Klaim slot gratis game + refund sebagai SATU langkah atomik
+    /// (cerminan claim_free_slot_with_refund, migrasi 0042). Pool-nya
+    /// terpisah (`game_invalid_free_daily`), transaksi hanya menulis
+    /// klaim pool + delta bucket game — agregat validasi TIDAK disentuh.
+    /// Mengembalikan true bila hasil GRATIS.
+    pub async fn claim_game_free_slot_with_refund(
+        &self,
+        prefix: &str,
+        bucket_id: Option<Uuid>,
+        wib_day: chrono::NaiveDate,
+    ) -> bool {
+        let member_lock = self.member_lock_for_prefix(prefix).await;
+        let _member_guard = match &member_lock {
+            Some(lock) => Some(lock.lock().await),
+            None => None,
+        };
+        let mut data = self.data.write().await;
+        let now = Utc::now();
+        let Some(record) = data.api_keys.get_mut(prefix) else {
+            return false;
+        };
+        // Snapshot untuk revert bila klaim gagal sesudah refund memori.
+        let buckets_before = record.buckets.clone();
+        let bucket_delta: Option<(Uuid, u64)>;
+        match crate::models::refund_game_bucket(&mut record.buckets, now, bucket_id) {
+            Some(delta) => {
+                bucket_delta = Some(delta);
+            }
+            None => {
+                tracing::warn!(prefix = %prefix, "Klaim gratis game dibatalkan: refund tidak bisa mendarat (tidak ada bucket aktif punya ruang game) — slot tidak dikonsumsi");
+                return false;
+            }
+        }
+        let validation_remaining = record.remaining_quota;
+        if let Some(pool) = self.pool() {
+            let mut tx = match pool.begin().await {
+                Ok(tx) => tx,
+                Err(error) => {
+                    tracing::warn!(?error, prefix = %prefix, "Klaim gratis game gagal (transaksi tidak dapat dimulai); hasil ditagih");
+                    record.buckets = buckets_before;
+                    return false;
+                }
+            };
+            let step = async {
+                sqlx::query(
+                    "INSERT IGNORE INTO game_invalid_free_daily (api_key_prefix, wib_date, free_used) VALUES (?, ?, 0)",
+                )
+                .bind(prefix)
+                .bind(wib_day)
+                .execute(&mut *tx)
+                .await?;
+                let claimed = sqlx::query(
+                    "UPDATE game_invalid_free_daily SET free_used = free_used + 1 WHERE api_key_prefix = ? AND wib_date = ? AND free_used < ?",
+                )
+                .bind(prefix)
+                .bind(wib_day)
+                .bind(INVALID_FREE_DAILY_LIMIT)
+                .execute(&mut *tx)
+                .await?;
+                if claimed.rows_affected() != 1 {
+                    return Err(sqlx::Error::RowNotFound);
+                }
+                if let Some((bucket_id, game_remaining)) = bucket_delta {
+                    sqlx::query(
+                        "UPDATE quota_buckets SET game_remaining_hits = ? WHERE id = ?",
+                    )
+                    .bind(game_remaining)
+                    .bind(bucket_id.to_string())
+                    .execute(&mut *tx)
+                    .await?;
+                }
+                tx.commit().await
+            }
+            .await;
+            if let Err(error) = step {
+                tracing::warn!(?error, prefix = %prefix, "Klaim gratis game batal (pool habis / galat DB); hasil ditagih, memori dikembalikan");
+                record.buckets = buckets_before;
+                return false;
+            }
+        } else {
+            let mut map = self
+                .game_invalid_free_fallback
+                .lock()
+                .expect("game invalid free map");
+            let used = map.entry((prefix.to_owned(), wib_day)).or_insert(0);
+            if *used >= INVALID_FREE_DAILY_LIMIT {
+                record.buckets = buckets_before;
+                return false;
+            }
+            *used += 1;
+        }
+        self.persist_game_quota_with_bucket(prefix, validation_remaining, bucket_delta)
+            .await;
+        true
+    }
+
+    /// Best-effort release slot gratis game (cerminan
+    /// release_invalid_free_slot, migrasi 0042).
+    pub async fn release_game_free_slot(
+        &self,
+        prefix: &str,
+        wib_day: chrono::NaiveDate,
+    ) {
+        if let Some(pool) = self.pool() {
+            let mut delay_ms = 50u64;
+            for attempt in 1..=5 {
+                match sqlx::query(
+                    "UPDATE game_invalid_free_daily SET free_used = GREATEST(free_used - 1, 0) WHERE api_key_prefix = ? AND wib_date = ?",
+                )
+                .bind(prefix)
+                .bind(wib_day)
+                .execute(&pool)
+                .await
+                {
+                    Ok(_) => return,
+                    Err(error) => {
+                        if attempt == 5 {
+                            tracing::warn!(?error, prefix = %prefix, "Release slot gratis game gagal setelah 5 percobaan; 1 slot hangus untuk hasil yang tak pernah diterima");
+                        } else {
+                            tracing::warn!(?error, prefix = %prefix, attempt, "Release slot gratis game gagal; dicoba lagi");
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms))
+                                .await;
+                            delay_ms *= 2;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        let mut map = self
+            .game_invalid_free_fallback
+            .lock()
+            .expect("game invalid free map");
+        if let Some(used) = map.get_mut(&(prefix.to_owned(), wib_day)) {
+            *used = used.saturating_sub(1);
+        }
+    }
+
+    /// Slot gratis game yang sudah terpakai hari ini untuk satu kunci
+    /// (cerminan invalid_free_used_today, migrasi 0042).
+    pub async fn game_invalid_free_used_today(
+        &self,
+        prefix: &str,
+        wib_day: chrono::NaiveDate,
+    ) -> u32 {
+        if let Some(pool) = self.pool() {
+            return sqlx::query_scalar::<_, i64>(
+                "SELECT free_used FROM game_invalid_free_daily WHERE api_key_prefix = ? AND wib_date = ?",
+            )
+            .bind(prefix)
+            .bind(wib_day)
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|value| value.max(0) as u32)
+            .unwrap_or(0);
+        }
+        self.game_invalid_free_fallback
+            .lock()
+            .expect("game invalid free map")
+            .get(&(prefix.to_owned(), wib_day))
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Claim one slot from the daily invalid free pool for (prefix, WIB
@@ -4798,7 +5174,7 @@ impl AdminStore {
         // Snapshot writer dengan nilai yang sama (FIFO setelah snapshot
         // reserve) — idempotent terhadap tulis transaksi di atas, dan
         // menjaga urutan bila writer memproses antrean lebih lambat.
-        self.persist_key_quota_with_bucket(prefix, new_remaining, bucket_delta)
+        self.persist_key_quota_with_bucket(prefix, new_remaining, bucket_delta, None)
             .await;
         true
     }
@@ -5706,6 +6082,7 @@ fn sample_packages(now: chrono::DateTime<Utc>) -> Vec<AdminPackage> {
             description: "Untuk uji integrasi dan volume awal.".to_owned(),
             price_idr: 99_000,
             included_hits: 500,
+            game_hits: 0,
             active: true,
             highlighted: false,
             products: vec![
@@ -5726,6 +6103,7 @@ fn sample_packages(now: chrono::DateTime<Utc>) -> Vec<AdminPackage> {
             description: "Paket fleksibel untuk tim produk yang sedang berkembang.".to_owned(),
             price_idr: 399_000,
             included_hits: 3_000,
+            game_hits: 0,
             active: true,
             highlighted: true,
             products: vec![
@@ -5747,6 +6125,7 @@ fn sample_packages(now: chrono::DateTime<Utc>) -> Vec<AdminPackage> {
             description: "Kapasitas tinggi dengan limit khusus untuk trafik besar.".to_owned(),
             price_idr: 1_499_000,
             included_hits: 15_000,
+            game_hits: 0,
             active: true,
             highlighted: false,
             products: vec![
@@ -5812,6 +6191,7 @@ struct PackageRow {
     description: String,
     price_idr: u64,
     included_hits: u64,
+    game_hits: u64,
     active: bool,
     highlighted: bool,
     products: String,
@@ -5832,6 +6212,7 @@ impl PackageRow {
             description: self.description,
             price_idr: self.price_idr,
             included_hits: self.included_hits,
+            game_hits: self.game_hits,
             active: self.active,
             highlighted: self.highlighted,
             products: serde_json::from_str(&self.products)
@@ -6601,7 +6982,7 @@ mod quota_bucket_tests {
         )
         .await;
         store
-            .assign_plan_to_member_key(member.id, 50, 30, "add", None, None, "package")
+            .assign_plan_to_member_key(member.id, 50, 0, 30, "add", None, None, "package")
             .await
             .expect("assign-add membuat bucket kedua");
         let buckets = store.key_bucket_list(&key.prefix).await;
@@ -6663,7 +7044,7 @@ mod quota_bucket_tests {
         )
         .await;
         store
-            .assign_plan_to_member_key(member.id, 30, 30, "add", None, None, "package")
+            .assign_plan_to_member_key(member.id, 30, 0, 30, "add", None, None, "package")
             .await
             .expect("assign-add");
         // Sisa tampil = aktif saja (30), bukan 80.
@@ -6703,7 +7084,7 @@ mod quota_bucket_tests {
         assert_eq!(remaining, 150);
         // Replace: semua bucket lama hilang, satu bucket baru 200 hit.
         let (summary, remaining, deleted_buckets) = store
-            .assign_plan_to_member_key(member.id, 200, 30, "replace", None, None, "package")
+            .assign_plan_to_member_key(member.id, 200, 0, 30, "replace", None, None, "package")
             .await
             .expect("assign-replace");
         assert_eq!(remaining, 200);
@@ -6907,6 +7288,7 @@ mod quota_writer_backpressure_tests {
             remaining,
             at: Utc::now(),
             bucket: None,
+            game_bucket: None,
         }
     }
 

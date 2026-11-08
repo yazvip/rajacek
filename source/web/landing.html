@@ -27,7 +27,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-    <link rel="stylesheet" href="/landing.css?v=20261101-1" />
+    <link rel="stylesheet" href="/landing.css?v=20261108-1" />
     <style>
       /* AREA 6: banner pengumuman/maintenance dari GET /v1/status.
          Teks diisi lewat textContent di script bawah (bukan innerHTML),
@@ -73,7 +73,7 @@
         <div class="hero-copy">
           <p class="eyebrow"><span class="pulse" aria-hidden="true"></span> Infrastruktur validasi untuk Indonesia</p>
           <h1 id="hero-title">Validasi dulu, <em>baru transaksi.</em></h1>
-          <p class="hero-lede">Validasi rekening bank, akun e-wallet, nomor WhatsApp, dan ID pelanggan PLN lewat satu API yang dirancang untuk alur pembayaran dan onboarding yang lebih pasti.</p>
+          <p class="hero-lede">Validasi rekening bank, akun e-wallet, nomor WhatsApp, ID pelanggan PLN, dan ID game lewat satu API yang dirancang untuk alur pembayaran dan onboarding yang lebih pasti.</p>
           <div class="hero-actions"><a class="button button-primary" href="/v1/auth/google/member/start">Coba gratis — {{TRIAL_HITS}}× cek <span aria-hidden="true">→</span></a><a class="button button-quiet" href="/docs">Lihat dokumentasi API</a></div>
           <p class="hero-note">Daftar cukup dengan akun Google — API key langsung terbit, tanpa kartu kredit. Trial berlaku {{TRIAL_DAYS}} hari; lanjutkan kapan saja dengan paket.</p>
           <ul class="trust-row" aria-label="Keunggulan Rajacek"><li><strong>1 API</strong><span>empat kebutuhan validasi</span></li><li><strong>Idempoten</strong><span>aman untuk retry</span></li><li><strong>Berbasis izin</strong><span>data tetap terkendali</span></li></ul>
@@ -109,6 +109,7 @@
           <article class="product-card"><span class="product-icon icon-violet" aria-hidden="true"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12V7H5a2 2 0 0 1 0-4h14v4"/><path d="M3 5v14a2 2 0 0 0 2 2h16v-5"/><path d="M18 12a2 2 0 0 0 0 4h4v-4Z"/></svg></span><h3>Validasi e-wallet</h3><p>Periksa nama pemilik akun DANA, GoPay, OVO, LinkAja, ShopeePay, dan e-wallet lainnya sebelum top-up atau payout diproses.</p><a href="/docs#validasi-ewallet">Lihat endpoint e-wallet <span aria-hidden="true">→</span></a></article>
           <article class="product-card"><span class="product-icon icon-mint" aria-hidden="true"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M7 4h10a3.5 3.5 0 0 1 3.5 3.5v6a3.5 3.5 0 0 1-3.5 3.5H9l-5.5 4V7.5A3.5 3.5 0 0 1 7 4Z"/><path d="M8 11.2l2.6 2.6L16.5 8"/></svg></span><h3>Validasi WhatsApp</h3><p>Pastikan nomor pelanggan benar-benar terdaftar di WhatsApp, sebelum tim Anda menghubunginya atau mengirim notifikasi.</p><a href="/docs#validasi-whatsapp">Lihat endpoint WhatsApp <span aria-hidden="true">→</span></a></article>
           <article class="product-card"><span class="product-icon icon-amber" aria-hidden="true"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M13 2.5 4.8 13.5h5.4l-1.6 8L19.2 10.5h-5.6L13 2.5Z"/></svg></span><h3>Validasi PLN</h3><p>Periksa nama pelanggan beserta tarif/daya dari ID pelanggan PLN (11–12 digit) — sebelum pembayaran diproses.</p><a href="/docs#validasi-pln">Lihat endpoint PLN <span aria-hidden="true">→</span></a></article>
+          <article class="product-card"><span class="product-icon icon-rose" aria-hidden="true"><svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M7 8h10a5 5 0 0 1 5 5v1a3 3 0 0 1-5.4 1.75L15 13.5h-2l-1.2 3.6a1 1 0 0 1-1.8.6L8.6 15H6a3 3 0 0 1-3-3v-1a5 5 0 0 1 4-3Z"/><path d="M8 11v3M6.5 12.5h3"/><circle cx="15.5" cy="11.5" r=".9" fill="currentColor"/><circle cx="17.5" cy="13.5" r=".9" fill="currentColor"/></svg></span><h3>Cek ID Game</h3><p>Pastikan User ID game benar-benar ada dan lihat nickname pemainnya — Mobile Legends, Free Fire, PUBG, Genshin, dan 13 game lainnya.</p><a href="/docs#validasi-game">Lihat endpoint game <span aria-hidden="true">→</span></a></article>
         </div>
       </section>
 

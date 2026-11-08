@@ -139,6 +139,7 @@
         <a href="#validasi-ewallet">Validasi e-wallet</a>
         <a href="#validasi-whatsapp">Validasi WhatsApp</a>
         <a href="#validasi-pln">Validasi PLN</a>
+        <a href="#validasi-game">Cek ID Game</a>
         <p>Referensi</p>
         <a href="#status-hasil">Status hasil</a>
         <a href="#kode-error">Kode error</a>
@@ -149,7 +150,7 @@
       <main class="docs-body" id="content">
         <p class="eyebrow">Dokumentasi API · Member &amp; Publik</p>
         <h1>Integrasi Rajacek dalam hitungan menit.</h1>
-        <p>Rajacek mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, <strong>nomor WhatsApp</strong>, dan <strong>ID pelanggan PLN</strong> Indonesia lewat satu API. Semua contoh di halaman ini memakai domain asli <code>https://www.rajacek.com</code> dan bisa langsung disalin-tempel. Ganti saja kunci contoh <code>rc_CONTOH</code> dengan kunci Anda sendiri. Kunci baru diawali <code>rc_</code>. Kunci lama <code>rv_live_</code> tetap berlaku. Perlakukan kunci Anda seperti kata sandi. Jangan dibagikan ke siapa pun.</p>
+        <p>Rajacek mengecek <strong>rekening bank</strong>, <strong>akun e-wallet</strong>, <strong>nomor WhatsApp</strong>, <strong>ID pelanggan PLN</strong>, dan <strong>ID game</strong> Indonesia lewat satu API. Semua contoh di halaman ini memakai domain asli <code>https://www.rajacek.com</code> dan bisa langsung disalin-tempel. Ganti saja kunci contoh <code>rc_CONTOH</code> dengan kunci Anda sendiri. Kunci baru diawali <code>rc_</code>. Kunci lama <code>rv_live_</code> tetap berlaku. Perlakukan kunci Anda seperti kata sandi. Jangan dibagikan ke siapa pun.</p>
         <div class="docs-actions">
           <a class="button button-primary" href="/openapi.json">Unduh OpenAPI JSON</a>
           <a class="button button-quiet" href="#mulai-cepat">Mulai cepat ↓</a>
@@ -204,7 +205,7 @@
 Authorization: Bearer rc_KUNCI_ANDA</code></pre>
         <p>Cara ketiga, khusus <code>/api/v3/validate</code>: kirim <code>api_key</code> lewat query (GET) atau field <code>api_key</code> di body JSON (POST). Jika lebih dari satu sumber dikirim dengan nilai berbeda, request ditolak 401. Jangan bagikan URL yang masih mengandung <code>api_key</code>. Kunci di query bisa tercatat di log server dan riwayat browser.</p>
         <ul>
-          <li>Setiap kunci punya <strong>izin (scope)</strong> per produk: <code>validate:bank_account</code>, <code>validate:ewallet</code>, <code>validate:whatsapp</code>, <code>validate:pln</code>, atau <code>validate:*</code> untuk semua produk. Kunci tanpa izin produk ditolak 403.</li>
+          <li>Setiap kunci punya <strong>izin (scope)</strong> per produk: <code>validate:bank_account</code>, <code>validate:ewallet</code>, <code>validate:whatsapp</code>, <code>validate:pln</code>, <code>validate:game</code>, atau <code>validate:*</code> untuk semua produk. Kunci tanpa izin produk ditolak 403.</li>
           <li>Kunci hanya ditampilkan <strong>satu kali</strong>, saat dibuat. Setelah itu server hanya menyimpan hash-nya. Kunci asli tidak bisa ditampilkan lagi.</li>
           <li>Jika kunci Anda bocor, segera hubungi kami (email apivalidasi@gmail.com atau Telegram @xyz_yaz) agar kunci itu dicabut. Kunci yang sudah dicabut langsung ditolak 401.</li>
         </ul>
@@ -237,6 +238,7 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
           <li>Batas bawaan: <strong>60 request per menit</strong> untuk setiap kunci. Sisa jatah Anda ada di header respons <code>X-RateLimit-Remaining</code>. Jika batas terlampaui, API menjawab <strong>429</strong>. Tunggu sebentar (lihat header <code>Retry-After</code>), lalu coba lagi.</li>
           <li><strong>Valid dan Belum KYC memotong 1 hit. Hasil Tidak Valid gratis hingga 100 per hari per kunci, selebihnya 1 hit.</strong> Tepatnya: hasil <code>valid</code> dan <code>not_kyc</code> (akun e-wallet belum KYC) selalu memotong 1 hit. Hasil <code>invalid</code> dan <code>not_found</code> — satu pool bersama — gratis untuk 100 hasil pertama per kunci per hari kalender WIB. Mulai hasil tidak-valid ke-101 pada hari itu, masing-masing memotong 1 hit seperti biasa. Cek yang gagal karena error, pending, atau kena rate limit <strong>tidak</strong> memotong kuota dan tidak memakan jatah gratis. Pengiriman ulang dengan <code>Idempotency-Key</code> yang sama tidak pernah memotong dan tidak memakan jatah. Catatan: kunci bersaldo 0 tetap ditolak <code>402</code> sebelum cek berjalan. Jadi jatah gratis hanya bisa dipakai selama saldo masih di atas 0. Hitungan gratis hari ini tampil di portal member. Pool terikat <strong>prefix kunci, bukan member</strong>. Regenerasi menerbitkan prefix baru, sehingga jatah hari itu dimulai baru untuk kunci baru. Jatah kunci lama tidak terbawa.</li>
           <li>Sisa kuota Anda selalu tampil di <code>meta.remaining_quota</code> pada setiap respons.</li>
+          <li><strong>Kuota game terpisah dari kuota validasi.</strong> Setiap paket membawa kuota game sendiri (tertera di kartu paket); cek game yang <code>valid</code> memotong 1 hit game, dan <code>not_found</code> game gratis 100 pertama per hari per kunci dari pool game sendiri. Trial tidak membawa kuota game. Untuk cek game, <code>meta.remaining_quota</code> adalah sisa hit game, dan <code>meta.expires_at</code> adalah masa aktif bucket game yang sedang dipakai. Cek game tidak memotong kuota validasi, dan sebaliknya.</li>
           <li>Masa aktif paket Anda tampil di <code>meta.expires_at</code> pada setiap respons. Ini tanggal kedaluwarsa paket yang <em>sedang dipakai</em> (paket yang paling cepat habis). Nilainya sama persis dengan yang tampil di portal member. Nilai <code>null</code> berarti kunci Anda tidak pernah kedaluwarsa. Pengiriman ulang dengan <code>Idempotency-Key</code> yang sama tetap menampilkan tanggal terbaru, bukan tanggal saat request pertama.</li>
         </ul>
 
@@ -374,6 +376,40 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
 }</code></pre>
         <p><code>tarif</code> dan <code>daya</code> hanya ada untuk PLN, dan hanya bila tersedia pada hasil valid. Produk lain tidak membawa field ini. <code>meta.provider</code> tetap <code>"Rajacek"</code>. Nama provider upstream tidak pernah ditampilkan di permukaan member.</p>
 
+        <h2 id="validasi-game">Cek ID Game <span class="method get">GET</span> <span class="method post">POST</span> <span class="endpoint-path">/api/v3/validate</span></h2>
+        <p>Produk <code>game</code> memeriksa <strong>ID game</strong> dan mengembalikan nickname pemain. <code>code</code> adalah kode layanan game (bukan kode bank): <code>region-ml</code>, <code>mlbb-bundle</code>, <code>mlcreate</code>, <code>first-topup</code>, <code>first-mcgg</code>, <code>mcgg</code>, <code>undawn</code>, <code>free-fire</code>, <code>pubg</code>, <code>codm</code>, <code>zenless</code>, <code>hok</code>, <code>blood-strike</code>, <code>valorant</code>, <code>genshin</code>, <code>hsr</code>, <code>roblox</code>. Hanya game yang diaktifkan admin yang bisa dipakai — game nonaktif menjawab 400. <code>accountNumber</code> berisi User ID; untuk Roblox berisi username, untuk Valorant berisi Riot ID (<code>Nama#TAG</code>).</p>
+        <table>
+          <tr><th>Field</th><th>Wajib</th><th>Keterangan</th></tr>
+          <tr><td><code>code</code></td><td>Ya</td><td>Kode layanan game (lihat daftar di atas).</td></tr>
+          <tr><td><code>accountNumber</code></td><td>Ya</td><td>User ID (3–30 digit untuk sebagian besar game; username 3–30 karakter untuk Roblox; Riot ID 3–50 karakter untuk Valorant).</td></tr>
+          <tr><td><code>zone_id</code></td><td>Hanya 6 game ML</td><td>Wajib untuk <code>region-ml</code>, <code>mlbb-bundle</code>, <code>mlcreate</code>, <code>first-topup</code>, <code>first-mcgg</code>, dan <code>mcgg</code>. Tanpa <code>zone_id</code>, request ditolak 400 sebelum provider dipanggil dan kuota tidak terpotong. Di GET, kirim sebagai query <code>zone_id</code>; di POST, sebagai field body <code>zone_id</code>.</td></tr>
+        </table>
+        <pre><code>curl "https://www.rajacek.com/api/v3/validate?code=region-ml&accountNumber=861363893&zone_id=12422&api_key=<redacted>"</code></pre>
+        <p>Atau POST dengan <code>Idempotency-Key</code> (zone ikut dalam kunci idempotensi — User ID yang sama di zone berbeda adalah cek yang berbeda):</p>
+        <pre><code>curl -X POST https://www.rajacek.com/api/v3/validate \
+  -H "Content-Type: application/json" \
+-H "X-API-Key: <redacted>
+  -H "Idempotency-Key: game-20261108-0001" \
+  -d '{"code": "region-ml", "accountNumber": "861363893", "zone_id": "12422"}'</code></pre>
+        <p>Hasil valid (HTTP 200) — <code>account_name</code> adalah nickname pemain (selalu huruf besar semua):</p>
+        <pre><code>{
+  "status": "valid",
+  "valid": true,
+  "product": "game",
+  "message": "ID game ditemukan.",
+  "result": {
+    "account_number": "861363893",
+    "service_code": "region-ml",
+    "account_name": "NICKNAME PEMAIN",
+    "zone": "12422"
+  },
+  "meta": {
+    "provider": "Rajacek",
+    "remaining_quota": 499
+  }
+}</code></pre>
+        <p>Bila tersedia, hasil juga membawa <code>country</code> dan <code>server</code>. ID yang tidak ditemukan menghasilkan <code>status: "not_found"</code> dengan pesan "ID game tidak ditemukan." dan masuk pool gratis game (gratis 100 pertama per hari per kunci, selebihnya 1 hit game). Scope: <code>validate:game</code> (atau <code>validate:*</code>). Di portal member, pilih tab <strong>Cek ID Game</strong> di <strong>Coba Cek Live</strong>.</p>
+
         <h2 id="status-hasil">Status hasil (respons 200)</h2>
         <table>
           <tr><th><code>status</code></th><th>Arti</th><th>Tertagih</th></tr>
@@ -397,11 +433,13 @@ Authorization: Bearer rc_KUNCI_ANDA</code></pre>
           <tr><td data-label="HTTP">400</td><td data-label="CODE"><code>bad_request</code></td><td data-label="Arti &amp; tindakan">Ada field yang hilang, formatnya salah, atau kode bank/e-wallet tidak dikenal. Periksa lagi isi request Anda.</td></tr>
           <tr><td data-label="HTTP">401</td><td data-label="CODE"><code>unauthorized</code></td><td data-label="Arti &amp; tindakan">Kunci tidak ada, salah, atau sudah dicabut.</td></tr>
           <tr><td data-label="HTTP">402</td><td data-label="CODE"><code>quota_exhausted</code></td><td data-label="Arti &amp; tindakan">Kuota paket Anda habis. Beli paket di portal member untuk menambah kuota.</td></tr>
+          <tr><td data-label="HTTP">402</td><td data-label="CODE"><code>game_quota_exhausted</code></td><td data-label="Arti &amp; tindakan">Kuota game paket Anda habis (kuota validasi Anda masih ada — keduanya terpisah). Beli paket dengan hit game untuk menambah kuota game.</td></tr>
           <tr><td data-label="HTTP">403</td><td data-label="CODE"><code>forbidden</code></td><td data-label="Arti &amp; tindakan">API key Anda tidak punya izin (scope) untuk produk ini.</td></tr>
           <tr><td data-label="HTTP">409</td><td data-label="CODE"><code>conflict</code></td><td data-label="Arti &amp; tindakan">Idempotency-Key yang sama sudah dipakai dengan isi berbeda, atau request sebelumnya masih diproses. Untuk operasi baru, pakai kunci baru.</td></tr>
           <tr><td data-label="HTTP">429</td><td data-label="CODE"><code>rate_limited</code></td><td data-label="Arti &amp; tindakan">Anda terlalu cepat (rate limit) atau antrean sedang penuh. Tunggu sesuai header <code>Retry-After</code>, lalu coba lagi.</td></tr>
           <tr><td data-label="HTTP">502</td><td data-label="CODE"><code>provider_error</code></td><td data-label="Arti &amp; tindakan">Layanan pemeriksa memberi respons yang tidak bisa diproses. Aman diulang dengan Idempotency-Key yang sama.</td></tr>
           <tr><td data-label="HTTP">503</td><td data-label="CODE"><code>service_unavailable</code></td><td data-label="Arti &amp; tindakan">Layanan pemeriksa sedang tidak tersedia, atau produk ini belum aktif. Coba lagi beberapa saat.</td></tr>
+          <tr><td data-label="HTTP">503</td><td data-label="CODE"><code>games_not_configured</code></td><td data-label="Arti &amp; tindakan">Layanan cek ID game belum dikonfigurasi admin (API key belum diisi). Bukan kesalahan kunci Anda — hubungi admin bila berlanjut.</td></tr>
         </table>
         <div class="callout info"><p><strong>Kami sudah mencoba lagi untuk Anda.</strong> Jika layanan pemeriksa gagal sesaat (timeout, sedang sibuk, atau respons rusak), Rajacek otomatis mengulang sampai 2 kali sebelum menyerah. Jawaban yang sudah pasti — misalnya "tidak ditemukan" — tidak pernah diulang.</p></div>
         <div class="callout info"><p><strong>Cara aman mengulang:</strong> untuk error 429, 502, dan 503, kirim ulang request yang sama persis dengan <code>Idempotency-Key</code> yang sama. Anda tidak akan ditagih dua kali.</p></div>

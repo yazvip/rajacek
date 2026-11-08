@@ -596,6 +596,13 @@ pub struct OverviewResponse {
     /// 100/day/key; 0 remaining once exhausted).
     invalid_free_used_today: u32,
     invalid_free_remaining_today: u32,
+    /// Kuota game (migrasi 0042): sisa + total dari agregat bucket game
+    /// kunci sesi ini — terpisah dari kuota validasi.
+    remaining_game_quota: u64,
+    total_game_quota: u64,
+    /// Pool gratis game hari ini (WIB): NotFound game pertama 100/hari.
+    game_free_used_today: u32,
+    game_free_remaining_today: u32,
 }
 
 fn wib() -> FixedOffset {
@@ -691,6 +698,14 @@ pub async fn overview(
         .await;
     let invalid_free_remaining_today = crate::store::INVALID_FREE_DAILY_LIMIT
         .saturating_sub(invalid_free_used_today);
+    let (total_game_quota, remaining_game_quota, _) =
+        state.store.game_quota_summary(&prefix).await.unwrap_or((0, 0, None));
+    let game_free_used_today = state
+        .store
+        .game_invalid_free_used_today(&prefix, wib_date(Utc::now()))
+        .await;
+    let game_free_remaining_today = crate::store::INVALID_FREE_DAILY_LIMIT
+        .saturating_sub(game_free_used_today);
     let buckets = state.store.key_buckets(&prefix).await;
     let package_name = match summary.package_id {
         Some(package_id) => state
@@ -725,6 +740,10 @@ pub async fn overview(
         source,
         invalid_free_used_today,
         invalid_free_remaining_today,
+        remaining_game_quota,
+        total_game_quota,
+        game_free_used_today,
+        game_free_remaining_today,
     }))
 }
 
@@ -1746,6 +1765,10 @@ pub struct SandboxCheckRequest {
     bank_code: Option<String>,
     ewallet_provider: Option<String>,
     target: String,
+    #[serde(default)]
+    game_code: Option<String>,
+    #[serde(default)]
+    zone_id: Option<String>,
 }
 
 pub async fn sandbox_check(
@@ -1786,6 +1809,18 @@ pub async fn sandbox_check(
             crate::api::normalize_pln_request(crate::models::PlnValidationRequest {
                 customer_id: input.target,
             })?
+        }
+        "game" => {
+            let code = input
+                .game_code
+                .ok_or_else(|| AppError::bad_request("Game wajib dipilih"))?;
+            let service = crate::games::find_game_service(&code)
+                .ok_or_else(|| AppError::bad_request("Game tidak dikenal"))?;
+            crate::api::normalize_game_request(
+                service,
+                &input.target,
+                input.zone_id.as_deref(),
+            )?
         }
         other => {
             return Err(AppError::bad_request(format!(
@@ -1873,6 +1908,40 @@ pub async fn ewallets(
     ))
 }
 
+#[derive(Serialize)]
+pub struct GameOption {
+    code: String,
+    name: String,
+    needs_zone: bool,
+    param_kind: String,
+}
+
+/// Daftar game AKTIF untuk portal member (migrasi 0042): hanya game
+/// yang enabled=1 — game nonaktif / belum terverifikasi tidak muncul
+/// di Coba Cek Live. Tanpa database: daftar kosong (bukan error).
+pub async fn games(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<GameOption>>, AppError> {
+    resolve_session(&state, &headers).await?;
+    let Some(pool) = state.store.pool() else {
+        return Ok(Json(Vec::new()));
+    };
+    let services = crate::games::load_game_services(&pool).await?;
+    Ok(Json(
+        services
+            .into_iter()
+            .filter(|service| service.enabled)
+            .map(|service| GameOption {
+                code: service.code,
+                name: service.name,
+                needs_zone: service.needs_zone,
+                param_kind: service.param_kind,
+            })
+            .collect(),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Pembelian paket mandiri (QRIS Gobiz)
 // ---------------------------------------------------------------------------
@@ -1919,6 +1988,9 @@ pub struct MemberPackageView {
     promo_percent: u8,
     promo_ends_at: Option<DateTime<Utc>>,
     included_hits: u64,
+    /// Hit game paket ini (migrasi 0042): kuota terpisah dari hit
+    /// validasi; 0 = paket ini tanpa kuota game.
+    game_hits: u64,
     rate_limit_per_minute: u32,
     products_label: String,
 }
@@ -1962,6 +2034,7 @@ pub async fn purchase_packages(
                 promo_percent: package.promo_percent,
                 promo_ends_at: package.promo_ends_at,
                 included_hits: package.included_hits,
+                game_hits: package.game_hits,
                 rate_limit_per_minute: package.rate_limit_per_minute,
                 products_label: crate::api::package_products_label(&package.products),
             })
@@ -2077,6 +2150,7 @@ pub async fn purchase_preview(
                 None,
                 Some(package.id),
                 package.included_hits,
+                package.game_hits,
                 settings.valid_days,
                 now,
             ));

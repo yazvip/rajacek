@@ -32,6 +32,8 @@
     adminAccounts: [],
     dashboardLoadError: false,
     managedMemberId: null,
+    gamesSettings: null,
+    gameServices: [],
     memberDetail: null,
     memberDetailPage: { limit: 20, offset: 0 },
     rateDefault: null,
@@ -43,6 +45,7 @@
     analytics: "Analitik",
     providers: "Endpoint Provider",
     tester: "Tester Layanan",
+    games: "Cek ID Game",
     products: "Produk API",
     packages: "Paket & Harga",
     "rate-limits": "Rate Limit",
@@ -464,6 +467,7 @@
     if (view === "orders") loadOrders().catch(handleApiError);
     if (view === "analytics") loadAnalytics().catch(handleApiError);
     if (view === "providers") { loadProviderHealth().catch(handleApiError); loadStreamHealth().catch(handleApiError); loadTrialMonitor().catch(handleApiError); loadDlq().catch(handleApiError); }
+    if (view === "games") { loadGamesSettings().catch(handleApiError); loadGameServices().catch(handleApiError); }
     if (view === "settings") { loadQrisSettings().catch(handleApiError); loadSiteSettings().catch(handleApiError); loadTelegramSettings().catch(handleApiError); refreshPinStatus().catch(() => {}); }
     window.scrollTo({ top: 0, behavior: "smooth" });
     document.body.classList.remove("menu-open");
@@ -825,6 +829,111 @@
     }
   }
 
+  // --- Cek ID Game (migrasi 0042) ---
+  async function loadGamesSettings() {
+    const settings = await api("/v1/admin/games/settings");
+    state.gamesSettings = settings;
+    const status = $("#games-key-status");
+    if (status) status.textContent = settings.api_key_configured ? "Key tersimpan" : "Belum dikonfigurasi";
+    const note = $("#games-key-note");
+    if (note) note.textContent = settings.api_key_configured ? "" : "Belum ada API key games — semua game menjawab 503 sampai key disimpan.";
+  }
+
+  async function loadGameServices() {
+    const services = await api("/v1/admin/games/services");
+    state.gameServices = services;
+    renderGameServices();
+    renderGameTestOptions();
+  }
+
+  function renderGameServices() {
+    const body = $("#games-table");
+    const count = $("#games-count");
+    if (count) count.textContent = `${state.gameServices.length} game · ${state.gameServices.filter((service) => service.enabled).length} aktif`;
+    if (!body) return;
+    body.innerHTML = state.gameServices.length ? state.gameServices.map((service) => `<tr>
+      <td data-label="Game">${escapeHtml(service.name)}</td>
+      <td data-label="Kode"><code>${escapeHtml(service.code)}</code></td>
+      <td data-label="Butuh Zone ID">${service.needs_zone ? "Ya" : "Tidak"}</td>
+      <td data-label="Status"><span class="status-badge ${service.enabled ? "active" : "inactive"}">${service.enabled ? "Aktif" : "Nonaktif"}</span></td>
+      <td data-label="Terverifikasi">${service.verified_at ? escapeHtml(formatDate(service.verified_at)) : "Belum pernah"}</td>
+      <td data-label=""><button class="button button-secondary" type="button" data-action="toggle-game" data-code="${escapeHtml(service.code)}" data-enabled="${service.enabled ? "1" : "0"}">${service.enabled ? "Nonaktifkan" : "Aktifkan"}</button></td>
+    </tr>`).join("") : `<tr><td colspan="6" class="tester-audit-note">Daftar game belum tersedia.</td></tr>`;
+  }
+
+  function renderGameTestOptions() {
+    const select = $("#game-test-code");
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = state.gameServices.map((service) => `<option value="${escapeHtml(service.code)}">${escapeHtml(service.name)}</option>`).join("");
+    if (current && state.gameServices.some((service) => service.code === current)) select.value = current;
+    updateGameTestFields();
+  }
+
+  function updateGameTestFields() {
+    const select = $("#game-test-code");
+    if (!select) return;
+    const service = state.gameServices.find((item) => item.code === select.value);
+    const wrap = $("#game-test-zone-wrap");
+    if (wrap) wrap.hidden = !service || !service.needs_zone;
+    const input = $("#game-test-user-id");
+    if (input) input.placeholder = service && service.param_kind === "username" ? "cth. builderman" : service && service.param_kind === "riot_id" ? "cth. Nama#TAG" : "cth. 861363893";
+  }
+
+  async function submitGamesKey(event) {
+    event.preventDefault();
+    const apiKey = $("#games-api-key").value;
+    try {
+      const settings = await api("/v1/admin/games/settings", { method: "PUT", body: { api_key: apiKey ? apiKey : null } });
+      state.gamesSettings = settings;
+      $("#games-api-key").value = "";
+      await loadGamesSettings();
+      showToast(settings.api_key_configured ? "API key games disimpan." : "API key games dihapus.", "success");
+    } catch (error) { handleApiError(error); }
+  }
+
+  async function toggleGameService(code, enabled) {
+    try {
+      const row = await api(`/v1/admin/games/services/${encodeURIComponent(code)}`, { method: "PUT", body: { enabled } });
+      const index = state.gameServices.findIndex((service) => service.code === code);
+      if (index >= 0) state.gameServices[index] = row;
+      renderGameServices();
+      showToast(`Game ${row.name} ${enabled ? "diaktifkan" : "dinonaktifkan"}.`, "success");
+    } catch (error) { handleApiError(error); }
+  }
+
+  async function submitGameTest(event) {
+    event.preventDefault();
+    const code = $("#game-test-code").value;
+    const userId = $("#game-test-user-id").value.trim();
+    const zoneId = $("#game-test-zone-id").value.trim();
+    const resultBox = $("#game-test-result");
+    const note = $("#game-test-note");
+    const button = event.submitter;
+    if (button) button.disabled = true;
+    resultBox.className = "tester-result empty-state";
+    resultBox.textContent = "Menunggu respons Cutiezy...";
+    if (note) note.textContent = "";
+    try {
+      const result = await api("/v1/admin/games/test", { method: "POST", body: { code, user_id: userId, zone_id: zoneId || null } });
+      const service = state.gameServices.find((item) => item.code === code);
+      resultBox.className = "tester-result";
+      resultBox.innerHTML = `<div class="tester-result-status">${statusBadge(result.status)}</div><dl>${testerRow("Game", service ? service.name : code)}${testerRow("Nickname", result.nickname || "—")}${result.zone ? testerRow("Zone", result.zone) : ""}${result.country ? testerRow("Negara", result.country) : ""}${result.server ? testerRow("Server", result.server) : ""}${testerRow("Pesan", result.message)}${result.raw_message ? testerRow("Pesan provider", result.raw_message) : ""}</dl><p class="tester-audit-note">Respons mentah (maks. 2 KiB):</p><pre class="tester-json">${escapeHtml(result.raw_body || "")}</pre>`;
+      if (note) note.textContent = result.verified ? "Game ini sekarang terverifikasi." : "Tes tidak menemukan nickname — game belum terverifikasi.";
+      if (result.verified) loadGameServices().catch(() => {});
+      showToast("Respons tes game diterima.", "success");
+    } catch (error) {
+      const payload = error instanceof ApiError && error.payload && typeof error.payload === "object"
+        ? error.payload
+        : { code: "network_error", message: error instanceof ApiError ? error.message : "Terjadi kesalahan tak terduga." };
+      resultBox.className = "tester-result tester-result-error";
+      resultBox.innerHTML = `<div class="tester-result-status"><span class="status-badge inactive">${escapeHtml(error instanceof ApiError && error.status ? `HTTP ${error.status}` : "Koneksi gagal")}</span></div><dl>${testerRow("Kode", payload.code || "request_failed")}${testerRow("Pesan", payload.message || "Permintaan gagal.")}</dl>`;
+      handleApiError(error);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
   // Daftar server ringkas: satu baris per server, detail teknis dilipat.
   // Semua data-action dipertahankan agar delegasi klik lama tetap jalan.
   function endpointHost(baseUrl) {
@@ -929,7 +1038,7 @@
         ${promoOn ? `<div class="package-promo"><span class="promo-badge">PROMO −${item.promo_percent}%</span><span class="package-countdown" data-countdown-to="${escapeHtml(item.promo_ends_at)}"></span></div>` : ""}
         <div class="package-price">${formatRupiah(effPrice)} <small>/ paket</small></div>
         ${promoOn ? `<div class="package-old">${formatRupiah(item.price_idr)}</div>` : ""}
-        <ul class="package-list"><li>${formatNumber(item.included_hits)} hit termasuk</li><li>${formatNumber(item.rate_limit_per_minute)} request per menit</li><li>${escapeHtml(productItems)}</li></ul>
+        <ul class="package-list"><li>${formatNumber(item.included_hits)} hit termasuk</li><li>${formatNumber(item.game_hits ?? 0)} hit game termasuk</li><li>${formatNumber(item.rate_limit_per_minute)} request per menit</li><li>${escapeHtml(productItems)}</li></ul>
         <div class="package-actions"><button class="button button-secondary" type="button" data-action="edit-package" data-id="${item.id}">Edit</button><button class="button button-primary" type="button" data-action="duplicate-package" data-id="${item.id}">Duplikasi</button><button class="button button-secondary" type="button" data-action="delete-package" data-id="${item.id}">Hapus</button></div>
       </article>`;
     }).join("");
@@ -2151,6 +2260,7 @@
       <td data-label="Kunci"><code>${escapeHtml(key.prefix)}</code><br /><span class="tester-audit-note">${escapeHtml(key.name)}</span></td>
       <td data-label="Status"><span class="status-badge ${key.status === "active" ? "valid" : "invalid"}">${escapeHtml(statusLabel[key.status] || key.status)}</span></td>
       <td data-label="Kuota">${formatNumber(key.quota_remaining)} / ${formatNumber(key.quota_total)}</td>
+      <td data-label="Kuota game">${formatNumber(key.game_quota_remaining ?? 0)} / ${formatNumber(key.game_quota_total ?? 0)}</td>
       <td data-label="Aktif s/d">${key.expires_at ? escapeHtml(formatDate(key.expires_at)) : "—"}</td>
       <td data-label="Rate limit">${key.rate_limit_per_minute == null ? "—" : `${formatNumber(key.rate_limit_per_minute)}/mnt`}</td>
       <td data-label="Gratis invalid hari ini">${formatNumber(key.invalid_free_used_today)} / 100 hari ini</td>
@@ -2159,7 +2269,7 @@
         <input type="text" maxlength="500" placeholder="Alasan (min. 5 karakter)" required aria-label="Alasan adjust" />
         <button class="button button-secondary" type="submit">Adjust</button>
       </form><p class="tester-audit-note" data-adjust-result="${escapeHtml(key.id)}"></p>` : `<span class="tester-audit-note">Adjust hanya untuk kunci aktif milik member aktif.</span>`}</td>
-    </tr>`).join("") : `<tr><td colspan="7" class="tester-audit-note">Member ini belum memiliki kunci.</td></tr>`;
+    </tr>`).join("") : `<tr><td colspan="8" class="tester-audit-note">Member ini belum memiliki kunci.</td></tr>`;
     $$("#member-detail-keys [data-adjust-key]").forEach((form) => {
       form.addEventListener("submit", (event) => submitMemberAdjust(event, form.dataset.adjustKey));
     });
@@ -2176,7 +2286,7 @@
         if (!a.expires_at) return 1;
         if (!b.expires_at) return -1;
         return new Date(a.expires_at) - new Date(b.expires_at);
-      }).map((bucket) => `<div class="member-bucket-row"><span class="member-bucket-name">${escapeHtml(bucket.package_name || "Paket")}</span><span class="member-bucket-hits">${formatNumber(bucket.remaining_hits || 0)} / ${formatNumber(bucket.total_hits || 0)} hit</span><span class="tester-audit-note" style="margin:0;">${bucket.expires_at ? `s/d ${escapeHtml(formatDate(bucket.expires_at))}` : "Tanpa kedaluwarsa"}</span></div>`).join("") : "";
+      }).map((bucket) => `<div class="member-bucket-row"><span class="member-bucket-name">${escapeHtml(bucket.package_name || "Paket")}</span><span class="member-bucket-hits">${formatNumber(bucket.remaining_hits || 0)} / ${formatNumber(bucket.total_hits || 0)} hit${(bucket.game_total_hits || 0) > 0 ? ` · ${formatNumber(bucket.game_remaining_hits || 0)} / ${formatNumber(bucket.game_total_hits || 0)} hit game` : ""}</span><span class="tester-audit-note" style="margin:0;">${bucket.expires_at ? `s/d ${escapeHtml(formatDate(bucket.expires_at))}` : "Tanpa kedaluwarsa"}</span></div>`).join("") : "";
     }
     const quotaRemaining = detail.keys.reduce((sum, key) => sum + (key.quota_remaining || 0), 0);
     const quotaTotal = detail.keys.reduce((sum, key) => sum + (key.quota_total || 0), 0);
@@ -2191,7 +2301,7 @@
       <td data-label="Paket">${escapeHtml(order.package_name)}</td>
       <td data-label="Nominal">${formatRupiah(order.amount_idr)}</td>
       <td data-label="Status"><span class="status-badge ${order.status === "granted" ? "valid" : order.status === "needs_review" ? "invalid" : ""}">${escapeHtml(orderLabel[order.status] || order.status)}</span></td>
-      <td data-label="Grant">${order.granted_quota == null ? "—" : `+${formatNumber(order.granted_quota)} hit`}</td>
+      <td data-label="Grant">${order.granted_quota == null ? "—" : `+${formatNumber(order.granted_quota)} hit${(order.game_hits || 0) > 0 ? ` · +${formatNumber(order.game_hits)} hit game` : ""}`}</td>
     </tr>`).join("") : `<tr><td colspan="5" class="tester-audit-note">Belum ada order.</td></tr>`;
     $("#member-detail-orders-info").textContent = `Menampilkan ${formatNumber(detail.orders.length)} order${detail.orders_has_more ? " (masih ada halaman berikut)" : ""}`;
     $("#member-detail-orders-prev").disabled = detail.orders_offset <= 0;
@@ -2338,6 +2448,7 @@
     $("#package-description").value = item?.description || "";
     $("#package-price").value = item?.price_idr || "";
     $("#package-hits").value = item?.included_hits || "";
+    $("#package-game-hits").value = item?.game_hits ?? 0;
     $("#package-rpm").value = item?.rate_limit_per_minute || "";
     $("#package-active").checked = item?.active ?? true;
     $("#package-highlighted").checked = item?.highlighted ?? false;
@@ -2782,6 +2893,7 @@
       description: $("#package-description").value.trim(),
       price_idr: Number($("#package-price").value),
       included_hits: Number($("#package-hits").value),
+      game_hits: Math.max(0, Number($("#package-game-hits").value) || 0),
       active: $("#package-active").checked,
       highlighted: $("#package-highlighted").checked,
       products,
@@ -3774,6 +3886,10 @@
     $("#provider-form").addEventListener("submit", submitProvider);
     $("#provider-tester-form").addEventListener("submit", submitProviderTester);
     $("#tester-product").addEventListener("change", updateTesterFields);
+    $("#games-key-form").addEventListener("submit", submitGamesKey);
+    $("#game-test-form").addEventListener("submit", submitGameTest);
+    $("#game-test-code").addEventListener("change", updateGameTestFields);
+    $("#refresh-games").addEventListener("click", () => { loadGamesSettings().catch(handleApiError); loadGameServices().catch(handleApiError); });
     $(".tester-tabs").addEventListener("click", (event) => {
       const tab = event.target.closest("[data-tester-tab]");
       if (tab) selectTesterTab(tab.dataset.testerTab);
@@ -3816,6 +3932,7 @@
         if (item) openPackageModal(item, true);
       }
       if (action === "delete-package") deletePackage(id);
+      if (action === "toggle-game") toggleGameService(actionElement.dataset.code, actionElement.dataset.enabled !== "1");
       if (action === "admin-toggle") toggleAdminAccount(id, actionElement.dataset.active !== "1");
       if (action === "admin-delete") deleteAdminAccount(id);
       if (action === "edit-rate-limit") {

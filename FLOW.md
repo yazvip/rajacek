@@ -515,3 +515,65 @@ Restore dari ZIP ini:
   agregat bisa maju lebih awal bila paket baru lebih cepat kedaluwarsa
   (dipakai dulu secara FIFO), lalu kembali ke paket lama setelah paket
   baru habis/lewat; kunci mati hanya bila SEMUA bucket lewat expiry.
+
+## 10. CEK ID GAME (Cutiezy, migrasi 0042, LIVE 2026-11-08)
+- Produk kelima di `/api/v3/validate` (bukan endpoint baru). `code` = kode
+  layanan Cutiezy 1:1 (17): `region-ml`, `mlbb-bundle`, `mlcreate`,
+  `first-topup`, `first-mcgg`, `mcgg`, `undawn`, `free-fire`, `pubg`,
+  `codm`, `zenless`, `hok`, `blood-strike`, `valorant`, `genshin`, `hsr`,
+  `roblox`. `accountNumber` = User ID (Roblox: username; Valorant: Riot
+  ID `Nama#TAG`). Field opsional `zone_id` (query GET / body POST) —
+  wajib hanya untuk 6 game ML (`region-ml`, `mlbb-bundle`, `mlcreate`,
+  `first-topup`, `first-mcgg`, `mcgg`); tanpa itu 400 SEBELUM provider
+  (tanpa potong kuota). Respons ValidationResponse yang sama:
+  `account_name` = nickname (uppercase), `result` + `zone`/`country`/
+  `server` bila tersedia. Scope: `validate:game` (`validate:*` lolos).
+- Provider: Cutiezy Games API `GET https://api.cutiezy.id/api/check/
+  games/{service}?id=...&zone_id=...` (GET, header `X-API-Key`, timeout
+  10 dtk). API key games TERPISAH dari key validasi (tersimpan terenkripsi
+  AES-256-GCM di `games_settings`, diatur admin di view Games); kosong =
+  semua game 503 `games_not_configured`. IP server WAJIB didaftarkan di
+  Dashboard Cutiezy (Slot IP) — bila belum, 403 `IP_NOT_ALLOWED`.
+  Mapping respons: `ok` + nickname → Valid; `ok:false` + pesan mengandung
+  "tidak ditemukan"/"not found" → NotFound; selain itu ProviderError;
+  HTTP 429 → RateLimited. Pesan member: "ID game ditemukan." /
+  "ID game tidak ditemukan.". Guard: produk ke-5 (`product_index` 4),
+  semaphore sendiri + pacer `api.cutiezy.id`.
+- Billing TERPISAH dari kuota validasi (keputusan user 8 Nov 2026):
+  tiap paket punya `admin_packages.game_hits` sendiri; satu pembelian =
+  satu bucket membawa DUA kuota (`quota_buckets.game_total_hits` /
+  `game_remaining_hits`), FIFO + expiry sama, tidak saling memotong.
+  Trial = 0 hit game (bucket trial lahir via `backfill_bucket_for_key`,
+  game 0). Pool gratis game TERPISAH `game_invalid_free_daily` 100/hari/
+  kunci (hanya NotFound yang masuk pool — konsisten dengan aturan
+  Invalid/NotFound pool validasi). Valid → 1 hit game; ProviderError/
+  RateLimited/replay → gratis; sisa game 0 → 402 `game_quota_exhausted`
+  SEBELUM provider. `meta.remaining_quota` untuk game = sisa hit game;
+  `meta.expires_at` = expiry bucket game aktif terdekat. Fingerprint
+  idempotensi game = `{service}:{zone}` — User ID sama di zone berbeda
+  adalah cek berbeda (tanpa ini, cek zone kedua me-replay hasil zone
+  pertama secara gratis).
+- Admin (view "Cek ID Game", nav Pusat Kendali): kartu API key Cutiezy +
+  tabel 17 game (toggle Aktif/Nonaktif + kolom Terverifikasi) + form tes
+  (`POST /v1/admin/games/test`, Manager; Valid → `verified_at`
+  terisi; TIDAK memotong kuota). Default seed: semua game NONAKTIF
+  sampai lolos 1 tes nyata. Field "Hit game" di form paket + tampil di
+  kartu paket; kolom kuota game di detail member (tabel kunci + bucket
+  FIFO + grant order). Tester provider MENOLAK game (400 — pakai endpoint
+  tes games). `GET/PUT /v1/admin/games/settings`,
+  `GET /v1/admin/games/services`, `PUT /v1/admin/games/services/:code`.
+- Member: tab "Cek ID Game" di Coba Cek Live (select game — hanya game
+  aktif — + Zone ID muncul hanya untuk 6 game ML; memotong hit game),
+  KPI "Sisa kuota game" + pool gratis game di Ringkasan, hit game di
+  rincian bucket + kartu paket Beli. `GET /v1/member/games` (hanya game
+  aktif). Trial member TIDAK bisa cek game (402).
+- PERINGATAN (dari dokumentasi Cutiezy): hanya contoh respons
+  `region-ml` yang RESMI; field game lain "ilustratif" — wajib verifikasi
+  1 request nyata per game (lewat form tes admin) sebelum diaktifkan.
+  Prasyarat verifikasi: IP VPS terdaftar di dashboard Cutiezy + API key
+  games + ID contoh per game.
+- Deploy 8 Nov 2026: binary api `03c138e3…` / worker `fa7eea27…`;
+  backup `/opt/rajacek/backup-20261108-games/`. Insiden deploy: file
+  hasil rakit chunk `cat` mendarat 644 (bukan executable) → kedua service
+  crash-loop 203/EXEC ±4 menit; perbaikan `chmod 755` + restart.
+  Pelajaran: rakitan chunk WAJIB `chmod 755` sebelum swap.

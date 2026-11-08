@@ -417,6 +417,7 @@ pub struct PackageOrderRow {
     pub package_name: String,
     pub price_idr: u64,
     pub quota_hits: u64,
+    pub game_hits: u64,
     pub rate_limit_per_minute: u32,
     pub valid_days: i64,
     pub amount_idr: u64,
@@ -455,6 +456,7 @@ pub struct MemberOrderView {
     pub package_name: String,
     pub price_idr: u64,
     pub quota_hits: u64,
+    pub game_hits: u64,
     pub rate_limit_per_minute: u32,
     pub valid_days: i64,
     pub amount_idr: u64,
@@ -486,6 +488,7 @@ impl PackageOrderRow {
             package_name: self.package_name.clone(),
             price_idr: self.price_idr,
             quota_hits: self.quota_hits,
+            game_hits: self.game_hits,
             rate_limit_per_minute: self.rate_limit_per_minute,
             valid_days: self.valid_days,
             amount_idr: self.amount_idr,
@@ -502,7 +505,7 @@ impl PackageOrderRow {
 }
 
 const ORDER_COLUMNS: &str = "id, member_id, key_id, package_id, package_name, \
-    price_idr, quota_hits, rate_limit_per_minute, valid_days, amount_idr, status, \
+    price_idr, quota_hits, game_hits, rate_limit_per_minute, valid_days, amount_idr, status, \
     qris_token, qris_string, qris_image_url, qris_expires_at, paid_at, granted_at, \
     granted_quota, granted_expires_at, mutation_ref, last_error, created_at, updated_at, \
     kill_switch_canceled, provider_order_id, expected_amount";
@@ -599,6 +602,7 @@ pub struct AdminOrderView {
     pub package_name: String,
     pub price_idr: u64,
     pub quota_hits: u64,
+    pub game_hits: u64,
     pub rate_limit_per_minute: u32,
     pub valid_days: i64,
     pub amount_idr: u64,
@@ -647,7 +651,7 @@ pub async fn get_order_admin(
 ) -> Result<Option<AdminOrderView>, AppError> {
     sqlx::query_as::<_, AdminOrderView>(
         "SELECT o.id, o.member_id, m.email AS member_email, o.key_id, \
-         o.package_id, o.package_name, o.price_idr, o.quota_hits, \
+         o.package_id, o.package_name, o.price_idr, o.quota_hits, o.game_hits, \
          o.rate_limit_per_minute, o.valid_days, o.amount_idr, o.status, \
          o.provider_order_id, o.expected_amount, \
          o.qris_token, o.qris_expires_at, o.paid_at, o.granted_at, \
@@ -772,7 +776,7 @@ pub async fn list_orders_admin_filtered(
 ) -> Result<Vec<AdminOrderView>, AppError> {
     let mut builder = sqlx::QueryBuilder::new(
         "SELECT o.id, o.member_id, m.email AS member_email, o.key_id, \
-         o.package_id, o.package_name, o.price_idr, o.quota_hits, \
+         o.package_id, o.package_name, o.price_idr, o.quota_hits, o.game_hits, \
          o.rate_limit_per_minute, o.valid_days, o.amount_idr, o.status, \
          o.provider_order_id, o.expected_amount, \
          o.qris_token, o.qris_expires_at, o.paid_at, o.granted_at, \
@@ -1619,10 +1623,10 @@ async fn create_gobiz_member_order(
     for attempt in 0..3 {
         match sqlx::query(
             "INSERT INTO package_orders (id, member_id, package_id, package_name, \
-             price_idr, quota_hits, rate_limit_per_minute, valid_days, amount_idr, \
+             price_idr, quota_hits, game_hits, rate_limit_per_minute, valid_days, amount_idr, \
              status, provider_order_id, expected_amount, \
              qris_string, qris_expires_at, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting_payment', ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting_payment', ?, ?, ?, ?, ?)",
         )
         .bind(order_id.to_string())
         .bind(member_id.to_string())
@@ -1630,6 +1634,7 @@ async fn create_gobiz_member_order(
         .bind(&package.name)
         .bind(effective)
         .bind(package.included_hits)
+        .bind(package.game_hits)
         .bind(package.rate_limit_per_minute)
         .bind(settings.valid_days)
         .bind(invoice.expected_amount)
@@ -2395,6 +2400,7 @@ async fn grant_row(
             order_uuid,
             member_uuid,
             order.quota_hits,
+            order.game_hits,
             order.valid_days,
             order.rate_limit_per_minute,
             package_uuid,
@@ -2831,6 +2837,7 @@ mod area3_tests {
             package_name: "Paket".to_owned(),
             price_idr: amount,
             quota_hits: 0,
+            game_hits: 0,
             rate_limit_per_minute: 0,
             valid_days: 30,
             amount_idr: amount,

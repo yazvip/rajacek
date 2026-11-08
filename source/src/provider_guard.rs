@@ -310,7 +310,7 @@ pub struct GuardTicket {
 
 pub struct ProviderGuard {
     config: RwLock<ProviderGuardConfig>,
-    semaphores: [Arc<DynSemaphore>; 4],
+    semaphores: [Arc<DynSemaphore>; 5],
     /// Circuit breakers keyed by endpoint (server) id, created on first use.
     endpoint_breakers: Mutex<HashMap<String, EndpointBreaker>>,
     /// Next free start slot per upstream host (lowercased). Keys are
@@ -329,14 +329,17 @@ fn product_index(product: ValidationProduct) -> usize {
         // and breaker partition like every other product (added with the
         // Pln variant; the array below must stay in this exact order).
         ValidationProduct::Pln => 3,
+        // Game (migrasi 0042): slot sendiri, kapasitas per-produk yang sama.
+        ValidationProduct::Game => 4,
     }
 }
 
-const PRODUCTS: [ValidationProduct; 4] = [
+const PRODUCTS: [ValidationProduct; 5] = [
     ValidationProduct::BankAccount,
     ValidationProduct::Ewallet,
     ValidationProduct::Whatsapp,
     ValidationProduct::Pln,
+    ValidationProduct::Game,
 ];
 
 impl ProviderGuard {
@@ -359,6 +362,7 @@ impl ProviderGuard {
                 DynSemaphore::new(config.max_concurrency_per_product),
                 DynSemaphore::new(config.max_concurrency_per_product),
                 DynSemaphore::new(config.max_concurrency_pln),
+                DynSemaphore::new(config.max_concurrency_per_product),
             ],
             endpoint_breakers: Mutex::new(HashMap::new()),
             pace_slots: StdMutex::new(HashMap::new()),

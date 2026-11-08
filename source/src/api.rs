@@ -10,7 +10,7 @@ use axum::{
     http::{header, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{Html, IntoResponse, Redirect, Response},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
     Json, Router,
 };
 use chrono::{Datelike, Utc};
@@ -45,8 +45,9 @@ use crate::{
         ProviderEndpoint,
         ProviderEndpointTestResponse, ProviderValidationRequest, UpdatePackageRequest,
         UpdateProductRequest, UpdateProviderEndpointRequest, UpdateRateLimitPolicyRequest,
-        UsageEvent, ValidationHistoryFilters, ValidationHistoryItem, ValidationMeta,
-        ValidationProduct, ValidationResponse, ValidationStatus, WhatsappValidationRequest,
+        ProviderAttemptLog, UsageEvent, ValidationHistoryFilters, ValidationHistoryItem,
+        ValidationMeta, ValidationProduct, ValidationResponse, ValidationResultData,
+        ValidationStatus, WhatsappValidationRequest,
     },
     provider::ProviderAdapter,
     provider_config::ProviderConfigStore,
@@ -126,6 +127,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/member/check", post(crate::member::sandbox_check))
         .route("/v1/member/banks", get(crate::member::banks))
         .route("/v1/member/ewallets", get(crate::member::ewallets))
+        .route("/v1/member/games", get(crate::member::games))
         .route("/v1/member/session", get(crate::member::session))
         .route("/v1/member/logout", post(crate::member::logout))
         .route("/v1/member/overview", get(crate::member::overview))
@@ -304,6 +306,16 @@ pub fn build_router(state: AppState) -> Router {
             get(get_qris_settings).put(update_qris_settings),
         )
         .route("/v1/admin/qris/gobiz/test", post(test_gobiz_qris))
+        .route(
+            "/v1/admin/games/settings",
+            get(get_games_settings).put(update_games_settings),
+        )
+        .route("/v1/admin/games/services", get(list_game_services))
+        .route(
+            "/v1/admin/games/services/:code",
+            put(update_game_service),
+        )
+        .route("/v1/admin/games/test", post(test_game))
         .route("/v1/admin/orders", get(list_admin_orders))
         .route("/v1/admin/export/:kind", get(export_admin_csv))
         .route(
@@ -1076,6 +1088,7 @@ fn public_product_label(product: ValidationProduct) -> &'static str {
         ValidationProduct::Ewallet => "Validasi E-Wallet",
         ValidationProduct::Whatsapp => "Validasi WhatsApp",
         ValidationProduct::Pln => "Validasi PLN",
+        ValidationProduct::Game => "Cek ID Game",
     }
 }
 
@@ -1822,6 +1835,9 @@ struct V3ValidateQuery {
     code: Option<String>,
     #[serde(rename = "accountNumber")]
     account_number: Option<String>,
+    /// Game only: Zone / Server ID (wajib untuk 6 game keluarga ML/MCGG).
+    #[serde(rename = "zone_id")]
+    zone_id: Option<String>,
     #[serde(rename = "api_key")]
     api_key: Option<String>,
 }
@@ -1845,7 +1861,7 @@ async fn validate_v3_get(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| AppError::bad_request("accountNumber wajib diisi"))?;
-    let request = resolve_v3_code(code, account_number)?;
+    let request = resolve_v3_code(code, account_number, query.zone_id.as_deref())?;
     let raw_api_key = resolve_v3_api_key(query.api_key.as_deref(), &headers)?;
     validate_v3_execute(
         state,
@@ -1873,6 +1889,7 @@ async fn validate_v3_post(
         .ok_or_else(|| AppError::bad_request("Body harus berupa objek JSON"))?;
     let code = v3_body_string(object, "code")?;
     let account_number = v3_body_string(object, "accountNumber")?;
+    let zone_id = v3_body_optional_string(object, "zone_id")?;
     let body_api_key = match object.get("api_key") {
         None | Some(serde_json::Value::Null) => None,
         Some(serde_json::Value::String(value)) => Some(value.as_str()),
@@ -1880,7 +1897,7 @@ async fn validate_v3_post(
             return Err(AppError::bad_request("api_key harus berupa string"));
         }
     };
-    let request = resolve_v3_code(&code, &account_number)?;
+    let request = resolve_v3_code(&code, &account_number, zone_id.as_deref())?;
     let raw_api_key = resolve_v3_api_key(body_api_key, &headers)?;
     validate_v3_execute(
         state,
@@ -1892,6 +1909,29 @@ async fn validate_v3_post(
         false,
     )
     .await
+}
+
+/// Extracts an optional string field from a v3 POST body. Null/absent
+/// = None; a non-string value is a 400 (same strictness as the required
+/// extractor — a coerced `12422` number would hide a client bug).
+fn v3_body_optional_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<String>, AppError> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_owned()))
+            }
+        }
+        Some(_) => Err(AppError::bad_request(format!(
+            "{field} harus berupa string"
+        ))),
+    }
 }
 
 /// Extracts a required string field from a v3 POST body. A JSON number
@@ -1926,8 +1966,12 @@ fn v3_body_string(
 fn resolve_v3_code(
     code: &str,
     account_number: &str,
+    zone_id: Option<&str>,
 ) -> Result<ProviderValidationRequest, AppError> {
     let normalized = code.trim().to_ascii_lowercase();
+    if let Some(service) = crate::games::find_game_service(&normalized) {
+        return normalize_game_request(service, account_number, zone_id);
+    }
     if normalized == "pln" {
         return normalize_pln_request(PlnValidationRequest {
             customer_id: account_number.to_owned(),
@@ -1953,7 +1997,7 @@ fn resolve_v3_code(
         });
     }
     Err(AppError::bad_request(
-        "code tidak dikenal: gunakan kode bank 3 digit, slug e-wallet, pln, atau whatsapp",
+        "code tidak dikenal: gunakan kode bank 3 digit, slug e-wallet, pln, whatsapp, atau kode game",
     ))
 }
 
@@ -2060,6 +2104,102 @@ async fn validate_v3_execute(
     Ok(response)
 }
 
+/// Gate key games (migrasi 0042): 503 `games_not_configured` bila API
+/// key Cutiezy games belum dikonfigurasi (atau database tidak
+/// terpasang). Dipakai execute_validation sebelum idempotensi, jadi
+/// tidak ada hit yang terpotong.
+async fn check_games_gate(state: &AppState) -> Result<(), AppError> {
+    let Some(pool) = state.store.pool() else {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "games_not_configured",
+            "Layanan cek ID game belum dikonfigurasi admin.",
+        ));
+    };
+    let settings = crate::games::load_games_settings(&pool).await?;
+    if !settings.api_key_configured {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "games_not_configured",
+            "Layanan cek ID game belum dikonfigurasi admin.",
+        ));
+    }
+    Ok(())
+}
+
+/// Dispatch cek game member (migrasi 0042): dipakai execute_validation
+/// setelah reserve. Attempt logs kosong — game tidak punya baris
+/// endpoint, jadi tidak ada log attempt provider untuk tab Logs.
+async fn execute_game_check(
+    state: &AppState,
+    request: &ProviderValidationRequest,
+) -> Result<
+    (
+        crate::provider::ProviderValidationOutcome,
+        Vec<ProviderAttemptLog>,
+    ),
+    AppError,
+> {
+    let service_code = request.provider_hint.as_deref().unwrap_or("");
+    let Some(service) = crate::games::find_game_service(service_code) else {
+        return Err(AppError::internal("Kode game tidak dikenal"));
+    };
+    let Some(pool) = state.store.pool() else {
+        return Err(AppError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "games_not_configured",
+            "Layanan cek ID game belum dikonfigurasi admin.",
+        ));
+    };
+    let cipher = crate::provider_config::CredentialCipher::new(
+        state.config.api_key_encryption_key.as_deref(),
+    );
+    let api_key = crate::games::load_games_api_key(&pool, &cipher)
+        .await?
+        .ok_or_else(|| {
+            AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "games_not_configured",
+                "Layanan cek ID game belum dikonfigurasi admin.",
+            )
+        })?;
+    let outcome = crate::games::check_game(
+        state.provider_guard.as_ref(),
+        &api_key,
+        service,
+        &request.target,
+        request.zone_id.as_deref(),
+    )
+    .await?;
+    let result = Some(ValidationResultData {
+        account_number: Some(request.target.clone()),
+        phone_number: None,
+        service_code: Some(service.code.to_owned()),
+        bank_name: None,
+        account_name: outcome.nickname.clone(),
+        zone: outcome.zone.clone(),
+        country: outcome.country.clone(),
+        server: outcome.server.clone(),
+        tarif: None,
+        daya: None,
+        provider: None,
+        registered: None,
+        reference: None,
+    });
+    Ok((
+        crate::provider::ProviderValidationOutcome {
+            status: outcome.status,
+            message: crate::games::game_member_message(outcome.status).to_owned(),
+            result,
+            provider_name: "Rajacek".to_owned(),
+            provider_endpoint_id: None,
+            provider_latency_ms: outcome.provider_latency_ms,
+            attempts: outcome.attempts,
+        },
+        Vec::new(),
+    ))
+}
+
 /// Migration stub for the removed v1 product endpoints: 410 Gone with
 /// a pointer to v3, so clients get a readable migration hint instead of
 /// a bare 404. (Deliberately kept: remove entirely for a plain 404.)
@@ -2104,15 +2244,49 @@ pub(crate) async fn execute_validation(
         );
     }
 
+    // Gate game (migrasi 0042): game nonaktif / key Cutiezy games belum
+    // dikonfigurasi ditolak SEBELUM idempotensi/rate-limit/kuota
+    // tersentuh, jadi tidak ada hit yang terpotong. Demo mode melewati
+    // gate ini (demo provider yang menjawab, tanpa key).
+    if request.product == ValidationProduct::Game && !state.config.is_demo_mode() {
+        check_games_gate(&state)
+            .await
+            .map_err(|error| error.with_request_id(request_id.clone()))?;
+        if let Some(pool) = state.store.pool() {
+            let enabled = crate::games::game_service_enabled(
+                &pool,
+                request.provider_hint.as_deref().unwrap_or(""),
+            )
+            .await
+            .map_err(|error| error.with_request_id(request_id.clone()))?;
+            if !enabled {
+                return Err(AppError::bad_request("Layanan game ini sedang nonaktif")
+                    .with_request_id(request_id));
+            }
+        }
+    }
+
     // Idempotency is resolved BEFORE rate limiting: a replay is not new work, so it must
     // not consume rate-limit budget, and a malformed Idempotency-Key is rejected
     // before it can burn any admission quota (a missing one was generated upstream).
     let idempotency_key = format!("{}:{}", api_key.prefix, raw_idempotency_key);
+    // Game: zone HARUS ikut fingerprint — user_id yang sama di zone
+    // berbeda adalah cek yang berbeda (tanpa ini, cek zone kedua
+    // me-replay hasil zone pertama secara gratis).
+    let fingerprint_hint = if request.product == ValidationProduct::Game {
+        format!(
+            "{}:{}",
+            request.provider_hint.as_deref().unwrap_or(""),
+            request.zone_id.as_deref().unwrap_or("")
+        )
+    } else {
+        request.provider_hint.as_deref().unwrap_or("").to_owned()
+    };
     let fingerprint = target_fingerprint(
         &state.config,
         request.product,
         &request.target,
-        request.provider_hint.as_deref().unwrap_or(""),
+        &fingerprint_hint,
     );
 
     match state
@@ -2130,13 +2304,24 @@ pub(crate) async fn execute_validation(
             // processing and refresh the quota from live state
             // (audit 2026-10-25, K10).
             replay.meta.rajacek_processing_ms = 0;
-            if let Some(current) = state.store.quota_remaining(&api_key.prefix).await {
-                replay.meta.remaining_quota = current;
-            }
-            // Tanggal dari respons tersimpan juga basi: segarkan dari
-            // agregat live, persis seperti remaining_quota di atas.
-            if let Some((summary, _)) = state.store.api_key_account(&api_key.prefix).await {
-                replay.meta.expires_at = summary.expires_at;
+            if replay.product == ValidationProduct::Game {
+                if let Some(current) = state.store.game_quota_remaining(&api_key.prefix).await {
+                    replay.meta.remaining_quota = current;
+                }
+                if let Some((_, _, expires)) =
+                    state.store.game_quota_summary(&api_key.prefix).await
+                {
+                    replay.meta.expires_at = expires;
+                }
+            } else {
+                if let Some(current) = state.store.quota_remaining(&api_key.prefix).await {
+                    replay.meta.remaining_quota = current;
+                }
+                // Tanggal dari respons tersimpan juga basi: segarkan dari
+                // agregat live, persis seperti remaining_quota di atas.
+                if let Some((summary, _)) = state.store.api_key_account(&api_key.prefix).await {
+                    replay.meta.expires_at = summary.expires_at;
+                }
             }
             return Ok(validation_response(replay, None, true));
         }
@@ -2188,27 +2373,55 @@ pub(crate) async fn execute_validation(
     // Bucket yang dipotong dicatat agar setiap refund di bawah ini
     // mengembalikan hit ke bucket yang SAMA (bukan bucket FIFO-pertama
     // saat itu, yang bisa berbeda bila grant/assign mendarat di tengah).
-    let (remaining_quota, reserved_bucket) =
-        match state.store.reserve_quota(&api_key.prefix).await {
-            Ok((remaining, bucket_id)) => (remaining, bucket_id),
+    let is_game = request.product == ValidationProduct::Game;
+    let (remaining_quota, reserved_bucket) = match if is_game {
+        state.store.reserve_game_quota(&api_key.prefix).await
+    } else {
+        state.store.reserve_quota(&api_key.prefix).await
+    } {
+        Ok((remaining, bucket_id)) => (remaining, bucket_id),
+        Err(error) => {
+            state
+                .idempotency
+                .abandon(&idempotency_key, &fingerprint)
+                .await;
+            return Err(error.with_request_id(request_id));
+        }
+    };
+
+    let (outcome, attempt_logs) = if is_game && !state.config.is_demo_mode() {
+        match execute_game_check(&state, &request).await {
+            Ok((outcome, logs)) => (outcome, logs),
             Err(error) => {
+                state
+                    .store
+                    .refund_game_quota(&api_key.prefix, reserved_bucket)
+                    .await;
                 state
                     .idempotency
                     .abandon(&idempotency_key, &fingerprint)
                     .await;
                 return Err(error.with_request_id(request_id));
             }
-        };
-
-    let (outcome, attempt_logs) = match state.provider.validate(request.clone()).await {
-        Ok((outcome, logs)) => (outcome, logs),
-        Err(error) => {
-            state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
-            state
-                .idempotency
-                .abandon(&idempotency_key, &fingerprint)
-                .await;
-            return Err(error.with_request_id(request_id));
+        }
+    } else {
+        match state.provider.validate(request.clone()).await {
+            Ok((outcome, logs)) => (outcome, logs),
+            Err(error) => {
+                if is_game {
+                    state
+                        .store
+                        .refund_game_quota(&api_key.prefix, reserved_bucket)
+                        .await;
+                } else {
+                    state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
+                }
+                state
+                    .idempotency
+                    .abandon(&idempotency_key, &fingerprint)
+                    .await;
+                return Err(error.with_request_id(request_id));
+            }
         }
     };
 
@@ -2231,16 +2444,31 @@ pub(crate) async fn execute_validation(
     if outcome.status.is_invalid_pool() {
         // K2: klaim + refund atomik (satu transaksi) — bukan dua
         // operasi terpisah yang bisa terbelah oleh crash di antaranya.
-        if state
-            .store
-            .claim_free_slot_with_refund(&api_key.prefix, reserved_bucket, wib_day)
-            .await
-        {
+        // Game memakai pool + refund-nya sendiri (migrasi 0042).
+        let claimed = if is_game {
+            state
+                .store
+                .claim_game_free_slot_with_refund(&api_key.prefix, reserved_bucket, wib_day)
+                .await
+        } else {
+            state
+                .store
+                .claim_free_slot_with_refund(&api_key.prefix, reserved_bucket, wib_day)
+                .await
+        };
+        if claimed {
             free_invalid = true;
             charged = false;
         }
     } else if !outcome.status.is_billable() {
-        state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
+        if is_game {
+            state
+                .store
+                .refund_game_quota(&api_key.prefix, reserved_bucket)
+                .await;
+        } else {
+            state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
+        }
     }
 
     let total_latency_ms = request_started.elapsed().as_millis() as u64;
@@ -2250,12 +2478,21 @@ pub(crate) async fn execute_validation(
     // aktif terdekat; None = kunci tidak pernah kedaluwarsa. Bukan
     // ringkasan tersimpan. Kunci yang lenyap di tengah request (praktis
     // mustahil) menghasilkan None.
-    let meta_expires_at = state
-        .store
-        .api_key_account(&api_key.prefix)
-        .await
-        .map(|(summary, _)| summary.expires_at)
-        .unwrap_or(None);
+    let meta_expires_at = if is_game {
+        state
+            .store
+            .game_quota_summary(&api_key.prefix)
+            .await
+            .map(|(_, _, expires)| expires)
+            .unwrap_or(None)
+    } else {
+        state
+            .store
+            .api_key_account(&api_key.prefix)
+            .await
+            .map(|(summary, _)| summary.expires_at)
+            .unwrap_or(None)
+    };
     let response = ValidationResponse {
         request_id: request_id.clone(),
         status: outcome.status,
@@ -2279,6 +2516,12 @@ pub(crate) async fn execute_validation(
             // both never-billable outcomes and free-pool invalid results.
             remaining_quota: if charged {
                 remaining_quota
+            } else if is_game {
+                state
+                    .store
+                    .game_quota_remaining(&api_key.prefix)
+                    .await
+                    .unwrap_or_else(|| remaining_quota.saturating_add(1))
             } else {
                 state
                     .store
@@ -2378,12 +2621,26 @@ pub(crate) async fn execute_validation(
         // No ledger event = no delivery: reverse the charge, or return a
         // free-pool slot the member never got a result for.
         if charged {
-            state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
+            if is_game {
+                state
+                    .store
+                    .refund_game_quota(&api_key.prefix, reserved_bucket)
+                    .await;
+            } else {
+                state.store.refund_quota(&api_key.prefix, reserved_bucket).await;
+            }
         } else if free_invalid {
-            state
-                .store
-                .release_invalid_free_slot(&api_key.prefix, wib_day)
-                .await;
+            if is_game {
+                state
+                    .store
+                    .release_game_free_slot(&api_key.prefix, wib_day)
+                    .await;
+            } else {
+                state
+                    .store
+                    .release_invalid_free_slot(&api_key.prefix, wib_day)
+                    .await;
+            }
         }
         state
             .idempotency
@@ -3403,6 +3660,11 @@ fn normalize_admin_tester_request(
         ValidationProduct::Pln => normalize_pln_request(PlnValidationRequest {
             customer_id: input.target,
         }),
+        // Game tidak lewat tester provider (punya endpoint tes sendiri
+        // di view Games, tanpa memotong kuota member).
+        ValidationProduct::Game => Err(AppError::bad_request(
+            "Tes game memakai endpoint tes games, bukan tester provider",
+        )),
     }
 }
 
@@ -3494,6 +3756,7 @@ mod package_update_audit_detail_tests {
             description: String::new(),
             price_idr: price,
             included_hits: hits,
+            game_hits: 0,
             active: true,
             highlighted: false,
             products: Vec::new(),
@@ -3869,7 +4132,7 @@ async fn assign_member_package(
     if mode != "add" && mode != "replace" {
         return Err(AppError::bad_request("Mode harus 'add' atau 'replace'"));
     }
-    let (quota_hits, rate_limit, package_id, plan_kind) = if let Some(package_id) = input.package_id
+    let (quota_hits, game_hits, rate_limit, package_id, plan_kind) = if let Some(package_id) = input.package_id
     {
         let package = state
             .store
@@ -3880,6 +4143,7 @@ async fn assign_member_package(
             .ok_or_else(|| AppError::not_found("Paket tidak ditemukan"))?;
         (
             package.included_hits,
+            package.game_hits,
             input
                 .rate_limit_per_minute
                 .or(Some(package.rate_limit_per_minute)),
@@ -3901,7 +4165,8 @@ async fn assign_member_package(
                 "Jumlah hit paket manual maks 10.000.000 per assign (sama dengan batas adjust)",
             ));
         }
-        (hits, input.rate_limit_per_minute, None, "manual")
+        // Assign manual tidak membawa hit game (hanya paket katalog).
+        (hits, 0, input.rate_limit_per_minute, None, "manual")
     };
     if let Some(rate) = rate_limit {
         if rate == 0 || rate > 100_000 {
@@ -3913,7 +4178,7 @@ async fn assign_member_package(
     let (summary, remaining, deleted_buckets) = state
         .store
         .assign_plan_to_member_key(
-            id, quota_hits, valid_days, mode, rate_limit, package_id, plan_kind,
+            id, quota_hits, game_hits, valid_days, mode, rate_limit, package_id, plan_kind,
         )
         .await?;
     // K18: bila mode replace, detail audit memuat SATU BARIS per bucket
@@ -4010,6 +4275,8 @@ mod deleted_buckets_detail_tests {
             package_id: None,
             total_hits: total,
             remaining_hits: remaining,
+            game_total_hits: 0,
+            game_remaining_hits: 0,
             expires_at,
             created_at: Utc::now(),
         }
@@ -4376,6 +4643,10 @@ struct MemberDetailKeyView {
     #[serde(flatten)]
     summary: crate::models::AdminApiKeySummary,
     quota_remaining: u64,
+    /// Agregat kuota game kunci ini (migrasi 0042): total dari semua
+    /// bucket, sisa hanya dari bucket aktif — cerminan kuota validasi.
+    game_quota_remaining: u64,
+    game_quota_total: u64,
     invalid_free_used_today: u32,
     /// Bucket FIFO kunci ini (urutan expiry terdekat dulu; nama paket
     /// di-resolve, null bila paket sudah dihapus/manual).
@@ -4538,9 +4809,24 @@ async fn get_member_detail(
             .invalid_free_used_today(&summary.prefix, wib_day)
             .await;
         let buckets = state.store.key_buckets(&summary.prefix).await;
+        // Agregat game dari QuotaBucketView (bukan QuotaBucket, jadi
+        // dihitung langsung): total dari semua bucket, sisa hanya dari
+        // bucket aktif — cerminan game_bucket_aggregate.
+        let now = Utc::now();
+        let game_total: u64 = buckets
+            .iter()
+            .fold(0u64, |sum, bucket| sum.saturating_add(bucket.game_total_hits));
+        let game_remaining: u64 = buckets
+            .iter()
+            .filter(|bucket| bucket.expires_at.map_or(true, |expiry| expiry > now))
+            .fold(0u64, |sum, bucket| {
+                sum.saturating_add(bucket.game_remaining_hits)
+            });
         keys.push(MemberDetailKeyView {
             summary,
             quota_remaining: remaining,
+            game_quota_remaining: game_remaining,
+            game_quota_total: game_total,
             invalid_free_used_today,
             buckets,
         });
@@ -5784,6 +6070,7 @@ pub(crate) fn normalize_bank_request(
         product: ValidationProduct::BankAccount,
         provider_hint: Some(bank_code),
         target: account_number,
+        zone_id: None,
     })
 }
 
@@ -5812,6 +6099,7 @@ pub(crate) fn normalize_ewallet_request(
         product: ValidationProduct::Ewallet,
         provider_hint: Some(provider),
         target: account_number,
+        zone_id: None,
     })
 }
 
@@ -5830,6 +6118,7 @@ pub(crate) fn normalize_pln_request(
         product: ValidationProduct::Pln,
         provider_hint: None,
         target: customer_id,
+        zone_id: None,
     })
 }
 
@@ -5867,6 +6156,25 @@ pub(crate) fn normalize_whatsapp_request(
         product: ValidationProduct::Whatsapp,
         provider_hint: None,
         target: phone,
+        zone_id: None,
+    })
+}
+
+/// Normalisasi request cek ID game: validasi parameter di sini
+/// (sebelum idempotensi/rate-limit/reserve), supaya 400 tidak pernah
+/// memotong kuota. `provider_hint` = kode service game (mis. region-ml);
+/// zone ikut dalam fingerprint (lihat execute_validation).
+pub(crate) fn normalize_game_request(
+    service: &'static crate::games::GameService,
+    user_id: &str,
+    zone_id: Option<&str>,
+) -> Result<ProviderValidationRequest, AppError> {
+    crate::games::validate_game_params(service, user_id, zone_id)?;
+    Ok(ProviderValidationRequest {
+        product: ValidationProduct::Game,
+        provider_hint: Some(service.code.to_owned()),
+        target: user_id.trim().to_owned(),
+        zone_id: zone_id.map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned),
     })
 }
 
@@ -5923,7 +6231,7 @@ fn fingerprint_hash(
 
 fn mask_target(product: ValidationProduct, target: &str) -> String {
     let visible = match product {
-        ValidationProduct::BankAccount | ValidationProduct::Ewallet | ValidationProduct::Pln => 4,
+        ValidationProduct::BankAccount | ValidationProduct::Ewallet | ValidationProduct::Pln | ValidationProduct::Game => 4,
         ValidationProduct::Whatsapp => 3,
     };
     let suffix = target
@@ -5957,6 +6265,168 @@ async fn qris_pool(state: &AppState) -> Result<sqlx::MySqlPool, AppError> {
     state.store.pool().ok_or_else(|| {
         AppError::service_unavailable("Pembayaran belum tersedia (database tidak terpasang).")
     })
+}
+
+/// Pool untuk handler games (pola qris_pool): 503 bila database tidak
+/// terpasang — games butuh DB untuk key + daftar layanan.
+async fn games_pool(state: &AppState) -> Result<sqlx::MySqlPool, AppError> {
+    state.store.pool().ok_or_else(|| {
+        AppError::service_unavailable("Layanan game belum tersedia (database tidak terpasang).")
+    })
+}
+
+async fn get_games_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<crate::games::GamesSettingsView>, AppError> {
+    require_admin_role(&state, &headers, Role::Viewer).await?;
+    let pool = games_pool(&state).await?;
+    Ok(Json(crate::games::load_games_settings(&pool).await?))
+}
+
+#[derive(Deserialize)]
+struct UpdateGamesSettingsInput {
+    /// API key Cutiezy games yang baru; null/kosong = kosongkan key.
+    #[serde(default)]
+    api_key: Option<String>,
+}
+
+async fn update_games_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<UpdateGamesSettingsInput>,
+) -> Result<Json<crate::games::GamesSettingsView>, AppError> {
+    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = games_pool(&state).await?;
+    let cipher = crate::provider_config::CredentialCipher::new(
+        state.config.api_key_encryption_key.as_deref(),
+    );
+    let view = crate::games::save_games_api_key(&pool, &cipher, input.api_key.as_deref()).await?;
+    record_admin_activity(
+        &state,
+        &principal,
+        "Pengaturan games diperbarui",
+        format!(
+            "API key games {}",
+            if view.api_key_configured {
+                "disimpan"
+            } else {
+                "dikosongkan"
+            }
+        ),
+    )
+    .await;
+    Ok(Json(view))
+}
+
+async fn list_game_services(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::games::GameServiceRow>>, AppError> {
+    require_admin_role(&state, &headers, Role::Viewer).await?;
+    let pool = games_pool(&state).await?;
+    Ok(Json(crate::games::load_game_services(&pool).await?))
+}
+
+#[derive(Deserialize)]
+struct UpdateGameServiceInput {
+    enabled: bool,
+}
+
+async fn update_game_service(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(code): Path<String>,
+    Json(input): Json<UpdateGameServiceInput>,
+) -> Result<Json<crate::games::GameServiceRow>, AppError> {
+    let principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = games_pool(&state).await?;
+    let row = crate::games::set_game_service_enabled(&pool, &code, input.enabled).await?;
+    record_admin_activity(
+        &state,
+        &principal,
+        "Status game diubah",
+        format!(
+            "Game {} {}",
+            row.name,
+            if row.enabled { "diaktifkan" } else { "dinonaktifkan" }
+        ),
+    )
+    .await;
+    Ok(Json(row))
+}
+
+#[derive(Deserialize)]
+struct TestGameInput {
+    code: String,
+    user_id: String,
+    #[serde(default)]
+    zone_id: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TestGameResponse {
+    status: ValidationStatus,
+    valid: bool,
+    message: String,
+    nickname: Option<String>,
+    zone: Option<String>,
+    country: Option<String>,
+    server: Option<String>,
+    provider_latency_ms: u64,
+    raw_message: Option<String>,
+    raw_body: String,
+    verified: bool,
+}
+
+async fn test_game(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<TestGameInput>,
+) -> Result<Json<TestGameResponse>, AppError> {
+    let _principal = require_admin_role(&state, &headers, Role::Manager).await?;
+    let pool = games_pool(&state).await?;
+    let service = crate::games::find_game_service(&input.code)
+        .ok_or_else(|| AppError::not_found("Game tidak dikenal"))?;
+    crate::games::validate_game_params(service, &input.user_id, input.zone_id.as_deref())?;
+    let cipher = crate::provider_config::CredentialCipher::new(
+        state.config.api_key_encryption_key.as_deref(),
+    );
+    let api_key = crate::games::load_games_api_key(&pool, &cipher)
+        .await?
+        .ok_or_else(|| {
+            AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "games_not_configured",
+                "API key games belum dikonfigurasi.",
+            )
+        })?;
+    let outcome = crate::games::check_game(
+        state.provider_guard.as_ref(),
+        &api_key,
+        service,
+        &input.user_id,
+        input.zone_id.as_deref(),
+    )
+    .await?;
+    let verified = outcome.status == ValidationStatus::Valid;
+    if verified {
+        // Tes sukses = respons nyata terverifikasi untuk game ini.
+        let _ = crate::games::mark_game_service_verified(&pool, service.code).await;
+    }
+    Ok(Json(TestGameResponse {
+        status: outcome.status,
+        valid: outcome.status.is_success(),
+        message: crate::games::game_member_message(outcome.status).to_owned(),
+        nickname: outcome.nickname,
+        zone: outcome.zone,
+        country: outcome.country,
+        server: outcome.server,
+        provider_latency_ms: outcome.provider_latency_ms,
+        raw_message: outcome.raw_message,
+        raw_body: outcome.raw_body,
+        verified,
+    }))
 }
 
 async fn get_qris_settings(
@@ -7681,6 +8151,9 @@ mod account_name_tests {
             service_code: None,
             bank_name: None,
             account_name: name.map(str::to_owned),
+            zone: None,
+            country: None,
+            server: None,
             tarif: None,
             daya: None,
             provider: None,
@@ -8059,6 +8532,8 @@ mod member_detail_adjust_tests {
         let view = MemberDetailKeyView {
             summary,
             quota_remaining: 900,
+            game_quota_remaining: 50,
+            game_quota_total: 100,
             invalid_free_used_today: 3,
             buckets: Vec::new(),
         };
@@ -8550,20 +9025,31 @@ mod site_status_tests {
 
     #[test]
     fn v3_code_resolution_covers_all_products() {
-        let bank = resolve_v3_code("002", "1234567890").expect("bank 002");
+        let bank = resolve_v3_code("002", "1234567890", None).expect("bank 002");
         assert_eq!(bank.product, ValidationProduct::BankAccount);
         assert_eq!(bank.provider_hint.as_deref(), Some("002"));
-        let wallet = resolve_v3_code("DANA", "081234567890").expect("dana");
+        let wallet = resolve_v3_code("DANA", "081234567890", None).expect("dana");
         assert_eq!(wallet.product, ValidationProduct::Ewallet);
         assert_eq!(wallet.provider_hint.as_deref(), Some("dana"));
-        let pln = resolve_v3_code("pln", "123456789012").expect("pln");
+        let pln = resolve_v3_code("pln", "123456789012", None).expect("pln");
         assert_eq!(pln.product, ValidationProduct::Pln);
-        let wa = resolve_v3_code("whatsapp", "081234567890").expect("whatsapp");
+        let wa = resolve_v3_code("whatsapp", "081234567890", None).expect("whatsapp");
         assert_eq!(wa.product, ValidationProduct::Whatsapp);
         assert_eq!(wa.target, "6281234567890");
-        assert!(resolve_v3_code("999", "1234567890").is_err());
-        assert!(resolve_v3_code("2", "1234567890").is_err());
-        assert!(resolve_v3_code("tidakada", "1234567890").is_err());
+        // Game: kode service Cutiezy 1:1; zone wajib untuk keluarga ML.
+        let ml = resolve_v3_code("region-ml", "861363893", Some("12422")).expect("region-ml");
+        assert_eq!(ml.product, ValidationProduct::Game);
+        assert_eq!(ml.provider_hint.as_deref(), Some("region-ml"));
+        assert_eq!(ml.zone_id.as_deref(), Some("12422"));
+        assert!(resolve_v3_code("region-ml", "861363893", None).is_err());
+        let ff = resolve_v3_code("FREE-FIRE", "123456789", None).expect("free-fire");
+        assert_eq!(ff.product, ValidationProduct::Game);
+        assert_eq!(ff.provider_hint.as_deref(), Some("free-fire"));
+        let roblox = resolve_v3_code("roblox", "builderman", None).expect("roblox");
+        assert_eq!(roblox.provider_hint.as_deref(), Some("roblox"));
+        assert!(resolve_v3_code("999", "1234567890", None).is_err());
+        assert!(resolve_v3_code("2", "1234567890", None).is_err());
+        assert!(resolve_v3_code("tidakada", "1234567890", None).is_err());
     }
 
     #[test]
@@ -8793,6 +9279,7 @@ mod admin_export_tests {
             package_name: "Paket, Premium".to_owned(),
             price_idr: 50000,
             quota_hits: 1000,
+            game_hits: 0,
             rate_limit_per_minute: 60,
             valid_days: 30,
             amount_idr: 50000,

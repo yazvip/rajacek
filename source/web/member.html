@@ -566,6 +566,8 @@
                 <div class="quota-track"><div id="quotaBar" style="width:0%"></div></div>
                 <div class="kpi-foot"><span id="quotaNote">kuota validasi tersedia</span></div>
                 <div class="kpi-foot"><span id="freeInvalidNote"></span></div>
+                <div class="kpi-foot"><span id="gameQuotaNote"></span></div>
+                <div class="kpi-foot"><span id="freeGameNote"></span></div>
               </div>
               <div class="card kpi">
                 <div class="kpi-top"><span class="kpi-label">Cek Hari Ini</span><span class="kpi-icon blue"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></span></div>
@@ -859,6 +861,7 @@
                 <button type="button" class="tab" data-product="ewallet">E-Wallet</button>
                 <button type="button" class="tab" data-product="whatsapp">WhatsApp</button>
                 <button type="button" class="tab" data-product="pln">PLN</button>
+                <button type="button" class="tab" data-product="game">Cek ID Game</button>
               </div>
               <form id="sandboxForm">
                 <div class="sandbox-grid">
@@ -877,6 +880,14 @@
                       <div class="combo-list hidden" id="sbWalletList"></div>
                     </div>
                     <select id="sbWallet" class="hidden"></select>
+                  </div>
+                  <div id="sbGameWrap" class="hidden">
+                    <label>Game</label>
+                    <select id="sbGame"></select>
+                  </div>
+                  <div id="sbZoneWrap" class="hidden">
+                    <label>Zone ID</label>
+                    <input id="sbZoneId" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="cth. 12422" />
                   </div>
                   <div id="sbTargetWrap">
                     <label id="sbTargetLabel">Nomor rekening / HP</label>
@@ -1278,6 +1289,12 @@
         if (typeof d.invalid_free_used_today === 'number') {
           $('freeInvalidNote').textContent = 'Tidak-valid gratis hari ini: ' + fmtNum(d.invalid_free_used_today) + '/100 (sisa ' + fmtNum(d.invalid_free_remaining_today) + ')';
         }
+        if (typeof d.remaining_game_quota === 'number') {
+          $('gameQuotaNote').textContent = 'Sisa kuota game: ' + fmtNum(d.remaining_game_quota) + ' / ' + fmtNum(d.total_game_quota);
+          if (typeof d.game_free_used_today === 'number') {
+            $('freeGameNote').textContent = 'ID game tidak ditemukan gratis hari ini: ' + fmtNum(d.game_free_used_today) + '/100 (sisa ' + fmtNum(d.game_free_remaining_today) + ')';
+          }
+        }
         $('statToday').textContent = fmtNum(d.checks_today);
         $('stat30').textContent = fmtNum(d.checks_last_30_days);
         $('statRate').textContent = fmtNum(d.key.rate_limit_per_minute);
@@ -1306,7 +1323,7 @@
             if (!b.expires_at) return -1;
             return new Date(a.expires_at) - new Date(b.expires_at);
           });
-          $('bucketList').innerHTML = sortedBuckets.map((b) => `<div class="bucket-row"><span class="bucket-name">${escHtml(b.package_name || 'Paket')}</span><span class="bucket-hits">${fmtNum(b.remaining_hits || 0)} / ${fmtNum(b.total_hits || 0)} hit</span><span class="bucket-exp">${b.expires_at ? 's/d ' + fmtDate(b.expires_at) : 'Tanpa kedaluwarsa'}</span></div>`).join('');
+          $('bucketList').innerHTML = sortedBuckets.map((b) => `<div class="bucket-row"><span class="bucket-name">${escHtml(b.package_name || 'Paket')}</span><span class="bucket-hits">${fmtNum(b.remaining_hits || 0)} / ${fmtNum(b.total_hits || 0)} hit${(b.game_total_hits || 0) > 0 ? ' · ' + fmtNum(b.game_remaining_hits || 0) + ' / ' + fmtNum(b.game_total_hits || 0) + ' hit game' : ''}</span><span class="bucket-exp">${b.expires_at ? 's/d ' + fmtDate(b.expires_at) : 'Tanpa kedaluwarsa'}</span></div>`).join('');
           $('bucketCard').classList.remove('hidden');
         }
         if (d.member) {
@@ -1600,12 +1617,24 @@
       }
       const bankCombo = makeCombo('sbBank', 'sbBankInput', 'sbBankList', 'sbBankCombo');
       const walletCombo = makeCombo('sbWallet', 'sbWalletInput', 'sbWalletList', 'sbWalletCombo');
+      function sbSyncGameFields() {
+        const opt = $('sbGame').selectedOptions[0];
+        const needsZone = opt && opt.dataset.needsZone === '1';
+        $('sbZoneWrap').classList.toggle('hidden', !needsZone);
+        const kind = opt ? opt.dataset.paramKind : 'user_id';
+        $('sbTarget').placeholder = kind === 'username' ? 'cth. builderman' : kind === 'riot_id' ? 'cth. Nama#TAG' : 'cth. 861363893';
+        $('sbTargetLabel').textContent = 'User ID / username';
+      }
       function sbSyncForm() {
         $('sbBankWrap').classList.toggle('hidden', sb.product !== 'bank_account');
         $('sbWalletWrap').classList.toggle('hidden', sb.product !== 'ewallet');
+        $('sbGameWrap').classList.toggle('hidden', sb.product !== 'game');
+        if (sb.product === 'game') { sbSyncGameFields(); return; }
+        $('sbZoneWrap').classList.add('hidden');
         $('sbTarget').placeholder = sb.product === 'whatsapp' ? 'cth. 081234567890' : 'cth. 1234567890';
         $('sbTargetLabel').textContent = sb.product === 'pln' ? 'ID pelanggan PLN' : sb.product === 'whatsapp' ? 'Nomor HP' : 'Nomor rekening / HP';
       }
+      $('sbGame').addEventListener('change', sbSyncGameFields);
       document.querySelectorAll('.sandbox-tabs .tab').forEach(btn => {
         btn.addEventListener('click', () => {
           document.querySelectorAll('.sandbox-tabs .tab').forEach(b => b.classList.remove('active'));
@@ -1617,12 +1646,15 @@
       async function sbLoadOptions() {
         if (sb.loaded) return;
         try {
-          const [banks, wallets] = await Promise.all([
+          const [banks, wallets, games] = await Promise.all([
             api('/v1/member/banks').then(r => r.json()),
             api('/v1/member/ewallets').then(r => r.json()),
+            api('/v1/member/games').then(r => r.json()).catch(() => []),
           ]);
           $('sbBank').innerHTML = banks.map(b => `<option value="${b.code}">${b.code} · ${b.name}</option>`).join('');
           $('sbWallet').innerHTML = wallets.map(w => `<option value="${w.code}">${w.name}</option>`).join('');
+          $('sbGame').innerHTML = games.map(g => `<option value="${g.code}" data-needs-zone="${g.needs_zone ? 1 : 0}" data-param-kind="${g.param_kind}">${g.name}</option>`).join('');
+          sb.games = games;
           bankCombo.setItems(banks.map(b => ({ value: b.code, label: `${b.code} · ${b.name}` })));
           walletCombo.setItems(wallets.map(w => ({ value: w.code, label: w.name })));
           sb.loaded = true;
@@ -1637,13 +1669,18 @@
           const payload = { product: sb.product, target: $('sbTarget').value.trim() };
           if (sb.product === 'bank_account') payload.bank_code = $('sbBank').value;
           if (sb.product === 'ewallet') payload.ewallet_provider = $('sbWallet').value;
+          if (sb.product === 'game') {
+            payload.game_code = $('sbGame').value;
+            const zone = $('sbZoneId').value.trim();
+            if (zone) payload.zone_id = zone;
+          }
           // K11: kunci idempotensi disimpan di state halaman (per
           // produk+target+provider) dan dipakai ulang untuk retry submit
           // yang sama — submit ulang setelah error/timeout me-replay
           // hasil sebelumnya, bukan menagih cek baru. Kunci dihapus
           // begitu submit BERHASIL, sehingga submit berikutnya untuk
           // target yang sama adalah cek baru yang sah.
-          const sbKeyId = [sb.product, payload.target, payload.bank_code || payload.ewallet_provider || ''].join('|');
+          const sbKeyId = [sb.product, payload.target, payload.bank_code || payload.ewallet_provider || payload.game_code || '', payload.zone_id || ''].join('|');
           const sbStoreKey = 'sb-idem:' + sbKeyId;
           let sbIdemKey = null;
           try { sbIdemKey = sessionStorage.getItem(sbStoreKey); } catch (_) { /* storage tak tersedia: kunci per submit */ }
@@ -1662,8 +1699,12 @@
           const plnExtraBox = sb.product === 'pln'
             ? `${r.tarif ? `<div><span>Tarif</span><strong>${escHtml(r.tarif)}</strong></div>` : ''}${r.daya ? `<div><span>Daya</span><strong>${escHtml(r.daya)}</strong></div>` : ''}`
             : '';
+          const gameExtraBox = sb.product === 'game'
+            ? `<div><span>Nickname</span><strong>${escHtml(r.account_name || '–')}</strong></div>${r.zone ? `<div><span>Zone</span><strong>${escHtml(r.zone)}</strong></div>` : ''}${r.country ? `<div><span>Negara</span><strong>${escHtml(r.country)}</strong></div>` : ''}${r.server ? `<div><span>Server</span><strong>${escHtml(r.server)}</strong></div>` : ''}`
+            : '';
           const nameBox = sb.product === 'whatsapp'
             ? `<div><span>Status WA</span><strong>${typeof r.registered === 'boolean' ? (r.registered ? 'Terdaftar' : 'Tidak Terdaftar') : '–'}</strong></div>`
+            : sb.product === 'game' ? gameExtraBox
             : `<div><span>Nama</span><strong>${r.account_name || '–'}</strong></div>${plnExtraBox}`;
           $('sbResult').innerHTML = `
             <div class="resp-tabs">
@@ -2003,6 +2044,7 @@
               <p class="buy-desc">${fmtNum(p.included_hits)} hit · ${fmtNum(p.rate_limit_per_minute)}/menit · ${p.products_label}</p>
               <ul class="buy-feats">
                 <li>+${fmtNum(p.included_hits)} Kuota Validasi</li>
+                ${(p.game_hits || 0) > 0 ? `<li>+${fmtNum(p.game_hits)} Hit Game</li>` : ''}
                 <li>Rate ${fmtNum(p.rate_limit_per_minute)}/menit</li>
                 <li>${p.products_label}</li>
               </ul>
