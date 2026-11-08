@@ -625,3 +625,23 @@ Restore dari ZIP ini:
 - Deploy 8 Nov 2026: tes penuh 410 passed; binary api `cacca3bb…` /
   worker `d3add2d3…`; backup `/opt/rajacek/backup-20261108-opsia/`;
   tanpa migrasi DB.
+
+## 13. TABEL DOCS JADI KARTU DI HP (LIVE 2026-11-08)
+- Keluhan user 8 Nov 2026 (2 screenshot HP): tabel docs game + status
+  pecah kata di HP (`code` -> "cod e", `accountNumber` -> "acco untNu
+  mber", `valid` -> "v al i d"). Akar sama seperti tabel error 31 Okt:
+  tabel dipaksa selebar layar + `overflow-wrap:anywhere` memecah token.
+- Perbaikan (pola error-table 31 Okt, diperluas): 5 tabel tersisa
+  (bank, e-wallet, WhatsApp, game, status hasil) diberi `data-label`
+  per td (42 label) + CSS kartu <=640px untuk
+  `table:not(.error-table)` (header disembunyikan, tiap baris jadi
+  kartu berlabel, token code nowrap utuh). Desktop + tabel error tidak
+  berubah. Verifikasi visual Playwright 390px pra-deploy (overflowX=0,
+  0 token pecah) + pasca-deploy live (screenshot kartu game + status).
+- Ikut diperbaiki: contoh curl game berisi placeholder harfiah
+  `api_key=<redacted>` (bukan `rc_CONTOH` seperti contoh lain) —
+  kemungkinan tersalin dari tampilan output tool yang teredaksi saat
+  deploy games; diganti `rc_CONTOH`, 0 literal `<redacted>` tersisa.
+- Deploy 8 Nov 2026: tes penuh 410 passed; binary api `f913fdd6…` /
+  worker `39ea5906…`; backup `/opt/rajacek/backup-20261108-docsmobile/`;
+  tanpa migrasi DB.
