@@ -516,13 +516,13 @@ fn render_landing(
             String::new()
         };
         cards.push_str(&format!(
-            "<article class=\"product-card price-card{popular}\">{badge}<h3>{name}</h3>{promo_badge}<p class=\"price-amount\">Rp{price}</p>{promo_old}<p class=\"price-per\">per paket · masa aktif {valid_days} hari</p><ul class=\"price-features\"><li><span>✓</span> {hits} hit</li>{game_bullet}<li><span>✓</span> {rate} hit/menit</li><li><span>✓</span> {products}</li></ul><a class=\"price-cta\" href=\"/member\">Masuk &amp; coba gratis <span aria-hidden=\"true\">→</span></a></article>",
+            "<article class=\"product-card price-card{popular}\">{badge}<h3>{name}</h3>{promo_badge}<p class=\"price-amount\">Rp{price}</p>{promo_old}<p class=\"price-per\">per paket · masa aktif {valid_days} hari</p><ul class=\"price-features\"><li><span>✓</span> {hits}× cek validasi</li>{game_bullet}<li><span>✓</span> Maks. {rate} cek/menit</li><li><span>✓</span> {products}</li></ul><a class=\"price-cta\" href=\"/member\">Masuk &amp; coba gratis <span aria-hidden=\"true\">→</span></a></article>",
             name = html_escape(&package.name),
             price = format_id_number(effective),
             hits = format_id_number(package.included_hits),
             game_bullet = if package.game_hits > 0 {
                 format!(
-                    "<li><span>✓</span> {} hit game</li>",
+                    "<li><span>✓</span> {}× cek ID game</li>",
                     format_id_number(package.game_hits)
                 )
             } else {

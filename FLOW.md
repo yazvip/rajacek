@@ -606,3 +606,22 @@ Restore dari ZIP ini:
   max-age=3600` — salinan publik bisa basi sampai 1 jam setelah deploy;
   verifikasi openapi WAJIB pakai cache-buster (`?x=<tanggal>`) atau cek
   lokal 127.0.0.1:8091. Landing/docs tidak kena (no-cache).
+
+## 12. BAHASA "CEK" SERAGAM (Opsi A, LIVE 2026-11-08)
+- Keputusan user 8 Nov 2026: bahasa member-facing diseragamkan ke kata
+  "cek" (bukan "hit") — member sudah kenal "cek" dari trial "100× cek"
+  dan "Coba Cek Live". "Hit" tetap dipakai di docs + panel admin + kode.
+- Kartu harga landing (`render_landing` di api.rs): "5.000× cek
+  validasi", "500× cek ID game" (bila game_hits > 0), "Maks. 30
+  cek/menit". Intro harga landing: "Satu cek validasi memakai 1 kuota
+  untuk hasil valid, tidak valid, atau tidak ditemukan. ... Cek ID game
+  dihitung dari kuota game paket, terpisah dari cek validasi."
+- Portal member (member.html): kartu Beli Paket ("5.000× cek validasi ·
+  maks. 30 cek/menit", bullet "+5.000× Cek Validasi", "+500× Cek ID
+  Game (kuota terpisah)", "Maks. 30 cek/menit"), rincian bucket ("X / Y
+  cek validasi · A / B cek ID game"), KPI "Sisa Cek Validasi", catatan
+  "Sisa cek ID game: X / Y", invoice/konfirmasi/riwayat order + info
+  trial ("+N× cek validasi"). Kata benda "kuota" tetap dipakai.
+- Deploy 8 Nov 2026: tes penuh 410 passed; binary api `cacca3bb…` /
+  worker `d3add2d3…`; backup `/opt/rajacek/backup-20261108-opsia/`;
+  tanpa migrasi DB.

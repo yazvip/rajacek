@@ -522,7 +522,7 @@
         <div class="spacer"></div>
         <div class="quota-pill">
           <span class="qp-dot"></span>
-          <span class="qp-label">Sisa Kuota:</span>
+          <span class="qp-label">Sisa Cek Validasi:</span>
           <span class="qp-value" id="headerQuota">–</span>
           <button type="button" id="topUpBtn">+ Top Up</button>
         </div>
@@ -561,10 +561,10 @@
 
             <div class="grid-kpi">
               <div class="card kpi">
-                <div class="kpi-top"><span class="kpi-label">Sisa Kuota</span><span class="kpi-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span></div>
+                <div class="kpi-top"><span class="kpi-label">Sisa Cek Validasi</span><span class="kpi-icon brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span></div>
                 <div class="kpi-value" id="statQuota">–</div>
                 <div class="quota-track"><div id="quotaBar" style="width:0%"></div></div>
-                <div class="kpi-foot"><span id="quotaNote">kuota validasi tersedia</span></div>
+                <div class="kpi-foot"><span id="quotaNote">cek validasi tersedia</span></div>
                 <div class="kpi-foot"><span id="freeInvalidNote"></span></div>
                 <div class="kpi-foot"><span id="gameQuotaNote"></span></div>
                 <div class="kpi-foot"><span id="freeGameNote"></span></div>
@@ -793,7 +793,7 @@
                 <p class="sub" style="max-width:640px;">Tersedia pembayaran QRIS otomatis. Kuota baru <strong>ditambahkan ke sisa kuota Anda</strong> (tidak menggantikan). Setiap paket yang Anda beli punya masa aktif sendiri, dan pemakaian selalu menghabiskan paket yang paling cepat kedaluwarsa dulu.</p>
               </div>
               <div style="text-align:right;">
-                <span style="font-size:11px;color:var(--faint);display:block;">Sisa Kuota Saat Ini</span>
+                <span style="font-size:11px;color:var(--faint);display:block;">Sisa Cek Validasi Saat Ini</span>
                 <span style="font-size:18px;font-family:'JetBrains Mono',monospace;font-weight:800;color:var(--brand);" id="buyCurrentQuota">–</span>
                 <span id="buyActivePkg" class="hidden" style="font-size:12px;color:var(--muted);display:block;margin-top:4px;"></span>
               </div>
@@ -905,8 +905,8 @@
           <section id="page-riwayat" class="page-section stack">
             <div class="recap">
               <div class="recap-card"><span>Total riwayat</span><strong id="recapTotal">–</strong><em>sesuai filter aktif</em></div>
-              <div class="recap-card"><span>Rata-rata hit / detik</span><strong id="recapPerSec">–</strong><em>60 detik terakhir</em></div>
-              <div class="recap-card"><span>Rata-rata hit / menit</span><strong id="recapPerMin">–</strong><em>60 menit terakhir</em></div>
+              <div class="recap-card"><span>Rata-rata cek / detik</span><strong id="recapPerSec">–</strong><em>60 detik terakhir</em></div>
+              <div class="recap-card"><span>Rata-rata cek / menit</span><strong id="recapPerMin">–</strong><em>60 menit terakhir</em></div>
             </div>
             <div class="card" style="padding:0;overflow:hidden;">
               <div style="padding:16px 20px;border-bottom:1px solid var(--line-soft);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;">
@@ -1290,7 +1290,7 @@
           $('freeInvalidNote').textContent = 'Tidak-valid gratis hari ini: ' + fmtNum(d.invalid_free_used_today) + '/100 (sisa ' + fmtNum(d.invalid_free_remaining_today) + ')';
         }
         if (typeof d.remaining_game_quota === 'number') {
-          $('gameQuotaNote').textContent = 'Sisa kuota game: ' + fmtNum(d.remaining_game_quota) + ' / ' + fmtNum(d.total_game_quota);
+          $('gameQuotaNote').textContent = 'Sisa cek ID game: ' + fmtNum(d.remaining_game_quota) + ' / ' + fmtNum(d.total_game_quota);
           if (typeof d.game_free_used_today === 'number') {
             $('freeGameNote').textContent = 'ID game tidak ditemukan gratis hari ini: ' + fmtNum(d.game_free_used_today) + '/100 (sisa ' + fmtNum(d.game_free_remaining_today) + ')';
           }
@@ -1323,7 +1323,7 @@
             if (!b.expires_at) return -1;
             return new Date(a.expires_at) - new Date(b.expires_at);
           });
-          $('bucketList').innerHTML = sortedBuckets.map((b) => `<div class="bucket-row"><span class="bucket-name">${escHtml(b.package_name || 'Paket')}</span><span class="bucket-hits">${fmtNum(b.remaining_hits || 0)} / ${fmtNum(b.total_hits || 0)} hit${(b.game_total_hits || 0) > 0 ? ' · ' + fmtNum(b.game_remaining_hits || 0) + ' / ' + fmtNum(b.game_total_hits || 0) + ' hit game' : ''}</span><span class="bucket-exp">${b.expires_at ? 's/d ' + fmtDate(b.expires_at) : 'Tanpa kedaluwarsa'}</span></div>`).join('');
+          $('bucketList').innerHTML = sortedBuckets.map((b) => `<div class="bucket-row"><span class="bucket-name">${escHtml(b.package_name || 'Paket')}</span><span class="bucket-hits">${fmtNum(b.remaining_hits || 0)} / ${fmtNum(b.total_hits || 0)} cek validasi${(b.game_total_hits || 0) > 0 ? ' · ' + fmtNum(b.game_remaining_hits || 0) + ' / ' + fmtNum(b.game_total_hits || 0) + ' cek ID game' : ''}</span><span class="bucket-exp">${b.expires_at ? 's/d ' + fmtDate(b.expires_at) : 'Tanpa kedaluwarsa'}</span></div>`).join('');
           $('bucketCard').classList.remove('hidden');
         }
         if (d.member) {
@@ -1719,7 +1719,7 @@
                 ${nameBox}
                 <div><span>Latensi provider</span><strong>${fmtNum(d.meta.provider_latency_ms)} ms</strong></div>
                 <div><span>Percobaan</span><strong>${d.meta.attempts > 1 ? 'Ke-' + d.meta.attempts : 'Pertama'}</strong></div>
-                <div><span>Sisa kuota</span><strong>${fmtNum(d.meta.remaining_quota)}</strong></div>
+                <div><span>Sisa cek validasi</span><strong>${fmtNum(d.meta.remaining_quota)}</strong></div>
               </div>
               <p class="sub" style="margin-top:8px;">${d.message || ''}</p>
             </div>
@@ -1948,8 +1948,8 @@
         $('invBuyerName').textContent = $('memberName').textContent || '–';
         $('invBuyerEmail').textContent = $('memberEmail').textContent || '–';
         $('buyWaitingPkg').textContent = order.package_name;
-        $('invItemHits').textContent = '+' + fmtNum(order.quota_hits) + ' hit';
-        $('invItemRate').textContent = fmtNum(order.rate_limit_per_minute) + '/menit';
+        $('invItemHits').textContent = '+' + fmtNum(order.quota_hits) + '× cek validasi';
+        $('invItemRate').textContent = fmtNum(order.rate_limit_per_minute) + ' cek/menit';
         $('invItemDays').textContent = 'Aktif ' + fmtNum(order.valid_days) + ' hari setelah lunas';
         const invDisc = order.price_idr - order.amount_idr;
         if (invDisc > 0 && order.price_idr > 0) {
@@ -2015,7 +2015,7 @@
         buyCurrentOrderId = null;
         $('buyWaiting').classList.add('hidden');
         if (order.status === 'granted') {
-          $('buyMsg').textContent = `Pembayaran ${order.package_name} lunas — kuota +${fmtNum(order.quota_hits)} hit sudah aktif.`;
+          $('buyMsg').textContent = `Pembayaran ${order.package_name} lunas — kuota +${fmtNum(order.quota_hits)}× cek validasi sudah aktif.`;
           loadOverview();
         } else if (order.status === 'needs_review') {
           $('buyMsg').textContent = 'Pembayaran Anda tercatat lunas tapi perlu peninjauan admin. Hubungi admin bila kuota belum bertambah.';
@@ -2041,11 +2041,11 @@
               ${promoOn ? `<div class="buy-promo-row"><span class="buy-promo-badge">PROMO −${p.promo_percent}%</span><span class="buy-old">Rp ${fmtNum(p.original_price_idr)}</span></div>` : ''}
               <div class="buy-price">Rp ${fmtNum(p.price_idr)}</div>
               ${promoOn ? `<div class="buy-promo-count">Berakhir dalam <span data-promo-ends="${p.promo_ends_at}">…</span></div>` : ''}
-              <p class="buy-desc">${fmtNum(p.included_hits)} hit · ${fmtNum(p.rate_limit_per_minute)}/menit · ${p.products_label}</p>
+              <p class="buy-desc">${fmtNum(p.included_hits)}× cek validasi · maks. ${fmtNum(p.rate_limit_per_minute)} cek/menit · ${p.products_label}</p>
               <ul class="buy-feats">
-                <li>+${fmtNum(p.included_hits)} Kuota Validasi</li>
-                ${(p.game_hits || 0) > 0 ? `<li>+${fmtNum(p.game_hits)} Hit Game</li>` : ''}
-                <li>Rate ${fmtNum(p.rate_limit_per_minute)}/menit</li>
+                <li>+${fmtNum(p.included_hits)}× Cek Validasi</li>
+                ${(p.game_hits || 0) > 0 ? `<li>+${fmtNum(p.game_hits)}× Cek ID Game (kuota terpisah)</li>` : ''}
+                <li>Maks. ${fmtNum(p.rate_limit_per_minute)} cek/menit</li>
                 <li>${p.products_label}</li>
               </ul>
               <button type="button" class="primary" data-buy="${p.id}">Beli Paket ${p.name}</button>
@@ -2093,7 +2093,7 @@
           if (o.granted_at && o.granted_expires_at) dates.push(`Aktif s/d ${fmtDate(o.granted_expires_at)}`);
           return `<div class="ord-item">
             <div class="ord-top"><div class="ord-name">${o.package_name}</div><span class="ord-status ${cls}">${label}</span></div>
-            <div class="ord-meta">Rp ${fmtNum(o.amount_idr)}${o.price_idr !== o.amount_idr ? ` (harga paket Rp ${fmtNum(o.price_idr)})` : ''} · +${fmtNum(o.quota_hits)} hit · ${fmtNum(o.rate_limit_per_minute)}/menit · ${o.valid_days} hari</div>
+            <div class="ord-meta">Rp ${fmtNum(o.amount_idr)}${o.price_idr !== o.amount_idr ? ` (harga paket Rp ${fmtNum(o.price_idr)})` : ''} · +${fmtNum(o.quota_hits)}× cek validasi · maks. ${fmtNum(o.rate_limit_per_minute)} cek/menit · ${o.valid_days} hari</div>
             <div class="ord-dates">${dates.join(' · ')}</div>
           </div>`;
         }).join('') + '</div>';
@@ -2167,12 +2167,12 @@
             $('buyPreviewPromoBadge').textContent = 'PROMO −' + d.promo_percent + '% · ';
             $('buyPreviewOld').textContent = 'Rp ' + fmtNum(d.original_price_idr);
           }
-          $('buyConfCurrent').textContent = fmtNum(d.current_remaining) + ' hit';
-          $('buyConfNew').textContent = fmtNum(d.new_remaining) + ' hit';
-          $('buyConfDelta').textContent = '+' + fmtNum(d.quota_hits) + ' hit';
+          $('buyConfCurrent').textContent = fmtNum(d.current_remaining) + '× cek validasi';
+          $('buyConfNew').textContent = fmtNum(d.new_remaining) + '× cek validasi';
+          $('buyConfDelta').textContent = '+' + fmtNum(d.quota_hits) + '× cek validasi';
           $('buyConfRate').textContent = (d.current_rate_limit_per_minute > 0 && d.current_rate_limit_per_minute !== d.new_rate_limit_per_minute)
-            ? fmtNum(d.current_rate_limit_per_minute) + ' → ' + fmtNum(d.new_rate_limit_per_minute) + '/menit'
-            : fmtNum(d.new_rate_limit_per_minute) + '/menit';
+            ? fmtNum(d.current_rate_limit_per_minute) + ' → ' + fmtNum(d.new_rate_limit_per_minute) + ' cek/menit'
+            : fmtNum(d.new_rate_limit_per_minute) + ' cek/menit';
           $('buyConfExpiry').textContent = fmtDate(d.new_expires_at);
           if (d.new_bucket_expires_at) { $('buyConfBucketExpiry').textContent = fmtDate(d.new_bucket_expires_at); $('buyConfBucketRow').classList.remove('hidden'); }
           else $('buyConfBucketRow').classList.add('hidden');
@@ -2181,7 +2181,7 @@
           // bucket trial (bukan plan_kind) — member yang sudah pernah
           // beli tapi trial-nya masih bersisa tetap melihat info ini.
           if (d.trial_active) {
-            $('buyPreviewTrial').textContent = `Kuota trial Anda (${fmtNum(d.trial_active.remaining_hits)} hit, aktif s/d ${fmtDate(d.trial_active.expires_at)}) dipakai dulu sebelum kuota paket baru — membeli paket tidak menghilangkannya. Masa aktif yang tampil tetap di tanggal trial sampai kuota trial habis, lalu berpindah ke tanggal paket.`;
+            $('buyPreviewTrial').textContent = `Kuota trial Anda (${fmtNum(d.trial_active.remaining_hits)} cek validasi, aktif s/d ${fmtDate(d.trial_active.expires_at)}) dipakai dulu sebelum kuota paket baru — membeli paket tidak menghilangkannya. Masa aktif yang tampil tetap di tanggal trial sampai kuota trial habis, lalu berpindah ke tanggal paket.`;
             $('buyPreviewTrial').classList.remove('hidden');
           } else $('buyPreviewTrial').classList.add('hidden');
           buyOpenPreview();
