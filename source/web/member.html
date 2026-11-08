@@ -884,6 +884,7 @@
                   <div id="sbGameWrap" class="hidden">
                     <label>Game</label>
                     <select id="sbGame"></select>
+                    <p id="sbGameEmpty" class="muted hidden" style="margin:.4rem 0 0;font-size:.85rem;">Belum ada game yang diaktifkan admin.</p>
                   </div>
                   <div id="sbZoneWrap" class="hidden">
                     <label>Zone ID</label>
@@ -1629,6 +1630,7 @@
         $('sbBankWrap').classList.toggle('hidden', sb.product !== 'bank_account');
         $('sbWalletWrap').classList.toggle('hidden', sb.product !== 'ewallet');
         $('sbGameWrap').classList.toggle('hidden', sb.product !== 'game');
+        $('sbBtn').disabled = sb.loaded && sb.product === 'game' && (sb.games || []).length === 0;
         if (sb.product === 'game') { sbSyncGameFields(); return; }
         $('sbZoneWrap').classList.add('hidden');
         $('sbTarget').placeholder = sb.product === 'whatsapp' ? 'cth. 081234567890' : 'cth. 1234567890';
@@ -1654,10 +1656,14 @@
           $('sbBank').innerHTML = banks.map(b => `<option value="${b.code}">${b.code} · ${b.name}</option>`).join('');
           $('sbWallet').innerHTML = wallets.map(w => `<option value="${w.code}">${w.name}</option>`).join('');
           $('sbGame').innerHTML = games.map(g => `<option value="${g.code}" data-needs-zone="${g.needs_zone ? 1 : 0}" data-param-kind="${g.param_kind}">${g.name}</option>`).join('');
+          const noGames = games.length === 0;
+          $('sbGame').classList.toggle('hidden', noGames);
+          $('sbGameEmpty').classList.toggle('hidden', !noGames);
           sb.games = games;
           bankCombo.setItems(banks.map(b => ({ value: b.code, label: `${b.code} · ${b.name}` })));
           walletCombo.setItems(wallets.map(w => ({ value: w.code, label: w.name })));
           sb.loaded = true;
+          if (sb.product === 'game') sbSyncForm();
         } catch { /* opsi gagal dimuat; submit akan menampilkan error server */ }
       }
       $('sandboxForm').addEventListener('submit', async (event) => {

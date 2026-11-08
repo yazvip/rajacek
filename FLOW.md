@@ -645,3 +645,20 @@ Restore dari ZIP ini:
 - Deploy 8 Nov 2026: tes penuh 410 passed; binary api `f913fdd6…` /
   worker `39ea5906…`; backup `/opt/rajacek/backup-20261108-docsmobile/`;
   tanpa migrasi DB.
+
+## 14. PESAN KOSONG TAB CEK ID GAME MEMBER (LIVE 2026-11-08)
+- Tanya user 8 Nov 2026: kenapa tab Cek ID Game member tidak ada
+  dropdown game? Akar: dropdown ADA (`<select id=sbGame>`, diisi dari
+  `GET /v1/member/games` yang hanya mengembalikan game enabled=1),
+  tapi ke-17 game masih enabled=0 (API key Cutiezy sudah terisi 8 Nov
+  13:06 WIB; aktivasi per game menunggu tes nyata + toggle admin).
+  Select 0 option tampak seperti tidak ada dropdown.
+- Perbaikan (persetujuan user): saat 0 game — select disembunyikan,
+  tampil pesan "Belum ada game yang diaktifkan admin." (class .muted),
+  tombol Cek Sekarang disabled (hanya bila opsi sudah termuat, agar
+  jalur gagal muat tetap bisa submit + menampilkan error server).
+  Saat >=1 game, perilaku lama utuh (dropdown + Zone ID + tombol aktif).
+  Verifikasi visual Playwright 390px pra-deploy (kasus 0 game + 1 game).
+- Deploy 8 Nov 2026: tes penuh 410 passed; binary api `07e8b03b…` /
+  worker `b8785757…`; backup `/opt/rajacek/backup-20261108-gameempty/`;
+  tanpa migrasi DB.
