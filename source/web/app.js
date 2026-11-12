@@ -1301,21 +1301,29 @@
       provider_error: "Error provider", pending: "Menunggu",
       rate_limited: "Rate limit", quota_exhausted: "Kuota habis",
     };
-    $("#history-table").innerHTML = h.items.length ? h.items.map((item, idx) => {
+    $("#history-cards").innerHTML = h.items.length ? h.items.map((item) => {
       const occurred = formatHistoryDateTime(item.occurred_at);
       const target = item.target_raw != null && item.target_raw !== "" ? item.target_raw : item.target_masked;
-      const accountName = item.account_name != null && item.account_name !== "" ? item.account_name : "—";
-      return `<tr>
-      <td data-label="No." class="row-num">${formatNumber(h.total - h.offset - idx)}</td>
-      <td data-label="Waktu" class="history-date" title="${escapeHtml(occurred.full)}">${escapeHtml(occurred.date)}${occurred.time ? `<br /><span>${escapeHtml(occurred.time)}</span>` : ""}</td>
-      <td data-label="Produk">${escapeHtml(productLabel(item.product))}</td>
-      <td data-label="Target">${escapeHtml(target)}</td>
-      <td data-label="Nama">${escapeHtml(accountName)}</td>
-      <td data-label="Hasil"><span class="status-badge ${escapeHtml(item.outcome)}">${escapeHtml(outcomeLabel[item.outcome] || item.outcome)}</span></td>
-      <td data-label="Latensi">${latencyCell(item)}</td>
-      <td data-label="Request ID"><button class="table-action" type="button" data-action="history-detail" data-id="${escapeHtml(String(item.request_id))}" title="Lihat detail validasi">${escapeHtml(String(item.request_id).length <= 12 ? String(item.request_id) : String(item.request_id).slice(0, 8) + "…")}</button></td>
-    </tr>`;
-    }).join("") : `<tr><td colspan="8">Belum ada riwayat yang cocok dengan filter.</td></tr>`;
+      const hasName = item.account_name != null && item.account_name !== "";
+      const requestShort = String(item.request_id).length <= 12 ? String(item.request_id) : String(item.request_id).slice(0, 8) + "…";
+      const memberCode = item.member_code ? escapeHtml(item.member_code) : "Tanpa member";
+      return `<article class="history-card">
+      <header class="history-card-head">
+        <span class="status-badge ${escapeHtml(item.outcome)}">${escapeHtml(outcomeLabel[item.outcome] || item.outcome)}</span>
+        <span class="history-card-product">${escapeHtml(productLabel(item.product))}</span>
+        <time class="history-card-time" title="${escapeHtml(occurred.full)}">${escapeHtml(occurred.date)} · ${escapeHtml(occurred.time)}</time>
+      </header>
+      ${hasName ? `<div class="history-card-name">${escapeHtml(item.account_name)}</div><div class="history-card-target"><code>${escapeHtml(target)}</code></div>` : `<div class="history-card-name is-target"><code>${escapeHtml(target)}</code></div>`}
+      <dl class="history-card-meta">
+        <div><dt>Member</dt><dd><strong>${memberCode}</strong> <code>${escapeHtml(item.api_key_prefix)}</code></dd></div>
+        <div><dt>Latensi</dt><dd>${latencyCell(item)}</dd></div>
+      </dl>
+      <footer class="history-card-foot">
+        <span class="history-card-req">ID ${escapeHtml(requestShort)}</span>
+        <button class="table-action" type="button" data-action="history-detail" data-id="${escapeHtml(String(item.request_id))}" title="Lihat detail validasi">Detail →</button>
+      </footer>
+    </article>`;
+    }).join("") : `<div class="empty-state">Belum ada riwayat yang cocok dengan filter.</div>`;
     const from = h.total === 0 ? 0 : h.offset + 1;
     const to = Math.min(h.offset + h.limit, h.total);
     $("#history-page-info").textContent = `Menampilkan ${formatNumber(from)}–${formatNumber(to)} dari ${formatNumber(h.total)} riwayat`;

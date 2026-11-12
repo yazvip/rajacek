@@ -662,3 +662,32 @@ Restore dari ZIP ini:
 - Deploy 8 Nov 2026: tes penuh 410 passed; binary api `07e8b03b…` /
   worker `b8785757…`; backup `/opt/rajacek/backup-20261108-gameempty/`;
   tanpa migrasi DB.
+
+## 15. KARTU RIWAYAT CEK ADMIN PREMIUM (LIVE 2026-11-08)
+- Perintah user 8 Nov 2026: "Di page admin pada riwayat cek ada nama
+  member yang melakukan cek. Buat card riwayat cek rapi reposif
+  premium."
+- Sebelumnya: desktop = tabel lebar 960px (8 kolom, tanpa kolom
+  Member sejak 2026-10-26 — atribusi hanya di popup detail); HP
+  ≤767px = kartu label/nilai lama. Kolom "Nama" di tabel adalah nama
+  pemilik rekening dari provider (account_name), BUKAN nama orang
+  member; identitas member di API hanya kode (RC000001) + prefix
+  kunci — nama orang member tidak ada di item riwayat (tidak ada
+  join backend; panel-only).
+- Sesudahnya (panel-only, tanpa rebuild binary): daftar riwayat jadi
+  kartu di SEMUA lebar — grid 1 kolom di HP, 2 kolom ≥1024px.
+  Hierarki kartu: header (badge Hasil + Produk + Waktu) → Nama
+  pemilik (judul; bila kosong, target jadi judul) → Target mono →
+  meta Member (kode + prefix kunci) & Latensi (reuse latencyCell) →
+  footer (Request ID + tombol Detail → modal lama). Filter,
+  pagination, polling realtime, export CSV, dan modal Detail/Logs
+  tidak berubah. Copy heading diperbaiki (kalimat lama "nama member
+  merujuk pada pemilik kunci API" menyesatkan).
+- Verifikasi: node --check app.js; harness render node (3 kartu
+  sampel: valid/invalid/game tanpa nama — semua field hadir, tanpa
+  markup tabel); Playwright 390px + 1280px (overflowX=0, grid 2
+  kolom desktop rapi). Render live dengan data nyata hanya bisa
+  dicek dari HP user (butuh login admin).
+- Deploy 8 Nov 2026: panel-only (app.js/styles.css/index.html);
+  versi aset 20261108-2; backup /opt/rajacek/backup-20261108-histcards/
+  (web/); md5 live cocok; panel lokal+publik 200.
