@@ -9304,6 +9304,7 @@ mod admin_export_tests {
             id: "0199a5a5-0000-7000-8000-000000000099".to_owned(),
             member_id: "0199a5a5-0000-7000-8000-000000000001".to_owned(),
             member_email: Some("member, \"test\"@contoh.id".to_owned()),
+            member_name: Some("Member, Test".to_owned()),
             key_id: Some(fake_key_id.to_owned()),
             package_id: "pkg-1".to_owned(),
             package_name: "Paket, Premium".to_owned(),

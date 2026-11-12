@@ -597,6 +597,8 @@ pub struct AdminOrderView {
     pub id: String,
     pub member_id: String,
     pub member_email: Option<String>,
+    #[sqlx(default)]
+    pub member_name: Option<String>,
     pub key_id: Option<String>,
     pub package_id: String,
     pub package_name: String,
@@ -650,7 +652,7 @@ pub async fn get_order_admin(
     order_id: &Uuid,
 ) -> Result<Option<AdminOrderView>, AppError> {
     sqlx::query_as::<_, AdminOrderView>(
-        "SELECT o.id, o.member_id, m.email AS member_email, o.key_id, \
+        "SELECT o.id, o.member_id, m.email AS member_email, COALESCE(NULLIF(m.name, ''), m.email) AS member_name, o.key_id, \
          o.package_id, o.package_name, o.price_idr, o.quota_hits, o.game_hits, \
          o.rate_limit_per_minute, o.valid_days, o.amount_idr, o.status, \
          o.provider_order_id, o.expected_amount, \
@@ -2832,6 +2834,7 @@ mod area3_tests {
             id: "id".to_owned(),
             member_id: "member".to_owned(),
             member_email: None,
+            member_name: None,
             key_id: None,
             package_id: "pkg".to_owned(),
             package_name: "Paket".to_owned(),

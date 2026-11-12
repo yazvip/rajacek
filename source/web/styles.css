@@ -1570,6 +1570,12 @@ td.empty-state { display: table-cell; }
 }
 .order-field { min-width: 0; padding: 10px 0; border-bottom: 1px solid var(--line-soft); }
 .order-field:last-child { border-bottom: 0; }
+/* Detail order sebagai halaman sendiri (2026-11-12): pola sama dengan
+   detail member — hero nominal besar, grid 2 kolom ≥640px. */
+#view-order-detail > * + * { margin-top: 20px; }
+.order-hero-amount { margin-top: 2px; font-size: 28px; font-weight: 800; letter-spacing: -0.02em; color: var(--ink); }
+.order-hero-main .status-badge { align-self: flex-start; }
+@media (min-width: 640px) { .order-fields { grid-template-columns: 1fr 1fr; } }
 /* ------------------------------------------------------------------
    Perapian spasi area member & order (audit kerapian 2026-10-26).
    HANYA spasi/tata letak; warna, font, radius, id, data-action, dan
@@ -1651,6 +1657,7 @@ td.empty-state { display: table-cell; }
 #view-orders #alert-status { margin: 0; padding: 0 20px; }
 #view-orders .data-panel > .form-actions { margin-top: 0; padding: 16px 20px 20px; }
 #view-orders .data-panel > .form-actions .tester-audit-note { margin: 0; }
+/* ==========================================================================
    PERAPIAN SPASI — area providers/tester/products/packages/rate-limits/
    api-keys + modal provider (2026-10-26, HANYA spasi/tata letak).
    --------------------------------------------------------------------------
@@ -1727,7 +1734,7 @@ td.empty-state { display: table-cell; }
    (bukan panel) sebelumnya berjarak 0px ke panel kunci. */
 #view-api-keys .security-banner { margin-bottom: 20px; }
 
-/* ==========================================================================
+/* ========================================================================== */
 #view-orders #orders-empty { margin-top: 0; padding: 0 20px 20px; }
 .order-field-label, .order-field-value { display: block; }
 .order-field-value { margin-top: 6px; }

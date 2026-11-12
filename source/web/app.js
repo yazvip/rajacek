@@ -23,6 +23,7 @@
     providerTab: "bank_account",
     orders: [],
     ordersPage: { limit: 100, offset: 0 },
+    orderDetail: null,
     adminActivity: { items: [], total: 0, limit: 50, offset: 0, action: "", actor: "", from: "", to: "", loaded: false },
     analytics: null,
     analyticsDays: 30,
@@ -53,6 +54,7 @@
     members: "Member",
     "member-detail": "Detail Member",
     orders: "Order QRIS",
+    "order-detail": "Detail Order",
     activity: "Aktivitas",
     admins: "Admin",
     history: "Riwayat Cek",
@@ -454,7 +456,7 @@
       element.classList.toggle("is-visible", element.id === `view-${view}`);
     });
     // Detail member adalah anak halaman Member: sorot nav Member.
-    const navTarget = view === "member-detail" ? "members" : view;
+    const navTarget = view === "member-detail" ? "members" : view === "order-detail" ? "orders" : view;
     $$(".nav-link[data-view-target]").forEach((element) => {
       element.classList.toggle("is-active", element.dataset.viewTarget === navTarget);
     });
@@ -1863,7 +1865,10 @@
         canceled: "inactive",
         needs_review: "pending",
       };
+      state.orderDetail = order;
       $("#order-detail-title").textContent = `${order.package_name} — ${formatRupiah(order.amount_idr)}`;
+      $("#order-detail-crumb").textContent = order.id.slice(0, 8).toUpperCase();
+      $("#order-detail-sub").textContent = `Order ${order.id} · dibuat ${formatDate(order.created_at)}`;
       const grantedInfo = order.granted_at ? `${escapeHtml(formatDate(order.granted_at))} · +${formatNumber(order.granted_quota || 0)} hit · aktif s/d ${order.granted_expires_at ? escapeHtml(formatDate(order.granted_expires_at)) : "—"}` : "—";
       // last_error tidak dibersihkan saat grant sukses (menjadi
       // "Grant ulang oleh admin"), jadi callout hanya untuk needs_review.
@@ -1897,7 +1902,8 @@
         <div class="order-hero">
           <div class="order-hero-main">
             <span class="status-badge ${statusBadge[order.status] || ""}">${escapeHtml(statusLabel[order.status] || order.status)}</span>
-            <div class="order-hero-id">Order <code>${escapeHtml(order.id)}</code></div>
+            <div class="order-hero-amount">${formatRupiah(order.amount_idr)}</div>
+            <div class="order-hero-id">${escapeHtml(order.package_name)} · Order <code>${escapeHtml(order.id)}</code></div>
           </div>
           ${heroAction ? `<div class="order-hero-action">${heroAction}</div>` : ""}
         </div>
@@ -1905,13 +1911,14 @@
         <div class="order-section">
           <h3 class="order-section-title">Pembeli &amp; Paket</h3>
           <div class="order-fields">
-            <div class="order-field"><span class="order-field-label">Member</span><span class="order-field-value">${escapeHtml(order.member_email || "—")}</span></div>
-            <div class="order-field"><span class="order-field-label">Kuota paket</span><span class="order-field-value">${formatNumber(order.quota_hits)} hit · ${formatNumber(order.rate_limit_per_minute)}/mnt · ${formatNumber(order.valid_days)} hari</span></div>
+            <div class="order-field"><span class="order-field-label">Member</span><span class="order-field-value"><strong>${escapeHtml(order.member_name || order.member_email || "—")}</strong>${order.member_name && order.member_email ? `<span class="cell-sub">${escapeHtml(order.member_email)}</span>` : ""}</span></div>
+            <div class="order-field"><span class="order-field-label">Kuota paket</span><span class="order-field-value">${formatNumber(order.quota_hits)} hit${order.game_hits ? ` · ${formatNumber(order.game_hits)} cek ID game` : ""} · ${formatNumber(order.rate_limit_per_minute)}/mnt · ${formatNumber(order.valid_days)} hari</span></div>
           </div>
         </div>
         <div class="order-section">
           <h3 class="order-section-title">Pembayaran</h3>
           <div class="order-fields">
+            <div class="order-field"><span class="order-field-label">Dibuat</span><span class="order-field-value">${escapeHtml(formatDate(order.created_at))}</span></div>
             <div class="order-field span-2"><span class="order-field-label">Token QRIS</span><span class="order-field-value mono">${escapeHtml(order.qris_token || "—")}</span></div>
             <div class="order-field"><span class="order-field-label">QR berlaku s/d</span><span class="order-field-value">${order.qris_expires_at ? escapeHtml(formatDate(order.qris_expires_at)) : "—"}</span></div>
             <div class="order-field"><span class="order-field-label">Dibayar</span><span class="order-field-value">${order.paid_at ? escapeHtml(formatDate(order.paid_at)) : "—"}</span></div>
@@ -1920,7 +1927,7 @@
             <div class="order-field"><span class="order-field-label">Total refund tercatat</span><span class="order-field-value">${formatRupiah(refundTotal)}</span></div>
           </div>
         </div>`;
-      $("#order-detail").hidden = false;
+      setActiveView("order-detail");
       // AREA 3: form refund-record untuk order yang pernah lunas.
       // K23: gerbang server kini status paid/granted ATAU paid_at —
       // form ditampilkan untuk ketiganya (server tetap menolak yang
@@ -1971,6 +1978,185 @@
       }
     } catch (error) {
       handleApiError(error);
+    }
+  }
+
+  // Invoice JPG untuk member (2026-11-12): digambar di canvas, tanpa
+  // dependensi luar. HANYA data member-facing: nama/email member,
+  // paket, nominal, status, tanggal bayar. Token QRIS, mutation_ref,
+  // last_error, dan material internal TIDAK PERNAH masuk invoice.
+  async function downloadOrderInvoice() {
+    const order = state.orderDetail;
+    const button = $("#order-invoice-btn");
+    if (!order) return;
+    const shortId = String(order.id).slice(0, 8).toUpperCase();
+    const pill = {
+      waiting_payment: { bg: "#fffbeb", fg: "#b45309", text: "MENUNGGU BAYAR" },
+      paid: { bg: "#ecfdf5", fg: "#047857", text: "LUNAS" },
+      granted: { bg: "#ecfdf5", fg: "#047857", text: "LUNAS" },
+      expired: { bg: "#fff1f2", fg: "#e11d48", text: "KEDALUWARSA" },
+      canceled: { bg: "#fff1f2", fg: "#e11d48", text: "DIBATALKAN" },
+      needs_review: { bg: "#fffbeb", fg: "#b45309", text: "PERLU TINJAUAN" },
+    }[order.status] || { bg: "#f1f5f9", fg: "#64748b", text: String(order.status).toUpperCase() };
+    if (button) { button.disabled = true; button.textContent = "Membuat invoice…"; }
+    try {
+      // Font panel (Plus Jakarta Sans + JetBrains Mono) supaya hasil
+      // JPG sama dengan tampilan panel; gagal load = fallback sistem.
+      try {
+        await Promise.all([
+          document.fonts.load('800 40px "Plus Jakarta Sans"'),
+          document.fonts.load('700 30px "Plus Jakarta Sans"'),
+          document.fonts.load('600 20px "JetBrains Mono"'),
+        ]);
+        await document.fonts.ready;
+      } catch (_) { /* pakai fallback */ }
+      const W = 1080, PAD = 64, RIGHT = W - PAD;
+      const canvas = document.createElement("canvas");
+      canvas.width = W; canvas.height = 1300;
+      const ctx = canvas.getContext("2d");
+      const INK = "#0f172a", MUTED = "#64748b";
+      const LINE = "#e2e8f0", BRAND = "#059669", BRAND_DARK = "#065f46";
+      const SANS = '"Plus Jakarta Sans", system-ui, sans-serif';
+      const MONO = '"JetBrains Mono", ui-monospace, monospace';
+      const rr = (x, y, w, h, r) => {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.arcTo(x + w, y, x + w, y + h, r);
+        ctx.arcTo(x + w, y + h, x, y + h, r);
+        ctx.arcTo(x, y + h, x, y, r);
+        ctx.arcTo(x, y, x + w, y, r);
+        ctx.closePath();
+      };
+      const wrap = (text, font, maxWidth) => {
+        ctx.font = font;
+        const words = String(text).split(/\s+/).filter(Boolean);
+        const lines = [];
+        let line = "";
+        for (const word of words) {
+          const next = line ? `${line} ${word}` : word;
+          if (ctx.measureText(next).width <= maxWidth || !line) line = next;
+          else { lines.push(line); line = word; }
+        }
+        if (line) lines.push(line);
+        return lines.length ? lines : [""];
+      };
+      const hairline = (y) => {
+        ctx.strokeStyle = LINE; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(PAD, y); ctx.lineTo(RIGHT, y); ctx.stroke();
+      };
+      // Latar + bar merek.
+      ctx.fillStyle = "#fdfcfa"; ctx.fillRect(0, 0, W, canvas.height);
+      ctx.fillStyle = BRAND; ctx.fillRect(0, 0, W, 10);
+      // Header: wordmark kiri, INVOICE + nomor kanan.
+      ctx.textBaseline = "alphabetic";
+      ctx.fillStyle = BRAND_DARK; ctx.font = `800 42px ${SANS}`; ctx.textAlign = "left";
+      ctx.fillText("RAJACEK", PAD, 78);
+      ctx.fillStyle = INK; ctx.font = `800 32px ${SANS}`; ctx.textAlign = "right";
+      ctx.fillText("INVOICE", RIGHT, 76);
+      ctx.fillStyle = MUTED; ctx.font = `600 20px ${MONO}`;
+      ctx.fillText(`INV-${shortId}`, RIGHT, 110);
+      hairline(140);
+      // Ditagihkan kepada (kiri) + tanggal/status (kanan).
+      let y = 196;
+      ctx.textAlign = "left"; ctx.fillStyle = MUTED; ctx.font = `700 15px ${SANS}`;
+      ctx.fillText("DITAGIHKAN KEPADA", PAD, y);
+      ctx.fillStyle = MUTED; ctx.font = `700 15px ${SANS}`; ctx.textAlign = "right";
+      ctx.fillText("TANGGAL", RIGHT, y);
+      y += 40;
+      const nameLines = wrap(order.member_name || order.member_email || "—", `700 30px ${SANS}`, 560);
+      ctx.fillStyle = INK; ctx.font = `700 30px ${SANS}`; ctx.textAlign = "left";
+      nameLines.slice(0, 2).forEach((line, i) => ctx.fillText(line, PAD, y + i * 38));
+      ctx.fillStyle = INK; ctx.font = `600 20px ${SANS}`; ctx.textAlign = "right";
+      ctx.fillText(formatDate(order.created_at), RIGHT, y);
+      y += nameLines.length > 1 ? 76 : 38;
+      if (order.member_name && order.member_email) {
+        ctx.fillStyle = MUTED; ctx.font = `400 20px ${SANS}`; ctx.textAlign = "left";
+        ctx.fillText(order.member_email, PAD, y);
+      }
+      y += 46;
+      ctx.fillStyle = MUTED; ctx.font = `700 15px ${SANS}`; ctx.textAlign = "right";
+      ctx.fillText("STATUS", RIGHT, y - 8);
+      ctx.font = `700 17px ${SANS}`;
+      const pillW = ctx.measureText(pill.text).width + 32;
+      rr(RIGHT - pillW, y + 8, pillW, 36, 18);
+      ctx.fillStyle = pill.bg; ctx.fill();
+      ctx.fillStyle = pill.fg; ctx.textAlign = "center";
+      ctx.fillText(pill.text, RIGHT - pillW / 2, y + 32);
+      y += 78;
+      hairline(y); y += 44;
+      // Tabel item.
+      rr(PAD, y, W - PAD * 2, 52, 12);
+      ctx.fillStyle = "#f1f5f9"; ctx.fill();
+      ctx.fillStyle = MUTED; ctx.font = `700 16px ${SANS}`; ctx.textAlign = "left";
+      ctx.fillText("DESKRIPSI", PAD + 24, y + 33);
+      ctx.textAlign = "right";
+      ctx.fillText("JUMLAH", RIGHT - 24, y + 33);
+      y += 52;
+      const pkgLines = wrap(order.package_name, `700 26px ${SANS}`, 640);
+      const rowTop = y + 34;
+      ctx.fillStyle = INK; ctx.font = `700 26px ${SANS}`; ctx.textAlign = "left";
+      pkgLines.slice(0, 2).forEach((line, i) => ctx.fillText(line, PAD + 24, rowTop + i * 34));
+      const sub = `${formatNumber(order.quota_hits)} hit${order.game_hits ? ` · ${formatNumber(order.game_hits)} cek ID game` : ""} · ${formatNumber(order.rate_limit_per_minute)}/mnt · ${formatNumber(order.valid_days)} hari`;
+      ctx.fillStyle = MUTED; ctx.font = `400 19px ${SANS}`;
+      ctx.fillText(sub, PAD + 24, rowTop + pkgLines.length * 34 + 6);
+      ctx.fillStyle = INK; ctx.font = `700 26px ${SANS}`; ctx.textAlign = "right";
+      ctx.fillText(formatRupiah(order.amount_idr), RIGHT - 24, rowTop);
+      y += 52 + pkgLines.length * 34 + 52;
+      hairline(y); y += 56;
+      // Total.
+      ctx.fillStyle = MUTED; ctx.font = `700 18px ${SANS}`; ctx.textAlign = "left";
+      ctx.fillText("TOTAL", PAD + 24, y);
+      ctx.fillStyle = BRAND_DARK; ctx.font = `800 38px ${SANS}`; ctx.textAlign = "right";
+      ctx.fillText(formatRupiah(order.amount_idr), RIGHT - 24, y + 2);
+      y += 84;
+      // Kartu pembayaran.
+      const cardH = 196;
+      rr(PAD, y, W - PAD * 2, cardH, 16);
+      ctx.fillStyle = "#f8fafc"; ctx.fill();
+      ctx.strokeStyle = LINE; ctx.lineWidth = 1; ctx.stroke();
+      let cy = y + 40;
+      ctx.fillStyle = MUTED; ctx.font = `700 15px ${SANS}`; ctx.textAlign = "left";
+      ctx.fillText("PEMBAYARAN", PAD + 24, cy);
+      cy += 44;
+      const payRows = [
+        ["Metode", "QRIS"],
+        ["Dibayar", order.paid_at ? formatDate(order.paid_at) : "Belum dibayar"],
+        ["Masa aktif paket", order.granted_expires_at ? `s/d ${formatDate(order.granted_expires_at)}` : "—"],
+      ];
+      for (const [label, value] of payRows) {
+        ctx.fillStyle = MUTED; ctx.font = `400 19px ${SANS}`; ctx.textAlign = "left";
+        ctx.fillText(label, PAD + 24, cy);
+        ctx.fillStyle = INK; ctx.font = `600 19px ${SANS}`; ctx.textAlign = "right";
+        ctx.fillText(value, RIGHT - 24, cy);
+        cy += 38;
+      }
+      y += cardH + 48;
+      hairline(y); y += 44;
+      // Footer.
+      ctx.fillStyle = INK; ctx.font = `600 21px ${SANS}`; ctx.textAlign = "left";
+      ctx.fillText("Terima kasih atas pembelian Anda.", PAD, y);
+      y += 34;
+      ctx.fillStyle = MUTED; ctx.font = `400 17px ${SANS}`;
+      const footLines = wrap("rajacek.com — Invoice ini diterbitkan otomatis oleh Rajacek dan merupakan bukti pembayaran yang sah.", `400 17px ${SANS}`, W - PAD * 2);
+      footLines.forEach((line) => { ctx.fillText(line, PAD, y); y += 26; });
+      // Unduh JPG.
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.92));
+      if (!blob) throw new Error("Invoice tidak dapat dibuat.");
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Invoice-Rajacek-${shortId}.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (error) {
+      if (button) button.textContent = "Gagal — coba lagi";
+      setTimeout(() => { if (button) button.textContent = "Download Invoice (JPG)"; }, 2500);
+      throw error;
+    } finally {
+      if (button) button.disabled = false;
+      if (button && button.textContent === "Membuat invoice…") button.textContent = "Download Invoice (JPG)";
     }
   }
 
@@ -3201,7 +3387,8 @@
       state.ordersPage.offset += state.ordersPage.limit;
       loadOrders().catch(handleApiError);
     });
-    $("#order-detail-close")?.addEventListener("click", () => { $("#order-detail").hidden = true; });
+    $("#order-detail-back")?.addEventListener("click", () => { setActiveView("orders"); });
+    $("#order-invoice-btn")?.addEventListener("click", () => { downloadOrderInvoice().catch(() => {}); });
     $("#qris-form")?.addEventListener("submit", async (event) => {
       event.preventDefault();
       const body = {

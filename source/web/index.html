@@ -10,7 +10,7 @@
     <meta name="theme-color" content="#F8FAFC" />
     <title>Rajacek Console — Pusat Kendali API</title>
     <link rel="icon" href="/favicon.png?v=20261028-1" />
-    <link rel="stylesheet" href="/styles.css?v=20261108-3" />
+    <link rel="stylesheet" href="/styles.css?v=20261112-1" />
     <style>
       /* Gerbang login: shell admin tidak tampil sama sekali sampai sesi
          admin terverifikasi (kelas auth-ok ditambahkan app.js). */
@@ -384,7 +384,11 @@
             <div class="table-scroll"><table><thead><tr><th>Waktu</th><th>Member</th><th>Paket</th><th>Nominal</th><th>Status</th><th></th></tr></thead><tbody id="orders-table"></tbody></table></div>
             <div class="form-actions full-width"><button class="button button-secondary" id="orders-prev" type="button">← Sebelumnya</button><span id="orders-page-info" class="tester-audit-note"></span><button class="button button-secondary" id="orders-next" type="button">Berikutnya →</button></div>
             <p id="orders-empty" class="tester-audit-note" hidden>Belum ada order QRIS.</p></article>
-            <article class="panel" id="order-detail" hidden><div class="panel-heading"><div><span class="section-kicker">Detail order</span><h2 id="order-detail-title">—</h2></div><button class="button button-secondary" id="order-detail-close" type="button">Tutup</button></div><div id="order-detail-body"></div></article>
+          </section>
+
+          <section class="view" id="view-order-detail" aria-labelledby="order-detail-title">
+            <div class="page-heading heading-row"><div><div class="eyebrow">Order QRIS · <span id="order-detail-crumb">—</span></div><h1 id="order-detail-title">—</h1><p id="order-detail-sub">—</p></div><button class="button button-secondary" id="order-detail-back" type="button">← Kembali ke Order QRIS</button></div>
+            <article class="panel" id="order-detail"><div class="panel-heading"><div><span class="section-kicker">Detail order</span><h2>Ringkasan order</h2></div><button class="button button-primary" id="order-invoice-btn" type="button">Download Invoice (JPG)</button></div><div id="order-detail-body"></div></article>
           </section>
 
           <section class="view" id="view-settings" aria-labelledby="settings-heading">
@@ -478,6 +482,6 @@
     </section>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
-    <script src="/app.js?v=20261108-4" defer></script>
+    <script src="/app.js?v=20261112-1" defer></script>
   </body>
 </html>

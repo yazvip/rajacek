@@ -747,3 +747,64 @@ Restore dari ZIP ini:
   styles.css?v=20261108-3); backup
   /opt/rajacek/backup-20261108-detailpremium/ (web/); md5 live
   cocok; panel lokal+publik 200.
+
+## §18 — Detail Order QRIS jadi halaman sendiri + Download Invoice JPG (12 Nov 2026)
+
+- Perintah user: "Di page order qris admin, bagian detail tampil page
+  sendiri, tampilan ui ux layout premium dan ada button download
+  Invoice (jpg yang cocok untuk member invoicenya) buat sangat premium".
+- Detail order sebelumnya panel inline di bawah daftar (article
+  #order-detail hidden di view-orders). Kini view sendiri
+  `view-order-detail` (pola detail member): breadcrumb "Detail Order",
+  tombol "← Kembali ke Order QRIS" (kembali memuat ulang daftar via
+  setActiveView("orders") → loadOrders), hero nominal besar Rp + badge
+  status + nama paket + id order, seksi Pembeli & Paket dan Pembayaran
+  (grid 2 kolom ≥640px), form refund-record tidak berubah.
+- Backend (full deploy, tanpa migrasi): `AdminOrderView.member_name`
+  baru — `COALESCE(NULLIF(m.name, ''), m.email)` lewat JOIN members
+  yang sudah ada di `get_order_admin` (pola sama seperti member_name
+  riwayat §16); `#[sqlx(default)]` agar query daftar yang tak
+  memilihnya tetap jalan. Fixture tes disesuaikan (qris.rs,
+  api.rs). Detail panel kini tampil nama member tebal + email di
+  bawahnya; baris Kuota paket ikut menampilkan cek ID game bila > 0;
+  baris Dibuat ditambahkan.
+- Download Invoice (JPG): tombol di heading panel ("Download Invoice
+  (JPG)"), digambar di canvas 1080×1300 tanpa dependensi luar —
+  bar merek hijau, wordmark RAJACEK, nomor INV-<8 char id>, pill
+  status (LUNAS / MENUNGGU BAYAR / KEDALUWARSA / DIBATALKAN / PERLU
+  TINJAUAN), Ditagihkan kepada (nama + email), tabel item paket +
+  subline kuota, TOTAL besar hijau, kartu Pembayaran (QRIS, Dibayar,
+  Masa aktif paket), footer terima kasih + rajacek.com. HANYA data
+  member-facing: token QRIS, mutation_ref, last_error, dan material
+  internal TIDAK PERNAH masuk invoice. Nama file
+  `Invoice-Rajacek-<SHORTID>.jpg`, JPEG q0.92.
+- TEMUAN saat verifikasi (pra-deploy, diperbaiki di deploy ini):
+  (1) Komentar header `/* ====` di styles.css TAK TERTUTUP —
+  menelan 10 aturan di bawahnya (display:block label/nilai,
+  gaya label kapital, spacing refund) sejak lama; label & nilai
+  tampil sebaris menempel. (2) Header "PERAPIAN SPASI" kehilangan
+  baris pembuka `/*` — teks mentah yang diabaikan browser.
+  Keduanya diperbaiki; scan komentar kini seimbang (0 tak
+  tertutup, 0 stray). (3) Badge hero melebar penuh (flex-column
+  stretch) → `align-self: flex-start`.
+- INSIDEN deploy: file web hasil scp mendarat root:root 640
+  (service jalan sebagai user rajacek) → /jawatengah123 +
+  app.js/styles.css 404 sesaat setelah swap; diperbaiki dengan
+  `chmod 644` ketiga file → panel 200. Pelajaran: SETIAP deploy
+  web WAJIB ditutup chmod 644 (atau chown ke user service) +
+  verifikasi curl per aset berversi — health 200 TIDAK menangkap
+  ini. Gate tree mentah (md5) sempat mengecoh: 11 file .rs
+  "beda" padahal isinya identik — tree live campuran CRLF/LF;
+  bandingkan isi ternormalisasi (strip CR), bukan md5 mentah.
+- Verifikasi: cargo test 410 passed; node --check; Playwright mock
+  (sesi admin + 1 order granted): 1280px + 390px overflowX=0,
+  judul/nominal/nama/email/game/dibuat tampil, tombol invoice ada,
+  unduhan JPG valid (magic FF D8 FF, 89.816 byte, nama
+  Invoice-Rajacek-0199A5A5.jpg), tombol Kembali pulang ke daftar.
+  Render live dengan data nyata hanya bisa dicek dari HP user.
+- Deploy 12 Nov 2026: binary api 5a5f70c1… (20.882.048 byte),
+  worker 9595f9b0… (11.153.456 byte); aset panel
+  ?v=20261112-1; backup /opt/rajacek/backup-20261112-orderdetail/
+  (bin + dump + tree + .env); swap worker→API, NRestarts=0,
+  health lokal+publik 200, journal 0 error; md5 tree produksi
+  cocok (qris.rs, api.rs, web 3 file).
