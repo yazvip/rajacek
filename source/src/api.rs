@@ -2622,6 +2622,7 @@ pub(crate) async fn execute_validation(
         // konversi admin mengubah None ini menjadi null — sesuai
         // spesifikasi (lookup gagal -> null, bukan error).
         member_code: None,
+        member_name: None,
         product: usage_event.product,
         outcome: usage_event.status.as_str().to_owned(),
         target_masked: usage_event.target_masked.clone(),
@@ -9155,6 +9156,7 @@ mod site_status_tests {
             outcome: "valid".to_owned(),
             target_masked: "123****890".to_owned(),
             member_code: None,
+            member_name: None,
             target_raw: Some("1234567890".to_owned()),
             account_name: Some("NAMA UJI".to_owned()),
             provider_endpoint_name: None,
@@ -9260,6 +9262,7 @@ mod admin_export_tests {
             request_id: request_id.to_owned(),
             api_key_prefix: prefix.to_owned(),
             member_code: None,
+            member_name: None,
             product: crate::models::ValidationProduct::BankAccount,
             outcome: outcome.to_owned(),
             target_masked: "***1234".to_owned(),

@@ -382,6 +382,14 @@ pub struct ValidationHistoryItem {
     /// `target_raw` / `account_name` below.
     #[serde(skip_serializing)]
     pub member_code: Option<String>,
+    /// Nama member penampil (admin-only, di-resolve dari `members`
+    /// lewat JOIN di validation_history_from_db: nama bila ada, bila
+    /// kosong memakai email — pola sama dengan daftar member panel
+    /// (`member.name || member.email`). None bila kunci tak terhubung
+    /// ke member atau jalur memori. Never serialized from this struct:
+    /// same pattern as `member_code` above.
+    #[serde(skip_serializing)]
+    pub member_name: Option<String>,
     /// Raw target, admin history only. None for rows recorded before
     /// migration 0024.
     #[serde(skip_serializing)]
@@ -450,6 +458,9 @@ pub struct AdminValidationHistoryItem {
     /// Admin-only member code resolved via the key prefix (see
     /// `ValidationHistoryItem::member_code`); null when unresolvable.
     pub member_code: Option<String>,
+    /// Admin-only member display name (see
+    /// `ValidationHistoryItem::member_name`); null when unresolvable.
+    pub member_name: Option<String>,
     pub product: ValidationProduct,
     pub outcome: String,
     pub target_masked: String,
@@ -474,6 +485,7 @@ impl From<&ValidationHistoryItem> for AdminValidationHistoryItem {
             request_id: item.request_id.clone(),
             api_key_prefix: item.api_key_prefix.clone(),
             member_code: item.member_code.clone(),
+            member_name: item.member_name.clone(),
             product: item.product,
             outcome: item.outcome.clone(),
             target_masked: item.target_masked.clone(),
@@ -2013,6 +2025,7 @@ mod history_filter_tests {
             request_id: "test".to_owned(),
             api_key_prefix: prefix.to_owned(),
             member_code: None,
+            member_name: None,
             product: ValidationProduct::BankAccount,
             outcome: "valid".to_owned(),
             target_masked: String::new(),
@@ -2133,6 +2146,7 @@ mod admin_history_fields_tests {
             request_id: "R9".to_owned(),
             api_key_prefix: "rv_live_x".to_owned(),
             member_code: Some("RC000042".to_owned()),
+            member_name: Some("Member Uji".to_owned()),
             product: ValidationProduct::BankAccount,
             outcome: "valid".to_owned(),
             target_masked: "***7890".to_owned(),
@@ -2214,16 +2228,21 @@ mod admin_history_fields_tests {
         // bukan error — konversi From tidak pernah gagal.
         let resolved = AdminValidationHistoryItem::from(&history_item_with_raw());
         assert_eq!(resolved.member_code.as_deref(), Some("RC000042"));
+        assert_eq!(resolved.member_name.as_deref(), Some("Member Uji"));
         let serialized = serde_json::to_string(&resolved).expect("serialize");
         assert!(serialized.contains("\"member_code\":\"RC000042\""));
+        assert!(serialized.contains("\"member_name\":\"Member Uji\""));
         assert!(serialized.contains("\"api_key_prefix\":\"rv_live_x\""));
 
         let mut unresolved = history_item_with_raw();
         unresolved.member_code = None;
+        unresolved.member_name = None;
         let admin = AdminValidationHistoryItem::from(&unresolved);
         assert_eq!(admin.member_code, None);
+        assert_eq!(admin.member_name, None);
         let serialized = serde_json::to_string(&admin).expect("serialize");
         assert!(serialized.contains("\"member_code\":null"));
+        assert!(serialized.contains("\"member_name\":null"));
         assert!(serialized.contains("\"api_key_prefix\":\"rv_live_x\""));
     }
 

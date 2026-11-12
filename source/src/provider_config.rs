@@ -791,11 +791,12 @@ impl ProviderConfigStore {
             occurred_at: chrono::NaiveDateTime,
             channel: String,
             member_code: Option<String>,
+            member_name: Option<String>,
             provider_endpoint_name: Option<String>,
         }
         let mut rows_builder = apply_filters(
             sqlx::QueryBuilder::new(
-                "SELECT vr.request_id, vr.api_key_prefix, vr.product_code, vr.outcome, vr.target_masked, vr.target_raw, vr.account_name, vr.provider_reference, vr.provider_hint, vr.provider_latency_ms, vr.rajacek_processing_ms, vr.total_latency_ms, vr.attempts, vr.occurred_at, vr.channel, m.member_code, te.name AS provider_endpoint_name FROM validation_requests vr LEFT JOIN admin_api_keys k ON k.prefix = vr.api_key_prefix LEFT JOIN members m ON m.id = k.member_id LEFT JOIN third_party_endpoints te ON te.id = vr.provider_endpoint_id WHERE 1 = 1",
+                "SELECT vr.request_id, vr.api_key_prefix, vr.product_code, vr.outcome, vr.target_masked, vr.target_raw, vr.account_name, vr.provider_reference, vr.provider_hint, vr.provider_latency_ms, vr.rajacek_processing_ms, vr.total_latency_ms, vr.attempts, vr.occurred_at, vr.channel, m.member_code, COALESCE(NULLIF(m.name, ''), m.email) AS member_name, te.name AS provider_endpoint_name FROM validation_requests vr LEFT JOIN admin_api_keys k ON k.prefix = vr.api_key_prefix LEFT JOIN members m ON m.id = k.member_id LEFT JOIN third_party_endpoints te ON te.id = vr.provider_endpoint_id WHERE 1 = 1",
             ),
             filters,
         );
@@ -822,6 +823,7 @@ impl ProviderConfigStore {
                         request_id: row.request_id,
                         api_key_prefix: row.api_key_prefix,
                         member_code: row.member_code,
+                        member_name: row.member_name,
                         product,
                         outcome: row.outcome,
                         target_masked: row.target_masked,

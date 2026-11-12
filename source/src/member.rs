@@ -2540,6 +2540,7 @@ mod member_history_no_raw_fields_tests {
             request_id: "R9".to_owned(),
             api_key_prefix: "rv_live_x".to_owned(),
             member_code: Some("RC000001".to_owned()),
+            member_name: None,
             product: ValidationProduct::BankAccount,
             outcome: "valid".to_owned(),
             target_masked: "***7890".to_owned(),

@@ -1306,7 +1306,8 @@
       const target = item.target_raw != null && item.target_raw !== "" ? item.target_raw : item.target_masked;
       const hasName = item.account_name != null && item.account_name !== "";
       const requestShort = String(item.request_id).length <= 12 ? String(item.request_id) : String(item.request_id).slice(0, 8) + "…";
-      const memberCode = item.member_code ? escapeHtml(item.member_code) : "Tanpa member";
+      const memberMain = item.member_name ? escapeHtml(item.member_name) : (item.member_code ? escapeHtml(item.member_code) : "Tanpa member");
+      const memberSub = [item.member_name && item.member_code ? escapeHtml(item.member_code) : null, `<code>${escapeHtml(item.api_key_prefix)}</code>`].filter(Boolean).join(" ");
       return `<article class="history-card">
       <header class="history-card-head">
         <span class="status-badge ${escapeHtml(item.outcome)}">${escapeHtml(outcomeLabel[item.outcome] || item.outcome)}</span>
@@ -1315,7 +1316,7 @@
       </header>
       ${hasName ? `<div class="history-card-name">${escapeHtml(item.account_name)}</div><div class="history-card-target"><code>${escapeHtml(target)}</code></div>` : `<div class="history-card-name is-target"><code>${escapeHtml(target)}</code></div>`}
       <dl class="history-card-meta">
-        <div><dt>Member</dt><dd><strong>${memberCode}</strong> <code>${escapeHtml(item.api_key_prefix)}</code></dd></div>
+        <div><dt>Member</dt><dd><strong>${memberMain}</strong><span class="cell-sub">${memberSub}</span></dd></div>
         <div><dt>Latensi</dt><dd>${latencyCell(item)}</dd></div>
       </dl>
       <footer class="history-card-foot">
@@ -1359,7 +1360,7 @@
     }
     $("#history-detail-body").innerHTML =
       testerRow("Waktu", occurred.full)
-      + testerRow("Member", `${item.member_code || "—"} (${item.api_key_prefix})`)
+      + testerRow("Member", item.member_name ? `${item.member_name}${item.member_code ? ` · ${item.member_code}` : ""} (${item.api_key_prefix})` : `${item.member_code || "—"} (${item.api_key_prefix})`)
       + testerRow("Produk", productLabel(item.product))
       + historyHintRow(item)
       + testerRow("Target", target)

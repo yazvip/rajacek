@@ -691,3 +691,31 @@ Restore dari ZIP ini:
 - Deploy 8 Nov 2026: panel-only (app.js/styles.css/index.html);
   versi aset 20261108-2; backup /opt/rajacek/backup-20261108-histcards/
   (web/); md5 live cocok; panel lokal+publik 200.
+
+## 16. NAMA MEMBER DI KARTU RIWAYAT CEK (LIVE 2026-11-08)
+- Koreksi user 8 Nov 2026: "Nama member bukan id member." Kartu
+  §15 menampilkan kode RC sebagai label utama member — user mau
+  NAMA orang member.
+- Backend (tanpa migrasi DB): field baru `member_name` di
+  `ValidationHistoryItem` (skip_serializing — TIDAK bocor ke
+  endpoint member) + `AdminValidationHistoryItem`; di-resolve di
+  query yang sama lewat JOIN yang sudah ada
+  (`validation_requests → admin_api_keys → members`):
+  `COALESCE(NULLIF(m.name, ''), m.email)` — pola sama dengan daftar
+  member panel (`name || email`). Jalur memori: null (tanpa peta
+  prefix → member). Panel: kartu menampilkan nama tebal + kode +
+  prefix kecil di bawahnya; bila nama null → kode (seperti dulu);
+  bila keduanya null → "Tanpa member". Baris Member di popup detail
+  ikut memakai nama. Tidak ada perubahan kontrak lain.
+- Verifikasi: tes penuh 410 passed (termasuk tes baru: nama ikut
+  di serialisasi admin + null dipertahankan); cek SQL live read-only
+  pra-deploy: 33.567 baris 7 hari terakhir SEMUANYA ter-resolve ke
+  nama (0 fallback ke email); Playwright 390px + 1280px
+  (overflowX=0). Render live dengan data nyata hanya bisa dicek
+  dari HP user (butuh login admin).
+- Deploy 8 Nov 2026: binary api `f513d683…` / worker `f14b1956…`;
+  panel app.js?v=20261108-3; backup
+  `/opt/rajacek/backup-20261108-membername/`; tree produksi di-sync
+  penuh (4 file .rs + 2 file web, md5 cocok — catatan: sync .rs
+  sempat tertinggal dari langkah verifikasi, ketahuan + diperbaiki
+  dalam deploy yang sama, lihat AGENTS.md).
