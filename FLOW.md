@@ -719,3 +719,31 @@ Restore dari ZIP ini:
   penuh (4 file .rs + 2 file web, md5 cocok — catatan: sync .rs
   sempat tertinggal dari langkah verifikasi, ketahuan + diperbaiki
   dalam deploy yang sama, lihat AGENTS.md).
+
+## 17. KARTU HANYA NAMA MEMBER + DETAIL PREMIUM (LIVE 2026-11-08)
+- Perintah user 8 Nov 2026: "Kode member dan prefix gak usah
+  tampilkan di card, kecuali di detail tetap ada, bagian detail
+  buat premium rapi juga."
+- Kartu: baris Member kini hanya nama (bila nama null + kode ada →
+  "Tanpa nama"; bila keduanya null → "Tanpa member"); kode RC +
+  prefix HILANG dari kartu, tetap ada di baris Member popup
+  detail ("Nama · RC000001 (rv_live_...)").
+- Detail: modal Detail validasi dirombak premium — kartu putih
+  ber-border (radius token tema), label kapital kecil abu-abu,
+  nilai 14px semibold, pembatas hairline antar baris; baris Hasil
+  kini badge warna (bukan teks polos). Tab Detail/Logs tak berubah.
+- CATATAN KEJUJURAN: saat patch kartu §15, aturan CSS
+  #history-detail-body lama ikut terhapus dalam blok CSS tabel yang
+  dibuang (115 baris) — sejak deploy §15 modal detail tampil tanpa
+  gaya (daftar polos bawaan browser). Ketahuan saat mengerjakan
+  tugas ini (grep live = 0 aturan); diperbaiki + ditingkatkan
+  di deploy ini. Pelajaran: saat menghapus blok CSS besar, grep
+  selektor non-tabel yang terselip di dalamnya sebelum commit.
+- Verifikasi: node --check app.js; harness render kartu (nama ada,
+  kode/prefix TIDAK ada di HTML kartu); Playwright 390px modal
+  detail (overflowX=0). Render live dengan data nyata hanya bisa
+  dicek dari HP user (butuh login admin).
+- Deploy 8 Nov 2026: panel-only (app.js?v=20261108-4,
+  styles.css?v=20261108-3); backup
+  /opt/rajacek/backup-20261108-detailpremium/ (web/); md5 live
+  cocok; panel lokal+publik 200.

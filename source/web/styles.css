@@ -2019,6 +2019,21 @@ td.empty-state { display: table-cell; }
 .history-card-req { min-width: 0; font-family: 'JetBrains Mono', monospace; font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
 
 /* ------------------------------------------------------------------
+   Detail validasi riwayat (modal #history-detail-modal) — kartu
+   premium (2026-11-08). Menggantikan aturan lama yang terhapus tak
+   sengaja saat patch kartu riwayat §15 (aturan #history-detail-body
+   ikut terbuang dalam blok CSS tabel yang dihapus — sejak itu modal
+   detail tampil tanpa gaya). Kartu putih ber-border + label kapital
+   kecil + nilai 14px; baris Hasil memakai badge (dirender di app.js).
+   Tab Detail/Logs tidak berubah. */
+#history-detail-body { display: grid; gap: 0; margin: 18px 0 0; padding: 4px 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); }
+#history-detail-body > div { padding: 12px 0; border-bottom: 1px solid var(--line-soft); }
+#history-detail-body > div:last-child { border-bottom: 0; }
+#history-detail-body dt { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+#history-detail-body dd { margin: 4px 0 0; font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+#history-detail-body dd code { overflow-wrap: anywhere; }
+
+/* ------------------------------------------------------------------
    Kartu Kunci API di HP (2026-10-26, ≤767px) — SCOPED HANYA ke tabel
    Kunci API (#view-api-keys #api-key-table). Pola sama seperti kartu
    riwayat: thead disembunyikan; tiap <tr> jadi kartu putih; tiap <td>
