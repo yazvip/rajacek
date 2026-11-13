@@ -54,8 +54,26 @@ impl UsageEventSink for RedisStreamEventSink {
             AppError::internal("Event penggunaan tidak dapat disiapkan")
         })?;
         let mut connection = self.connection.clone();
+        // B14 (audit 2026-10-25): stream TIDAK PERNAH dipangkas sebelumnya dan
+        // Redis berjalan dengan maxmemory-policy noeviction, jadi stream yang
+        // tumbuh tanpa batas akan menjadi outage total validasi berbayar saat
+        // Redis penuh (XADD gagal -> enqueue 503). MAXLEN ~ (approximate)
+        // memangkas dari ujung lama dengan murah (tanpa pemindaian penuh)
+        // setiap kali entri baru ditambahkan.
+        //
+        // Retensi diputuskan user 13 Nov 2026: 20.000 entri terakhir.
+        // Saat itu stream sudah 145.465 entri / 239 MB (~1,6 KB/entri) dan
+        // 94% dataset Redis ada di swap; XTRIM manual ke 20.000 membebaskan
+        // ~195 MB. Retensi 20.000 entri ~= 32 MB dan ~= 2 hari pada laju
+        // ~10.000 entri/hari — jauh melampaui jendela reclaim worker (pesan
+        // idle 5 menit) ditambah waktu investigasi. JANGAN ubah
+        // maxmemory-policy ke eviction: eviction bisa menghapus PEL,
+        // rate-limit, atau kunci idempotensi.
         redis::cmd("XADD")
             .arg(&self.stream_name)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(20_000)
             .arg("*")
             .arg("event_id")
             .arg(event.event_id.to_string())
